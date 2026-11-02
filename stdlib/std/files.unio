@@ -17,6 +17,7 @@ public enum IoErrorKind:
     AlreadyExists
     InvalidData
     Unsupported
+    DurabilityUnconfirmed
     Other
 
 public error IoError:
@@ -52,45 +53,241 @@ public function write_text(path as Path, text as Text, durable as Bool = false) 
         try file.write(text)
         try file.commit()
 
+## The progress of an atomic file. Each step of commit records its result before the next step
+## starts, so release and a repeated commit know exactly what the file still owns.
+public enum AtomicState:
+    ## The descriptor is open; the temporary file holds what was written so far.
+    Writing
+    ## The data is synced and the descriptor is released; the temporary file still exists.
+    Closed
+    ## The temporary file has replaced the target; the directory is not synced (yet).
+    Replaced
+    ## The directory is synced too: the replacement survives power loss.
+    Durable
+
+## The system operations of an atomic file. They are values so that tests can make any step fail.
+## Contract of close: the descriptor is released even when close reports an error.
+struct AtomicSteps:
+    write_data as Function[(Int, Text) fails with IoError]
+    sync_data as Function[(Int) fails with IoError]
+    close as Function[(Int) fails with IoError]
+    rename as Function[(Path, Path) fails with IoError]
+    sync_directory as Function[(Path) fails with IoError]
+    remove as Function[(Path)]
+
+let SYSTEM_STEPS as AtomicSteps = AtomicSteps(write_data = system_write, sync_data = system_sync_data, close = system_close, rename = system_rename, sync_directory = system_sync_directory, remove = system_remove)
+
+## What release still has to do.
+enum Cleanup:
+    CloseDescriptor
+    RemoveTemporary
+
 ## A file that is written next to its target and replaces it only on commit.
-## Releasing it without commit removes the temporary file and leaves the target unchanged.
+## Releasing it cleans up only what it still owns: an open descriptor is closed once, a temporary
+## file that has not replaced the target is removed, and nothing is done after the replacement.
 public struct AtomicFile:
     target as Path
     temporary as Path
     descriptor as Int
     durable as Bool
-    var committed as Bool = false
+    steps as AtomicSteps = SYSTEM_STEPS
+    var state as AtomicState = AtomicState.Writing
+
+struct TemporaryFile:
+    descriptor as Int
+    path as Path
 
 ## Opens a temporary file in the directory of the target. With durable = true it fails with kind
-## Unsupported on a file system where durability cannot be guaranteed. Permission: files.write.
-public external function open_atomic(path as Path, durable as Bool = false) returns AtomicFile fails with IoError
+## Unsupported on a file system where durability cannot be guaranteed (S-9a). Permission: files.write.
+public function open_atomic(path as Path, durable as Bool = false) returns AtomicFile fails with IoError:
+    if durable and not system_supports_durability(path):
+        fail IoError(path = path, kind = IoErrorKind.Unsupported, reason = "this file system cannot guarantee durability")
+    let temporary = try system_open_temporary(path)
+    return AtomicFile(target = path, temporary = temporary.path, descriptor = temporary.descriptor, durable = durable)
 
 extend AtomicFile:
     public function write(var self, text as Text) fails with IoError:
-        if self.committed:
-            fail IoError(path = self.target, kind = IoErrorKind.Other, reason = "the file is already committed")
-        try write_descriptor(self.descriptor, text, self.temporary)
+        if self.state != AtomicState.Writing:
+            fail IoError(path = self.target, kind = IoErrorKind.Other, reason = "the file is already being committed")
+        let write_data = self.steps.write_data
+        try write_data(self.descriptor, text)
 
     public function write_line(var self, text as Text) fails with IoError:
         try self.write(text + "\n")
 
-    ## Makes the written text the content of the target by an atomic rename.
+    ## Whether the target already holds the new content.
+    public function is_replaced(self) returns Bool:
+        return self.state in [AtomicState.Replaced, AtomicState.Durable]
+
+    ## Makes the written text the content of the target: sync the data, close, rename, and with
+    ## durable sync the directory. A failed commit can be called again and continues where it
+    ## stopped. If only the directory sync fails, the error has kind DurabilityUnconfirmed: the
+    ## target is already replaced (guarantees 1 and 2 hold), but its survival after power loss is
+    ## not confirmed.
     public function commit(var self) fails with IoError:
-        if self.committed:
-            return
-        try finish(self.descriptor, self.temporary, self.target, self.durable)
-        self.committed = true
+        if self.state == AtomicState.Writing:
+            let sync_data = self.steps.sync_data
+            try sync_data(self.descriptor)
+            # close releases the descriptor even when it reports an error, so the state changes first.
+            self.state = AtomicState.Closed
+            let close = self.steps.close
+            try close(self.descriptor)
+        if self.state == AtomicState.Closed:
+            let rename = self.steps.rename
+            try rename(self.temporary, self.target)
+            self.state = AtomicState.Replaced
+        if self.state == AtomicState.Replaced and self.durable:
+            let sync_directory = self.steps.sync_directory
+            try sync_directory(self.target.parent() or Path(".")) on IoError as e:
+                fail IoError(path = self.target, kind = IoErrorKind.DurabilityUnconfirmed, reason = "the target was replaced, but syncing its directory failed: {e.reason}")
+            self.state = AtomicState.Durable
+
+    ## The cleanup that release performs in the current state; separate so that tests can check it.
+    function cleanup(self) returns List[Cleanup]:
+        match self.state:
+            case AtomicState.Writing:
+                return [Cleanup.CloseDescriptor, Cleanup.RemoveTemporary]
+            case AtomicState.Closed:
+                return [Cleanup.RemoveTemporary]
+            case AtomicState.Replaced:
+                return []
+            case AtomicState.Durable:
+                return []
 
 extend AtomicFile with Resource:
+    ## Errors are ignored: release cannot fail, and the target is unchanged in every case where it acts.
     function release(var self):
-        if not self.committed:
-            discard(self.descriptor, self.temporary)
+        for step in self.cleanup():
+            match step:
+                case Cleanup.CloseDescriptor:
+                    let close = self.steps.close
+                    try:
+                        close(self.descriptor)
+                    on IoError:
+                        pass
+                case Cleanup.RemoveTemporary:
+                    let remove = self.steps.remove
+                    remove(self.temporary)
 
-external function write_descriptor(descriptor as Int, text as Text, path as Path) fails with IoError
+external function system_supports_durability(path as Path) returns Bool
 
-## Syncs the data of the temporary file to storage (fsync, F_FULLFSYNC on macOS, FlushFileBuffers
-## on Windows), closes it, renames it over the target, and with durable also syncs the directory.
-external function finish(descriptor as Int, temporary as Path, target as Path, durable as Bool) fails with IoError
+## Creates .<name>.unio-tmp-<id> next to the target and opens it for writing.
+external function system_open_temporary(target as Path) returns TemporaryFile fails with IoError
 
-## Closes and removes the temporary file; errors are ignored because nothing is left to protect.
-external function discard(descriptor as Int, temporary as Path)
+external function system_write(descriptor as Int, text as Text) fails with IoError
+
+## fsync on Linux, fcntl(F_FULLFSYNC) on macOS, FlushFileBuffers on Windows.
+external function system_sync_data(descriptor as Int) fails with IoError
+
+## Releases the descriptor even when it reports an error; a released descriptor is never closed again.
+external function system_close(descriptor as Int) fails with IoError
+
+## rename on Linux and macOS, MoveFileExW with MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH on Windows.
+external function system_rename(temporary as Path, target as Path) fails with IoError
+
+## fsync of the directory on Linux and macOS; on Windows MOVEFILE_WRITE_THROUGH has done this already.
+external function system_sync_directory(directory as Path) fails with IoError
+
+## Removes the file; errors are ignored.
+external function system_remove(path as Path)
+
+
+# ---------------------------------------------------------------- tests of the commit protocol
+# The steps below replace the system operations; each test makes one step fail.
+
+function succeed_descriptor(descriptor as Int) fails with IoError:
+    return
+
+function succeed_write(descriptor as Int, text as Text) fails with IoError:
+    return
+
+function succeed_rename(temporary as Path, target as Path) fails with IoError:
+    return
+
+function succeed_sync_directory(directory as Path) fails with IoError:
+    return
+
+function ignore_remove(path as Path):
+    return
+
+function fail_descriptor(descriptor as Int) fails with IoError:
+    fail IoError(path = Path("descriptor {descriptor}"), kind = IoErrorKind.Other, reason = "injected failure")
+
+function fail_rename(temporary as Path, target as Path) fails with IoError:
+    fail IoError(path = target, kind = IoErrorKind.Other, reason = "injected failure")
+
+function fail_sync_directory(directory as Path) fails with IoError:
+    fail IoError(path = directory, kind = IoErrorKind.Other, reason = "injected failure")
+
+function fake_steps(sync_data as Function[(Int) fails with IoError] = succeed_descriptor, close as Function[(Int) fails with IoError] = succeed_descriptor, rename as Function[(Path, Path) fails with IoError] = succeed_rename, sync_directory as Function[(Path) fails with IoError] = succeed_sync_directory) returns AtomicSteps:
+    return AtomicSteps(write_data = succeed_write, sync_data = sync_data, close = close, rename = rename, sync_directory = sync_directory, remove = ignore_remove)
+
+function fake_file(steps as AtomicSteps, durable as Bool) returns AtomicFile:
+    return AtomicFile(target = Path("dir/target.txt"), temporary = Path("dir/.target.txt.unio-tmp-1"), descriptor = 3, durable = durable, steps = steps)
+
+test "a failed directory sync after the rename reports that the target was replaced":
+    using file = fake_file(fake_steps(sync_directory = fail_sync_directory), durable = true):
+        try:
+            file.commit()
+            assert_fail("expected the directory sync to fail")
+        on IoError as e:
+            assert e.kind == IoErrorKind.DurabilityUnconfirmed
+        assert file.state == AtomicState.Replaced
+        assert file.is_replaced()
+        assert file.cleanup() == []
+
+test "a failed rename leaves the descriptor closed and removes only the temporary file":
+    using file = fake_file(fake_steps(rename = fail_rename), durable = true):
+        try:
+            file.commit()
+            assert_fail("expected the rename to fail")
+        on IoError as e:
+            assert e.kind == IoErrorKind.Other
+        assert file.state == AtomicState.Closed
+        assert not file.is_replaced()
+        assert file.cleanup() == [Cleanup.RemoveTemporary]
+
+test "a failed close still counts the descriptor as released":
+    using file = fake_file(fake_steps(close = fail_descriptor), durable = false):
+        try:
+            file.commit()
+            assert_fail("expected close to fail")
+        on IoError as e:
+            assert e.kind == IoErrorKind.Other
+        assert file.state == AtomicState.Closed
+        assert file.cleanup() == [Cleanup.RemoveTemporary]
+
+test "a failed data sync keeps the descriptor open for release":
+    using file = fake_file(fake_steps(sync_data = fail_descriptor), durable = false):
+        try:
+            file.commit()
+            assert_fail("expected the data sync to fail")
+        on IoError as e:
+            assert e.kind == IoErrorKind.Other
+        assert file.state == AtomicState.Writing
+        assert file.cleanup() == [Cleanup.CloseDescriptor, Cleanup.RemoveTemporary]
+
+test "without durable the directory is not synced":
+    using file = fake_file(fake_steps(sync_directory = fail_sync_directory), durable = false):
+        try file.commit() on IoError as e:
+            assert_fail(e.reason)
+        assert file.state == AtomicState.Replaced
+
+test "a commit after a failed directory sync retries only the directory sync":
+    using file = fake_file(fake_steps(rename = fail_rename, sync_directory = fail_sync_directory), durable = true):
+        file.state = AtomicState.Replaced
+        try:
+            file.commit()
+            assert_fail("expected the directory sync to fail again")
+        on IoError as e:
+            assert e.kind == IoErrorKind.DurabilityUnconfirmed
+
+test "writing after commit started is an error":
+    using file = fake_file(fake_steps(), durable = false):
+        try file.commit() on IoError as e:
+            assert_fail(e.reason)
+        try:
+            file.write("late")
+            assert_fail("expected an error")
+        on IoError as e:
+            assert e.kind == IoErrorKind.Other

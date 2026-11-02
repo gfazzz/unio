@@ -32,7 +32,7 @@ The library contains what the reference programs and the project tools use. `spe
 - Methods with `var self` change the value and are available only on a `var` place (L-11).
 - The comment of a function that needs a manifest permission (T-6) names it: `Permission: files.read`.
 - `a in b` calls `b.contains(a)`.
-- Writing a file is atomic (S-9). `AtomicFile` replaces its target only on an explicit `commit()`, because `release` cannot know how its block ended:
+- Writing a file is atomic (S-9). `AtomicFile` replaces its target only on an explicit `commit()`, because `release` cannot know how its block ended. `commit` records each step (`Writing`, `Closed`, `Replaced`, `Durable`), so a failed commit can be repeated and `release` cleans up only what the file still owns; a failed directory sync after the rename is reported as `DurabilityUnconfirmed` (S-9c):
 
 ```unio
 using file = try files.open_atomic(path):
