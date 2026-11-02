@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.6 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.7 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.6: visibility of fields and methods and functions of a type (L-23a to L-23d).
 
 Changes from 0.5: test-first development (T-5a, T-5b).
 
@@ -111,7 +113,11 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 3.6 Modules and visibility
 
 - L-22. A module is a file; a package is a directory with `unio.toml`. Import: `import a.b`, `import a.b as c`, `from a.b import x, y`. A name that starts with `std.` refers to the standard library; any other name refers to a module of the same package, `a.b` to the file `a/b.unio` relative to the package root.
-- L-23. Everything is private by default; `public` exports.
+- L-23. Everything is private by default; `public` exports. Private means visible only in the same module (file).
+- L-23a. A struct field is private unless it is marked `public` (`public var balance as Int`). A struct with at least one private field can be constructed and changed through that field only in its module; other modules use its public functions.
+- L-23b. The fields of an `error` and of `enum` variants are visible wherever their type is visible: they are data that callers must handle in `on` and `match`. `public` on them is redundant and the formatter removes it.
+- L-23c. A method in `extend T:` is private unless it is marked `public`. A method in `extend T with I:` implements the interface `I` and is visible wherever `T` and `I` both are; `public` is not written there.
+- L-23d. A function in `extend T:` without `self` is a function of the type and is called as `T.name(...)`, for example `Account.open("Anna")`. It follows the visibility rule of L-23c.
 - L-24. Cyclic imports are a compile error that names the cycle.
 
 ### 3.7 Tests in the language

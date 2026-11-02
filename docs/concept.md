@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.7. Changes from 0.6: test-first development of the language and of programs (section 1.2).
+Version: 0.8. Changes from 0.7: visibility of fields and methods, functions of a type (sections 2.6, 5).
+
+Changes from 0.6: test-first development of the language and of programs (section 1.2).
 
 Changes from 0.5: library layers and build profiles, and the plan for system programming (section 8.1).
 
@@ -161,6 +163,23 @@ extend User with Display:
 - `struct` is a record with named fields, constructed as `User(id = 1, name = "Anna")`. Struct values compare by content.
 - `enum` is a sum type with variants; variants may have fields. Used for commands, states, and parse results.
 - `interface` is a set of methods. Implementation is declared explicitly with `extend ... with ...`. There is no implementation inheritance; reuse goes through composition and generic functions.
+- Methods are functions in an `extend` block. The first parameter `self` makes a function a method, called as `account.deposit(100)`; `var self` marks a method that changes the value. A function in `extend` without `self` is a function of the type, called as `Account.open("Anna")`; this is how a type offers named constructors that check their invariants.
+- Visibility inside a type: struct fields and methods are private to the module unless marked `public`. A struct with private fields is built only in its module, so it can protect its invariants. Fields of errors and of variants are always visible with their type, because callers handle them; methods that implement an interface are visible with the interface.
+
+```unio
+public struct Account:
+    public owner as Text
+    public var balance as Int = 0
+    var history as List[Int] = []          # private: only this module sees it
+
+extend Account:
+    public function open(owner as Text) returns Account:     # Account.open("Anna")
+        return Account(owner = owner)
+
+    public function deposit(var self, amount as Int):        # account.deposit(100)
+        self.balance = self.balance + amount
+        self.history.append(amount)
+```
 - Generics: `function first[T](items as List[T]) returns Option[T]`. Constraints: `[T with Display]`.
 
 Built-in core types: `Int` (64-bit signed), `Float` (64-bit), `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Tuple`, `Path`, `Function`, and `Never`, the result type of a function that does not return (`assert_fail`).
@@ -328,7 +347,7 @@ let data = json.parse(text)
 ```
 
 - A module is a file. A package is a directory with the manifest `unio.toml`. The module name matches the file path.
-- Visibility: everything is private by default; export with `public` before a declaration.
+- Visibility: everything is private by default; export with `public` before a declaration, a struct field, or a method (section 2.6).
 - Dependencies are pinned in `unio.lock` with content hashes. Offline builds are reproducible.
 - One standard way to import and one order (the formatter sorts).
 
@@ -412,6 +431,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | What the language and its tools are written in | In Unio wherever possible (section 1.1); another language only temporarily, with a reason and an end |
 | Kernels and code without an operating system | One language: library layers `core`, `alloc`, `std` and build profiles that only remove capabilities; system features in a later release (section 8.1) |
 | How changes to the language and to programs are made | Test first: a failing check, then the change, then all checks green (section 1.2) |
+| Visibility inside types | Fields and methods private unless `public`; error and variant fields visible with their type; interface methods visible with the interface; functions of a type called as `T.name(...)` |
 | Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
@@ -428,7 +448,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–15 were added in version 0.4 after review and after writing the standard library in Unio.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–16 were added in version 0.4 after review and after writing the standard library in Unio.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -445,3 +465,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 13. **The language built in the language.** A design checked only on examples misses what a large program needs; a library and tools written in Unio are such programs, and they are needed anyway. Writing them first in Unio turns every awkward spot into a concrete finding, while the cost of a temporary second implementation is limited to the time until the interpreter runs.
 14. **Layers and profiles now, system features later.** Splitting the library and the runtime is cheap while they are small and expensive once applications depend on them; checking the layers from the start keeps `core` free of hidden dependencies on the allocator, the GC, and the operating system. The system features themselves need careful design and do not help the first release, so they wait for their own release, while these two boundaries keep the way open, also for embedded devices and high-performance computing.
 15. **Tests first.** Generated code is reviewed briefly, so the reviewer needs a statement of intent that can be executed; a test written before the code is that statement, and it cannot be bent to fit an implementation that already exists. For the language, a failing check before every change keeps the specification, the corpus, and the implementation from drifting apart, which is how the grammar defects of version 0.4 were found.
+16. **Visibility inside types.** A type that keeps an invariant, such as an atomic file that must not be committed twice, needs fields that only its own module can touch; that is the default. Errors and variants are the opposite case: their fields exist to be read by whoever handles them, so requiring `public` on each would only add noise. Functions of a type give named constructors without a separate constructor syntax.

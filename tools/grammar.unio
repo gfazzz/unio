@@ -54,11 +54,11 @@ public error GrammarError:
 ## A token. kind is a class from TOKEN_CLASSES, a keyword, or a punctuation mark; parts holds the
 ## tokens of each interpolation of a TEXT token.
 public struct Token:
-    kind as Text
-    value as Text
-    line as Int
-    column as Int
-    parts as List[List[Token]] = []
+    public kind as Text
+    public value as Text
+    public line as Int
+    public column as Int
+    public parts as List[List[Token]] = []
 
 ## A parse tree: a token, or a rule with the trees of what it matched.
 public enum Tree:
@@ -73,14 +73,14 @@ public error LexError:
 
 ## The first error in a source: a lexical code such as "E0001", or "syntax".
 public struct Problem:
-    code as Text
-    line as Int
-    column as Int
-    message as Text
+    public code as Text
+    public line as Int
+    public column as Int
+    public message as Text
 
 public struct CheckResult:
-    tree as Option[Tree]
-    problem as Option[Problem]
+    public tree as Option[Tree]
+    public problem as Option[Problem]
 
 ## The rule name of a branch; "" for a leaf.
 public function rule_of(tree as Tree) returns Text:

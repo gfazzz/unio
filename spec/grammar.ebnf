@@ -108,7 +108,9 @@ param           = [ "var" ] "self"
 struct_decl     = "struct" NAME [ generic_params ] ( ":" field_block | NEWLINE ) ;
 error_decl      = "error" NAME ( ":" field_block | NEWLINE ) ;
 field_block     = NEWLINE INDENT field { field } DEDENT ;
-field           = [ "var" ] NAME "as" type [ "=" expression ] NEWLINE ;
+field           = [ "public" ] [ "var" ] NAME "as" type [ "=" expression ] NEWLINE ;
+                  (* "public" is meaningful in a struct; error fields are always
+                     visible with their type (L-23b) *)
 
 enum_decl       = "enum" NAME [ generic_params ] ":"
                   NEWLINE INDENT variant { variant } DEDENT ;

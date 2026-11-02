@@ -1,0 +1,34 @@
+## Visibility of fields and methods, and functions of a type (requirement L-23).
+
+## Fields are private unless marked public; this struct can be built only in its module.
+public struct Account:
+    public owner as Text
+    public var balance as Int = 0
+    var history as List[Int] = []
+
+## Fields of errors and of variants are visible together with their type.
+public error Overdrawn:
+    needed as Int
+
+extend Account:
+    ## A function of the type: no self, called as Account.open(...).
+    public function open(owner as Text) returns Account:
+        return Account(owner = owner)
+
+    public function deposit(var self, amount as Int):
+        self.balance = self.balance + amount
+        self.history.append(amount)
+
+    ## Private: usable only in this module.
+    function last_change(self) returns Option[Int]:
+        return self.history.last()
+
+## Methods that implement an interface are visible together with the interface.
+extend Account with Display:
+    function to_text(self) returns Text:
+        return "{self.owner}: {self.balance}"
+
+test "a function of the type creates the account":
+    var account = Account.open("Anna")
+    account.deposit(100)
+    assert account.balance == 100
