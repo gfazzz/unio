@@ -1,0 +1,93 @@
+## Paths of files and directories. Both "/" and the separator of the platform separate components.
+## An absolute path starts with the component "/"; on Windows a drive such as "C:" is the first component.
+unsafe module
+
+from std.text import join
+
+public external function Path(text as Text) returns Path
+
+extend Path with Display:
+    external function to_text(self) returns Text
+
+extend Path:
+    ## The components without separators.
+    public function components(self) returns List[Text]:
+        let text = self.to_text()
+        var parts as List[Text] = []
+        if not text.is_empty() and is_separator(text.slice(0, 1)):
+            parts.append("/")
+        var current = ""
+        for character in text.chars():
+            if is_separator(character):
+                if not current.is_empty():
+                    parts.append(current)
+                    current = ""
+            else:
+                current = current + character
+        if not current.is_empty():
+            parts.append(current)
+        return parts
+
+    public function is_absolute(self) returns Bool:
+        let parts = self.components()
+        return not parts.is_empty() and (parts[0] == "/" or parts[0].ends_with(":"))
+
+    ## The last component, or "" for an empty path or the root.
+    public function name(self) returns Text:
+        let parts = self.components()
+        if parts.is_empty() or parts == ["/"]:
+            return ""
+        return parts[parts.length() - 1]
+
+    ## The part of the name after its last ".", or "" if there is none; a leading "." does not count.
+    public function extension(self) returns Text:
+        let name = self.name()
+        var position = -1
+        for index, character in name.chars().enumerate():
+            if character == "." and index > 0:
+                position = index
+        if position < 0:
+            return ""
+        return name.slice(position + 1, name.length())
+
+    ## The path without its last component; none for an empty path or the root.
+    public function parent(self) returns Option[Path]:
+        let parts = self.components()
+        if parts.is_empty() or parts == ["/"]:
+            return none
+        return some(from_components(parts.slice(0, parts.length() - 1)))
+
+    ## The path with one more component.
+    public function join(self, part as Text) returns Path:
+        let text = self.to_text()
+        if text.is_empty():
+            return Path(part)
+        if is_separator(text.slice(text.length() - 1, text.length())):
+            return Path(text + part)
+        return Path(text + separator() + part)
+
+    ## The path with "." removed and "name/.." collapsed; leading ".." of a relative path are kept.
+    public function normalize(self) returns Path:
+        var parts as List[Text] = []
+        for part in self.components():
+            if part == ".":
+                continue
+            if part == ".." and not parts.is_empty() and parts[parts.length() - 1] != "..":
+                if parts[parts.length() - 1] != "/":
+                    parts.remove_last()
+                continue
+            parts.append(part)
+        return from_components(parts)
+
+function from_components(parts as List[Text]) returns Path:
+    if parts.is_empty():
+        return Path(".")
+    if parts[0] == "/":
+        return Path(separator() + join(parts.slice(1, parts.length()), separator()))
+    return Path(join(parts, separator()))
+
+function is_separator(character as Text) returns Bool:
+    return character == "/" or character == separator()
+
+## "/" on Linux and macOS, "\" on Windows.
+external function separator() returns Text

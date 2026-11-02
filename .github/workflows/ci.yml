@@ -23,8 +23,10 @@ jobs:
         run: python .github/scripts/check_docs.py
       - name: Grammar consistency and corpus
         run: python spec/check_grammar.py --corpus
-      - name: Reference programs
+      - name: Unio sources parse (reference programs, standard library, tools)
         shell: bash
-        run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio
-      - name: Reference programs use only the documented API
+        run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio stdlib/std/*.unio stdlib/std/builtin/*.unio tools/*.unio
+      - name: Unio sources use only the standard library API
         run: python spec/check_api.py
+      # The Python checkers are temporary: tools/*.unio do the same work and replace
+      # them once the stage 3 interpreter can run Unio programs (plan, section 1).

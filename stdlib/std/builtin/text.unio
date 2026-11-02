@@ -1,0 +1,176 @@
+## Methods of Text: a sequence of Unicode characters stored as UTF-8.
+## Positions and lengths count characters; byte_length counts bytes.
+## Equality, order, hashing and + are built into the compiler; "part in text" calls text.contains(part).
+unsafe module
+
+from std.text import split
+
+let DECIMAL_DIGITS as Text = "0123456789"
+
+extend Text with Display:
+    function to_text(self) returns Text:
+        return self
+
+extend Text:
+    public external function length(self) returns Int
+
+    public external function byte_length(self) returns Int
+
+    ## The characters, each as a Text of length 1.
+    public external function chars(self) returns List[Text]
+
+    ## The Unicode code points of the characters.
+    public external function code_points(self) returns List[Int]
+
+    ## Characters from start up to, but not including, end; a fault outside 0..length().
+    public external function slice(self, start as Int, end as Int) returns Text
+
+    ## Position of the first occurrence of part at or after start. An empty part is found at start.
+    public external function index_of(self, part as Text, start as Int = 0) returns Option[Int]
+
+    ## Lower case by the Unicode rules.
+    public external function to_lower(self) returns Text
+
+    ## Upper case by the Unicode rules.
+    public external function to_upper(self) returns Text
+
+    ## The number written in decimal or scientific notation; none for anything else.
+    public external function to_float(self) returns Option[Float]
+
+    public function is_empty(self) returns Bool:
+        return self.length() == 0
+
+    public function contains(self, part as Text) returns Bool:
+        match self.index_of(part):
+            case some(_):
+                return true
+            case none:
+                return false
+
+    public function starts_with(self, prefix as Text) returns Bool:
+        if prefix.length() > self.length():
+            return false
+        return self.slice(0, prefix.length()) == prefix
+
+    public function ends_with(self, suffix as Text) returns Bool:
+        if suffix.length() > self.length():
+            return false
+        return self.slice(self.length() - suffix.length(), self.length()) == suffix
+
+    ## Number of non-overlapping occurrences of part; part must not be empty.
+    public function count(self, part as Text) returns Int:
+        assert not part.is_empty()
+        var total = 0
+        var start = 0
+        while true:
+            match self.index_of(part, start = start):
+                case some(position):
+                    total = total + 1
+                    start = position + part.length()
+                case none:
+                    return total
+
+    ## Every occurrence of old replaced with new; old must not be empty.
+    public function replace(self, old as Text, new as Text) returns Text:
+        assert not old.is_empty()
+        var result = ""
+        var start = 0
+        while true:
+            match self.index_of(old, start = start):
+                case some(position):
+                    result = result + self.slice(start, position) + new
+                    start = position + old.length()
+                case none:
+                    return result + self.slice(start, self.length())
+
+    ## Lines split on "\n" and "\r\n"; one final empty line is dropped, so "a\n" has one line.
+    public function lines(self) returns List[Text]:
+        var result as List[Text] = []
+        for line in split(self, "\n"):
+            if line.ends_with("\r"):
+                result.append(line.slice(0, line.length() - 1))
+            else:
+                result.append(line)
+        if not result.is_empty() and result[result.length() - 1].is_empty():
+            result.remove_last()
+        return result
+
+    ## Words separated by white space (space, tab, line ends, vertical tab, form feed).
+    public function split_whitespace(self) returns List[Text]:
+        var words as List[Text] = []
+        var current = ""
+        for character in self.chars():
+            if is_whitespace(character):
+                if not current.is_empty():
+                    words.append(current)
+                    current = ""
+            else:
+                current = current + character
+        if not current.is_empty():
+            words.append(current)
+        return words
+
+    ## The text without white space at the start and at the end.
+    public function trim(self) returns Text:
+        return self.trim_start().trim_end()
+
+    public function trim_start(self) returns Text:
+        var start = 0
+        let characters = self.chars()
+        while start < characters.length() and is_whitespace(characters[start]):
+            start = start + 1
+        return self.slice(start, self.length())
+
+    public function trim_end(self) returns Text:
+        let characters = self.chars()
+        var end = characters.length()
+        while end > 0 and is_whitespace(characters[end - 1]):
+            end = end - 1
+        return self.slice(0, end)
+
+    ## The text repeated the given number of times; a negative count is a fault.
+    public function repeat(self, times as Int) returns Text:
+        assert times >= 0
+        var result = ""
+        for _ in range(0, times):
+            result = result + self
+        return result
+
+    ## A decimal integer with an optional sign; none for anything else, including overflow.
+    public function to_int(self) returns Option[Int]:
+        let characters = self.chars()
+        var start = 0
+        var negative = false
+        if not characters.is_empty() and characters[0] in ["-", "+"]:
+            negative = characters[0] == "-"
+            start = 1
+        if start == characters.length():
+            return none
+        var value = 0
+        for character in characters.slice(start, characters.length()):
+            match digit_value(character):
+                case some(digit):
+                    match append_digit(value, -digit if negative else digit):
+                        case some(next):
+                            value = next
+                        case none:
+                            return none
+                case none:
+                    return none
+        return some(value)
+
+function is_whitespace(character as Text) returns Bool:
+    return character in [" ", "\t", "\n", "\r", "\u{B}", "\u{C}"]
+
+function digit_value(character as Text) returns Option[Int]:
+    if character.length() != 1:
+        return none
+    return DECIMAL_DIGITS.index_of(character)
+
+## value * 10 + digit, where digit carries the sign of the number; none on overflow.
+function append_digit(value as Int, digit as Int) returns Option[Int]:
+    match value.checked_multiply(10):
+        case some(shifted):
+            return shifted.checked_add(digit)
+        case none:
+            return none

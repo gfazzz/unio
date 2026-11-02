@@ -77,5 +77,6 @@ function resources(path as Path) returns Int fails with IoError:
     using file = try open_file(path):
         using output = try files.open_atomic(path.with_extension("out")):
             for line in file.lines():
-                output.write_line(line)
+                try output.write_line(line)
+            try output.commit()
         return 0

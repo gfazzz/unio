@@ -1,0 +1,30 @@
+## Methods of Int, the 64-bit signed integer. Arithmetic and comparison are built into the compiler; overflow is a fault.
+unsafe module
+
+## The smallest Int.
+public let MINIMUM_INT as Int = -9223372036854775807 - 1
+
+## The largest Int.
+public let MAXIMUM_INT as Int = 9223372036854775807
+
+extend Int with Display:
+    external function to_text(self) returns Text
+
+extend Int:
+    ## Sum, or none on overflow.
+    public external function checked_add(self, other as Int) returns Option[Int]
+
+    ## Difference, or none on overflow.
+    public external function checked_subtract(self, other as Int) returns Option[Int]
+
+    ## Product, or none on overflow.
+    public external function checked_multiply(self, other as Int) returns Option[Int]
+
+    ## Quotient truncated toward zero, or none when other is 0 or the result does not fit.
+    public function checked_divide(self, other as Int) returns Option[Int]:
+        if other == 0 or (self == MINIMUM_INT and other == -1):
+            return none
+        return some(self / other)
+
+    ## The nearest Float.
+    public external function to_float(self) returns Float

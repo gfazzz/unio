@@ -1,0 +1,12 @@
+## Methods of Float, the 64-bit IEEE 754 number. Float has no Hash: it is not a Map key, a Set element or a match pattern.
+unsafe module
+
+extend Float with Display:
+    ## The shortest text that reads back as the same number, such as "0.1" or "1e+300".
+    external function to_text(self) returns Text
+
+extend Float:
+    public external function is_nan(self) returns Bool
+
+    ## True unless the number is infinite or NaN.
+    public external function is_finite(self) returns Bool

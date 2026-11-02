@@ -66,7 +66,7 @@ function log(message as Text):        # no returns: returns nothing
 - The `+` operator is defined for numbers and for `Text + Text`. Mixing types (`Text + Int`) is a compile error with a hint to use interpolation. Familiar notation is preserved while implicit conversions are absent.
 - Arithmetic: `+ - * / %` and `**`. `/` on `Int` gives `Int` with truncation; on `Float` gives `Float`. `Int` overflow is a fault (see 3.3), not silent wraparound.
 - Comparisons `== != < <= > >=`; logic `and or not`. Logical operators are words so code reads as text.
-- Membership: `item in collection`.
+- Membership: `item in collection`, which calls `collection.contains(item)`.
 - Operators are bound to standard interfaces: `+` to `Add`, `-` to `Subtract`, `*` to `Multiply`, `/` to `Divide`, `==` to `Equal`, `<` and the other comparisons to `Order`. Built-in numbers and `Text` implement them. A user-defined type gets an operator only through an explicit declaration `extend Money with Add`; there are no hidden implementations and no implicit conversions. Operators cannot be redefined for types that already implement them.
 
 ### 2.5 Control flow
@@ -239,7 +239,7 @@ A fault is a contract violation that cannot be handled inside the program: index
 
 - Behavior is defined: the program prints a diagnostic with a stack trace to stderr, the runtime unwinds the stack and calls `release` for open `using` blocks in reverse order, and the program exits with code 101.
 - Exhaustion of memory (heap or stack) is not a fault. The runtime cannot promise to run user code when there is no memory, so it writes a preallocated diagnostic and exits with code 102 without calling `release`. The same holds for anything outside the runtime's control: a kill signal, power loss, a crash in external code.
-- What survives every kind of termination is stated separately: a file written by `files.write_text` or through `files.open_atomic` holds either the old or the new complete content, because the write goes to a temporary file that replaces the target by rename.
+- What survives every kind of termination is stated separately: a file written by `files.write_text`, or through `files.open_atomic` and committed, holds either the old or the new complete content, because the write goes to a temporary file that replaces the target by rename.
 - A fault cannot be caught with `on`. It can be observed only in tests (`expect_fault`) and at the process boundary.
 - Every faulting operation has a safe form returning `Option` or an error: `items.get(i)`, `a.checked_divide(b)`, `a.checked_add(b)`.
 

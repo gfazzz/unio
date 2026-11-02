@@ -9,6 +9,7 @@ Version: 0.1 (draft). Basis: `docs/requirements.md`. Russian localization: `docs
 - **Reference utilities as the yardstick.** The ten utilities from the specification (section 9.1) are written early and grow with the language; a stage is complete when its utilities work.
 - **RFCs for language changes.** Any change to syntax or semantics after stage 1 is written up in `docs/rfcs/NNNN-title.md` with rationale, examples, and a migration plan.
 - **Measurement from the first stage.** Performance and diagnostic size are tracked in CI; a regression blocks the merge.
+- **Unio first.** Everything that does not have to exist before the language runs is written in Unio: the standard library in `stdlib/`, the reference utilities, and the project tools in `tools/`. Until the interpreter of stage 3 runs them, CI uses temporary Python checkers that do the same work; they are deleted at the end of stage 3. The compiler and the runtime stay in Rust until self-hosting in 1.0.
 
 ## 2. Repository layout
 
@@ -84,7 +85,7 @@ Work:
 - Minimal standard library: `text`, `collections`, `files`, `path`, `env`, `args`, `json`.
 - `unio test` with text and JSON output, `expect_fault`.
 
-Exit criterion: `todo`, `wc`, `grep-lite`, `json-query` run in the interpreter and their tests pass; reliability tests for faults inside `using` are green.
+Exit criterion: `todo`, `wc`, `grep-lite`, `json-query` run in the interpreter and their tests pass; the tools in `tools/` run in the interpreter, give the same results as the Python checkers, and replace them in CI; reliability tests for faults inside `using` are green.
 
 ### Stage 4. Native build (weeks 20–32)
 

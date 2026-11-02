@@ -1,0 +1,84 @@
+## Files and directories. Writing is atomic: a reader sees either the old or the new complete content (S-9).
+## An operation blocked by the sandbox fails with kind PermissionDenied; exists and is_directory report it as false.
+unsafe module
+
+public enum IoErrorKind:
+    NotFound
+    PermissionDenied
+    AlreadyExists
+    InvalidData
+    Other
+
+public error IoError:
+    path as Path
+    kind as IoErrorKind
+    reason as Text
+
+## Whether the path exists and is accessible. Permission: files.read.
+public external function exists(path as Path) returns Bool
+
+## Whether the path is an accessible directory. Permission: files.read.
+public external function is_directory(path as Path) returns Bool
+
+## The whole file as text; kind InvalidData if it is not UTF-8. Permission: files.read.
+public external function read_text(path as Path) returns Text fails with IoError
+
+## The entries of a directory, sorted by name, without "." and "..". Permission: files.read.
+public external function list_directory(path as Path) returns List[Path] fails with IoError
+
+## Every file below the directory, sorted, depth first; directories themselves are not listed.
+public function list_tree(root as Path) returns List[Path] fails with IoError:
+    var found as List[Path] = []
+    for entry in try list_directory(root):
+        if is_directory(entry):
+            found.append_all(try list_tree(entry))
+        else:
+            found.append(entry)
+    return found
+
+## Replaces the file with the text atomically. durable = true also syncs it to storage. Permission: files.write.
+public function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError:
+    using file = try open_atomic(path, durable = durable):
+        try file.write(text)
+        try file.commit()
+
+## A file that is written next to its target and replaces it only on commit.
+## Releasing it without commit removes the temporary file and leaves the target unchanged.
+public struct AtomicFile:
+    target as Path
+    temporary as Path
+    descriptor as Int
+    durable as Bool
+    var committed as Bool = false
+
+## Opens a temporary file in the directory of the target. Permission: files.write.
+public external function open_atomic(path as Path, durable as Bool = false) returns AtomicFile fails with IoError
+
+extend AtomicFile:
+    public function write(var self, text as Text) fails with IoError:
+        if self.committed:
+            fail IoError(path = self.target, kind = IoErrorKind.Other, reason = "the file is already committed")
+        try write_descriptor(self.descriptor, text, self.temporary)
+
+    public function write_line(var self, text as Text) fails with IoError:
+        try self.write(text + "\n")
+
+    ## Makes the written text the content of the target by an atomic rename.
+    public function commit(var self) fails with IoError:
+        if self.committed:
+            return
+        try finish(self.descriptor, self.temporary, self.target, self.durable)
+        self.committed = true
+
+extend AtomicFile with Resource:
+    function release(var self):
+        if not self.committed:
+            discard(self.descriptor, self.temporary)
+
+external function write_descriptor(descriptor as Int, text as Text, path as Path) fails with IoError
+
+## Flushes, optionally syncs, closes, and renames the temporary file over the target.
+external function finish(descriptor as Int, temporary as Path, target as Path, durable as Bool) fails with IoError
+
+## Closes and removes the temporary file; errors are ignored because nothing is left to protect.
+external function discard(descriptor as Int, temporary as Path)

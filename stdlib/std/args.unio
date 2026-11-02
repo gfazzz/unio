@@ -1,0 +1,5 @@
+## Program arguments. Flags, defaults and automatic help (requirement S-4) are added in stage 5.
+unsafe module
+
+## The arguments of the program without its name.
+public external function list() returns List[Text]

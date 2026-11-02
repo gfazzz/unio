@@ -37,6 +37,8 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Work plan](docs/plan.md)
 - [Example program](docs/examples/todo.unio)
 - [Grammar and specification tests](spec/README.md)
+- [Standard library](docs/stdlib.md), written in Unio in [stdlib/](stdlib/std)
 - [Reference utilities](examples)
+- [Project tools in Unio](tools)
 - [RFC process](docs/rfcs/README.md)
 - [Русская версия документации](docs/ru/README.md)

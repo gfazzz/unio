@@ -1,0 +1,33 @@
+## Methods of Map[K, V]. Entries keep the order in which their keys were first inserted.
+unsafe module
+
+extend[K with Hash and Equal, V] Map[K, V]:
+    public external function length(self) returns Int
+
+    public external function get(self, key as K) returns Option[V]
+
+    ## Sets the value for the key; an existing key keeps its position.
+    public external function put(var self, key as K, value as V)
+
+    ## Removes the key and returns its value; none if the key is absent.
+    public external function remove(var self, key as K) returns Option[V]
+
+    ## Pairs of a key and a value in insertion order.
+    public external function entries(self) returns List[Tuple[K, V]]
+
+    public function is_empty(self) returns Bool:
+        return self.length() == 0
+
+    ## Used by "key in map".
+    public function contains(self, key as K) returns Bool:
+        match self.get(key):
+            case some(_):
+                return true
+            case none:
+                return false
+
+    public function keys(self) returns List[K]:
+        return [key for key, _ in self.entries()]
+
+    public function values(self) returns List[V]:
+        return [value for _, value in self.entries()]

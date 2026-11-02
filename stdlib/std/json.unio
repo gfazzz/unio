@@ -1,0 +1,378 @@
+## Reading and writing JSON (RFC 8259).
+##
+## parse reads a number without a fraction or an exponent that fits in Int as Value.Int and any
+## other number as Value.Float. encode and decode work for Value, Int, Float, Bool, Text, Path,
+## Option, List, Map with Text keys, and structs and enums built from them; the compiler checks
+## this at the call (requirement S-5). A struct is an object with its field names, and a field
+## with a default may be missing on decoding. A variant without fields is its name as text; a
+## variant with fields is an object {"Variant": {fields}}.
+unsafe module
+
+from std.text import join, from_code_point
+
+## A JSON document. The variants share names with built-in types, so they are always written
+## with the enum name: Value.Text("Anna").
+public enum Value:
+    Null
+    Bool(value as Bool)
+    Int(value as Int)
+    Float(value as Float)
+    Text(value as Text)
+    Array(items as List[Value])
+    Object(fields as Map[Text, Value])
+
+public error ParseError:
+    line as Int
+    column as Int
+    message as Text
+
+## path is the dotted path to the value that did not match, for example "2.title".
+public error DecodeError:
+    path as Text
+    message as Text
+
+let DECIMAL_DIGITS as Text = "0123456789"
+
+let HEX_DIGITS as Text = "0123456789abcdef"
+
+## The value as JSON text; pretty = true puts one item per line with an indent of four spaces.
+## A Float that is NaN or infinite is written as null, because JSON has no such numbers.
+public function encode[T](value as T, pretty as Bool = false) returns Text:
+    return write_value(to_value(value), pretty, 0)
+
+public function decode[T](value as Value) returns T fails with DecodeError:
+    return try from_value[T](value)
+
+## "null", "bool", "int", "float", "text", "array", or "object".
+public function kind_name(value as Value) returns Text:
+    match value:
+        case Value.Null:
+            return "null"
+        case Value.Bool(_):
+            return "bool"
+        case Value.Int(_):
+            return "int"
+        case Value.Float(_):
+            return "float"
+        case Value.Text(_):
+            return "text"
+        case Value.Array(_):
+            return "array"
+        case Value.Object(_):
+            return "object"
+
+## Conversions between a type and Value. The compiler generates them for every type allowed by S-5.
+external function to_value[T](value as T) returns Value
+
+external function from_value[T](value as Value) returns T fails with DecodeError
+
+
+# ---------------------------------------------------------------- reading
+
+struct Reader:
+    characters as List[Text]
+    var position as Int = 0
+    var line as Int = 1
+    var column as Int = 1
+
+public function parse(text as Text) returns Value fails with ParseError:
+    var reader = Reader(characters = text.chars())
+    let value = try read_value(reader)
+    skip_space(reader)
+    if not at_end(reader):
+        fail error_at(reader, "unexpected text after the value")
+    return value
+
+function at_end(reader as Reader) returns Bool:
+    return reader.position >= reader.characters.length()
+
+## The next character, or "" at the end.
+function peek(reader as Reader) returns Text:
+    return reader.characters.get(reader.position) or ""
+
+function advance(var reader as Reader) returns Text:
+    let character = peek(reader)
+    reader.position = reader.position + 1
+    if character == "\n":
+        reader.line = reader.line + 1
+        reader.column = 1
+    else:
+        reader.column = reader.column + 1
+    return character
+
+function error_at(reader as Reader, message as Text) returns ParseError:
+    return ParseError(line = reader.line, column = reader.column, message = message)
+
+function skip_space(var reader as Reader):
+    while peek(reader) in [" ", "\t", "\n", "\r"]:
+        advance(reader)
+
+function is_digit(character as Text) returns Bool:
+    return character.length() == 1 and DECIMAL_DIGITS.contains(character)
+
+function expect(var reader as Reader, word as Text) fails with ParseError:
+    for character in word.chars():
+        if advance(reader) != character:
+            fail error_at(reader, "expected \"{word}\"")
+
+function read_value(var reader as Reader) returns Value fails with ParseError:
+    skip_space(reader)
+    let character = peek(reader)
+    if character == "\{":
+        return try read_object(reader)
+    else if character == "[":
+        return try read_array(reader)
+    else if character == "\"":
+        return Value.Text(try read_text(reader))
+    else if character == "t":
+        try expect(reader, "true")
+        return Value.Bool(true)
+    else if character == "f":
+        try expect(reader, "false")
+        return Value.Bool(false)
+    else if character == "n":
+        try expect(reader, "null")
+        return Value.Null
+    else if character == "-" or is_digit(character):
+        return try read_number(reader)
+    else if at_end(reader):
+        fail error_at(reader, "unexpected end of the document")
+    fail error_at(reader, "unexpected character \"{character}\"")
+
+function read_object(var reader as Reader) returns Value fails with ParseError:
+    advance(reader)
+    var fields as Map[Text, Value] = {}
+    skip_space(reader)
+    if peek(reader) == "\}":
+        advance(reader)
+        return Value.Object(fields)
+    while true:
+        skip_space(reader)
+        if peek(reader) != "\"":
+            fail error_at(reader, "expected a key in quotes")
+        let key = try read_text(reader)
+        skip_space(reader)
+        try expect(reader, ":")
+        fields.put(key, try read_value(reader))
+        skip_space(reader)
+        let separator = advance(reader)
+        if separator == "\}":
+            return Value.Object(fields)
+        if separator != ",":
+            fail error_at(reader, "expected \",\" or \"\}\" in an object")
+
+function read_array(var reader as Reader) returns Value fails with ParseError:
+    advance(reader)
+    var items as List[Value] = []
+    skip_space(reader)
+    if peek(reader) == "]":
+        advance(reader)
+        return Value.Array(items)
+    while true:
+        items.append(try read_value(reader))
+        skip_space(reader)
+        let separator = advance(reader)
+        if separator == "]":
+            return Value.Array(items)
+        if separator != ",":
+            fail error_at(reader, "expected \",\" or \"]\" in an array")
+
+function read_text(var reader as Reader) returns Text fails with ParseError:
+    advance(reader)
+    var result = ""
+    while true:
+        if at_end(reader):
+            fail error_at(reader, "unterminated text")
+        let character = advance(reader)
+        if character == "\"":
+            return result
+        if character == "\\":
+            result = result + try read_escape(reader)
+        else if character.code_points()[0] < 0x20:
+            fail error_at(reader, "a control character must be escaped in text")
+        else:
+            result = result + character
+
+function read_escape(var reader as Reader) returns Text fails with ParseError:
+    let character = advance(reader)
+    match character:
+        case "\"":
+            return "\""
+        case "\\":
+            return "\\"
+        case "/":
+            return "/"
+        case "b":
+            return "\u{8}"
+        case "f":
+            return "\u{C}"
+        case "n":
+            return "\n"
+        case "r":
+            return "\r"
+        case "t":
+            return "\t"
+        case "u":
+            return try read_unicode(reader)
+        case _:
+            fail error_at(reader, "invalid escape \"\\{character}\"")
+
+## \uXXXX, or a pair of them for a character outside the Basic Multilingual Plane.
+function read_unicode(var reader as Reader) returns Text fails with ParseError:
+    let first = try read_hex4(reader)
+    var code = first
+    if first >= 0xD800 and first <= 0xDBFF:
+        try expect(reader, "\\u")
+        let second = try read_hex4(reader)
+        if second < 0xDC00 or second > 0xDFFF:
+            fail error_at(reader, "invalid surrogate pair")
+        code = 0x10000 + (first - 0xD800) * 0x400 + (second - 0xDC00)
+    match from_code_point(code):
+        case some(text):
+            return text
+        case none:
+            fail error_at(reader, "invalid code point {code}")
+
+function read_hex4(var reader as Reader) returns Int fails with ParseError:
+    var value = 0
+    for _ in range(0, 4):
+        let character = advance(reader)
+        if character.length() != 1:
+            fail error_at(reader, "expected four hexadecimal digits")
+        match HEX_DIGITS.index_of(character.to_lower()):
+            case some(digit):
+                value = value * 16 + digit
+            case none:
+                fail error_at(reader, "expected four hexadecimal digits")
+    return value
+
+function read_number(var reader as Reader) returns Value fails with ParseError:
+    let line = reader.line
+    let column = reader.column
+    var text = ""
+    var is_float = false
+    if peek(reader) == "-":
+        text = text + advance(reader)
+    if not is_digit(peek(reader)):
+        fail error_at(reader, "expected a digit")
+    if peek(reader) == "0":
+        text = text + advance(reader)
+    else:
+        while is_digit(peek(reader)):
+            text = text + advance(reader)
+    if peek(reader) == ".":
+        is_float = true
+        text = text + advance(reader)
+        if not is_digit(peek(reader)):
+            fail error_at(reader, "expected a digit after \".\"")
+        while is_digit(peek(reader)):
+            text = text + advance(reader)
+    if peek(reader) in ["e", "E"]:
+        is_float = true
+        text = text + advance(reader)
+        if peek(reader) in ["+", "-"]:
+            text = text + advance(reader)
+        if not is_digit(peek(reader)):
+            fail error_at(reader, "expected a digit in the exponent")
+        while is_digit(peek(reader)):
+            text = text + advance(reader)
+    if not is_float:
+        match text.to_int():
+            case some(number):
+                return Value.Int(number)
+            case none:
+                is_float = true
+    match text.to_float():
+        case some(number):
+            return Value.Float(number)
+        case none:
+            fail ParseError(line = line, column = column, message = "invalid number {text}")
+
+
+# ---------------------------------------------------------------- writing
+
+function write_value(value as Value, pretty as Bool, depth as Int) returns Text:
+    match value:
+        case Value.Null:
+            return "null"
+        case Value.Bool(flag):
+            return flag.to_text()
+        case Value.Int(number):
+            return number.to_text()
+        case Value.Float(number):
+            return number.to_text() if number.is_finite() else "null"
+        case Value.Text(text):
+            return quote(text)
+        case Value.Array(items):
+            if items.is_empty():
+                return "[]"
+            let parts = [write_value(item, pretty, depth + 1) for item in items]
+            return wrap("[", parts, "]", pretty, depth)
+        case Value.Object(fields):
+            if fields.is_empty():
+                return "\{\}"
+            let colon = ": " if pretty else ":"
+            let parts = [quote(key) + colon + write_value(field, pretty, depth + 1) for key, field in fields.entries()]
+            return wrap("\{", parts, "\}", pretty, depth)
+
+function wrap(open as Text, parts as List[Text], close as Text, pretty as Bool, depth as Int) returns Text:
+    if not pretty:
+        return open + join(parts, ",") + close
+    let inner = "    ".repeat(depth + 1)
+    return open + "\n" + inner + join(parts, ",\n" + inner) + "\n" + "    ".repeat(depth) + close
+
+function quote(text as Text) returns Text:
+    var result = "\""
+    for character in text.chars():
+        result = result + escape(character)
+    return result + "\""
+
+function escape(character as Text) returns Text:
+    match character:
+        case "\"":
+            return "\\\""
+        case "\\":
+            return "\\\\"
+        case "\n":
+            return "\\n"
+        case "\r":
+            return "\\r"
+        case "\t":
+            return "\\t"
+        case _:
+            let code = character.code_points()[0]
+            if code < 0x20:
+                return "\\u" + hex4(code)
+            return character
+
+function hex4(code as Int) returns Text:
+    var digits = ""
+    var rest = code
+    for _ in range(0, 4):
+        digits = HEX_DIGITS.slice(rest % 16, rest % 16 + 1) + digits
+        rest = rest / 16
+    return digits
+
+
+test "parse and encode round trip":
+    let text = "\{\"name\":\"Anna\",\"tags\":[1,2.5,true,null]\}"
+    let value = try parse(text) on ParseError as e:
+        assert_fail(e.message)
+    assert write_value(value, false, 0) == text
+
+test "escapes and surrogate pairs":
+    let value = try parse("\"a\\n\\u00e9\\ud83d\\ude00\"") on ParseError as e:
+        assert_fail(e.message)
+    assert value == Value.Text("a\n\u{E9}\u{1F600}")
+
+test "large integers become Float":
+    let value = try parse("123456789012345678901234567890") on ParseError as e:
+        assert_fail(e.message)
+    assert kind_name(value) == "float"
+
+test "an error names the line":
+    try:
+        parse("[1,\n2,,3]")
+        assert_fail("expected a parse error")
+    on ParseError as e:
+        assert e.line == 2

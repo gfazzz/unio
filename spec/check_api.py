@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Checks that reference programs use only the documented standard library.
 
-Reads docs/stdlib.md: every ```unio block must parse with spec/grammar.ebnf
-(a block of bare signatures is checked line by line with the rule
-function_sig). Then every call in the given programs must resolve to:
+Reads the standard library from its Unio sources in stdlib/: every file must
+parse with spec/grammar.ebnf, and external functions may appear only in an
+unsafe module. Then every call in the given programs, and in the standard
+library itself, must resolve to:
 
   - a function, type, or enum variant declared in the program itself;
   - a function of an imported module (module.function or from ... import);
   - a prelude function, a built-in constructor, or a prelude variant;
-  - a method listed in docs/stdlib.md or declared in the program;
+  - a parameter or a local name of the program (a function value);
+  - a method of the standard library or one declared in the program;
   - a variant of an enum given with its name (Value.Text).
 
 Usage:
-    check_api.py [PROGRAM...]     default: docs/examples/*.unio examples/*.unio
+    check_api.py [PROGRAM...]     default: stdlib/, docs/examples/, examples/, tools/
 """
 
 import glob
@@ -72,76 +74,88 @@ def declarations(tree):
             types.add(enum)
             for r2, k2 in walk(("x", kids)):
                 if r2 == "variant":
-                    variants.setdefault(enum, set()).add(names_in(k2)[0])
+                    variants.setdefault(enum, set()).add(k2[0].value)
     return functions, types, variants
 
 
-def parse_block(code, grammar, where, problems):
-    lines = [l for l in code.split("\n") if l.strip() and not l.strip().startswith("#")]
-    if lines and all(l.startswith("function ") for l in lines):
-        sigs = set()
-        for line in lines:
-            toks = cg.Lexer(line + "\n", *grammar[2:]).tokens()
-            toks = [t for t in toks if t.kind not in ("NEWLINE", "EOF")]
-            p = cg.Parser(grammar[0], toks)
-            if p.parse("function_sig") is None:
-                problems.append(f"{where}: signature does not parse: {line}")
-                continue
-            sigs.add(toks[1].value)
-        return sigs, set(), {}
-    tree, err = cg.check_source(code, grammar, build_tree=True)
-    if err:
-        problems.append(f"{where}: block does not parse: line {err[1]}: {err[3]}")
-        return set(), set(), {}
-    return declarations(tree)
+def top_items(tree):
+    """(rule, kids) of each top-level item: declaration, import, extend_decl, test_block."""
+    for kid in tree[1]:
+        if not isinstance(kid, cg.Token) and kid[0] == "top_item":
+            yield kid[1][0]
+
+
+def is_public(kids):
+    return bool(kids) and isinstance(kids[0], cg.Token) and kids[0].kind == "public"
+
+
+def signature_name(node):
+    for rule, kids in walk(node):
+        if rule == "function_sig":
+            return names_in(kids)[0]
+    return None
+
+
+def module_of(rel):
+    parts = rel.replace(os.sep, "/")[:-len(".unio")].split("/")
+    if parts[:2] == ["std", "builtin"] or parts == ["std", "prelude"]:
+        return "prelude"
+    return ".".join(parts)
 
 
 def load_api(grammar, problems):
-    path = os.path.join(ROOT, "docs", "stdlib.md")
-    text = open(path, encoding="utf-8").read()
-    modules = {}       # "std.files" -> functions
-    prelude = set()    # prelude functions and built-in constructors
+    """Public API of the standard library, read from its Unio sources in stdlib/."""
+    root = os.path.join(ROOT, "stdlib")
+    modules = {}       # "std.files" -> public functions
+    prelude = set()    # functions visible everywhere, including built-in constructors
     methods = set()    # methods of built-in and library types
     types, variants = set(), {}
-    section = None
-    for part in re.split(r"(?m)^(#{2,3} .*)$", text):
-        heading = re.match(r"#{2,3} (.*)", part)
-        if heading:
-            title = heading.group(1).strip()
-            if title.startswith("std."):
-                section = ("module", title)
-            elif title == "Prelude":
-                section = ("prelude", None)
-            elif section and section[0] in ("builtin", "type") or title == "Built-in types":
-                section = ("type", title) if title != "Built-in types" else ("builtin", None)
-            else:
-                section = ("other", title)
+    files = sorted(glob.glob(os.path.join(root, "**", "*.unio"), recursive=True))
+    if not files:
+        problems.append("stdlib/: no sources found")
+    for path in files:
+        rel = os.path.relpath(path, root)
+        tree, err = cg.check_source(open(path, encoding="utf-8").read(), grammar, build_tree=True)
+        if err:
+            problems.append(f"stdlib/{rel}: does not parse: line {err[1]}: {err[3]}")
             continue
-        for code in re.findall(r"```unio\n(.*?)```", part, flags=re.S):
-            where = f"docs/stdlib.md ({section[1] if section else 'top'})"
-            functions, t, v = parse_block(code, grammar, where, problems)
-            types |= t
-            for k, vs in v.items():
-                variants.setdefault(k, set()).update(vs)
-            # Methods of interfaces declared in a block count as methods.
-            for line in code.split("\n"):
-                m = re.match(r"\s+function ([a-z_][a-z0-9_]*)\(self", line)
-                if m:
-                    methods.add(m.group(1))
-            if not section or section[0] in ("other",):
-                continue
-            if section[0] == "module":
-                sigs = [l for l in code.split("\n") if l.startswith("function ")]
-                bare = {re.match(r"function (\w+)", l).group(1) for l in sigs}
-                if all(re.search(r"\(var self|\(self", l) for l in sigs) and sigs:
-                    methods |= bare
+        unsafe = any(not isinstance(k, cg.Token) and k[0] == "module_header" for k in tree[1])
+        if not unsafe and any(rule == "external_decl" for rule, _ in walk(tree)):
+            problems.append(f"stdlib/{rel}: external function outside an unsafe module")
+        module = module_of(rel)
+        public_functions = set()
+        for rule, kids in top_items(tree):
+            if rule == "declaration" and is_public(kids):
+                inner = kids[1]
+                if inner[0] in ("function_decl", "external_decl"):
+                    public_functions.add(signature_name(inner))
                 else:
-                    modules.setdefault(section[1], set()).update(functions)
-            elif section[0] == "prelude":
-                prelude |= functions
-            elif section[0] == "type":
-                for f in functions:
-                    (prelude if f[:1].isupper() else methods).add(f)
+                    _f, t, v = declarations(("x", [inner]))
+                    types |= t
+                    for k, vs in v.items():
+                        variants.setdefault(k, set()).update(vs)
+            elif rule == "extend_decl":
+                with_interface = any(isinstance(k, cg.Token) and k.kind == "with" for k in kids)
+                for k in kids:
+                    if isinstance(k, cg.Token) or k[0] != "member":
+                        continue
+                    if with_interface or is_public(k[1]):
+                        methods.add(signature_name(k))
+            elif rule == "declaration":
+                inner = kids[0]
+                if inner[0] == "interface_decl":
+                    for r2, k2 in walk(inner):
+                        if r2 == "function_sig":
+                            methods.add(names_in(k2)[0])
+        for rule, kids in top_items(tree):
+            if rule == "declaration" and is_public(kids) and kids[1][0] == "interface_decl":
+                for r2, k2 in walk(kids[1]):
+                    if r2 == "function_sig":
+                        methods.add(names_in(k2)[0])
+        if module == "prelude":
+            prelude |= public_functions
+        else:
+            modules.setdefault(module, set()).update(public_functions)
     return modules, prelude, methods, types, variants
 
 
@@ -162,6 +176,10 @@ def check_program(path, grammar, api, problems):
         problems.append(f"{path}: does not parse: line {err[1]}: {err[3]}")
         return
     own_functions, own_types, own_variants = declarations(tree)
+    locals_ = set()
+    for rule, kids in walk(tree):
+        if rule in ("param", "let_statement"):
+            locals_ |= set(names_in(kids)[:1])
     for tok in unqualified_variant_clashes(tree, own_types, own_variants):
         enum = next(e for e, vs in own_variants.items() if tok.value in vs)
         problems.append(f"{path}:{tok.line}: variant {tok.value} has the name of a type; "
@@ -182,12 +200,12 @@ def check_program(path, grammar, api, problems):
                 imported[name] = module
     for alias, module in aliases.items():
         if module not in modules:
-            problems.append(f"{path}: module {module} is not in docs/stdlib.md")
+            problems.append(f"{path}: module {module} is not in stdlib/")
     for name, module in imported.items():
         if module not in modules:
-            problems.append(f"{path}: module {module} is not in docs/stdlib.md")
+            problems.append(f"{path}: module {module} is not in stdlib/")
         elif name not in modules[module] and name not in lib_types:
-            problems.append(f"{path}: {module}.{name} is not in docs/stdlib.md")
+            problems.append(f"{path}: {module}.{name} is not in stdlib/")
     all_variants = {}
     for src in (own_variants, lib_variants):
         for enum, vs in src.items():
@@ -207,7 +225,7 @@ def check_program(path, grammar, api, problems):
             if t.value in aliases:
                 module = aliases[t.value]
                 if module in modules and member not in modules[module]:
-                    problems.append(f"{path}:{t.line}: {module}.{member} is not in docs/stdlib.md")
+                    problems.append(f"{path}:{t.line}: {module}.{member} is not in stdlib/")
                 continue
             if t.value in all_variants:
                 if member not in all_variants[t.value]:
@@ -222,29 +240,31 @@ def check_program(path, grammar, api, problems):
                                                                  or before.value in all_variants):
                 continue
             if t.value not in methods and t.value not in own_functions:
-                problems.append(f"{path}:{t.line}: method {t.value} is not in docs/stdlib.md")
+                problems.append(f"{path}:{t.line}: method {t.value} is not in stdlib/")
             continue
         if prev is not None and prev.kind == "function":
             continue
         known = (own_functions | own_types | plain_variants | prelude | PRELUDE_VARIANTS
-                 | set(imported))
+                 | set(imported) | locals_)
         if t.value not in known:
-            problems.append(f"{path}:{t.line}: {t.value} is neither declared nor in docs/stdlib.md")
+            problems.append(f"{path}:{t.line}: {t.value} is neither declared nor in stdlib/")
 
 
 def main(argv):
     grammar = cg.load_grammar()
     problems = []
     api = load_api(grammar, problems)
-    programs = argv or sorted(glob.glob(os.path.join(ROOT, "docs", "examples", "*.unio"))
+    programs = argv or sorted(glob.glob(os.path.join(ROOT, "stdlib", "**", "*.unio"), recursive=True)
+                              + glob.glob(os.path.join(ROOT, "docs", "examples", "*.unio"))
                               + glob.glob(os.path.join(ROOT, "docs", "ru", "examples", "*.unio"))
-                              + glob.glob(os.path.join(ROOT, "examples", "*.unio")))
+                              + glob.glob(os.path.join(ROOT, "examples", "*.unio"))
+                              + glob.glob(os.path.join(ROOT, "tools", "*.unio")))
     for path in programs:
         check_program(path, grammar, api, problems)
     for p in problems:
         print(p)
     count = len(programs)
-    print(f"{count} program(s) use only the documented API" if not problems
+    print(f"{count} file(s) use only the standard library API" if not problems
           else f"{len(problems)} problem(s)")
     return 1 if problems else 0
 

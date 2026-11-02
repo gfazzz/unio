@@ -12,8 +12,8 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-CHECKED = (".md", ".unio", ".ebnf", ".py", ".yml", ".json")
-SKIP_DIRS = {".git", "target", "node_modules"}
+CHECKED = (".md", ".unio", ".ebnf", ".py", ".yml", ".json", ".toml")
+SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
 TABS_ALLOWED = {os.path.join("spec", "tests", "invalid", "tab_indent.unio")}
 
 # English document -> Russian localization.

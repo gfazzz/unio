@@ -9,7 +9,9 @@ Version 0.1-draft. Russian localization: [docs/ru/spec.md](../docs/ru/spec.md).
 | [tests/valid/](tests/valid) | Programs that must parse, one file per area of the grammar |
 | [tests/invalid/](tests/invalid) | Programs that must fail on the line, and with the code, stated in their first line |
 
-The reference programs are [docs/examples/todo.unio](../docs/examples/todo.unio) and the utilities in [examples/](../examples). They are checked with the same grammar.
+The reference programs are [docs/examples/todo.unio](../docs/examples/todo.unio) and the utilities in [examples/](../examples). They, the standard library in [stdlib/](../stdlib/std), and the tools in [tools/](../tools) are checked with the same grammar; [check_api.py](check_api.py) checks that they call only what the standard library declares.
+
+The Python scripts are temporary. Their Unio versions are in [tools/](../tools); once the stage 3 interpreter runs them and they give the same results, CI switches to them and the Python scripts are deleted.
 
 ## Using the checker
 

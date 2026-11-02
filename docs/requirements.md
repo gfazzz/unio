@@ -70,7 +70,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - L-7. Generic functions and types with parameters and interface constraints.
 - L-8. Type inference only for local `let`/`var`. Parameters, results, fields, and exported constants must be annotated.
 - L-9. Equality of structs and enums is by content; the `Equal` implementation is derived automatically. `Float` compares per IEEE 754 and does not implement `Hash`: it cannot be a `Map` key, a `Set` element, or a `match` pattern. Resources do not implement `Equal`; `==` on them is a compile error with the hint `is_same`.
-- L-9a. Operators are bound to standard interfaces (`Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, `Hash`). A user-defined type implements them only explicitly through `extend`; redefining existing implementations is forbidden.
+- L-9a. Operators are bound to standard interfaces (`Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, `Hash`). A user-defined type implements them only explicitly through `extend`; redefining existing implementations is forbidden. `item in collection` calls `collection.contains(item)`.
 - L-9b. Function effects are not declared in signatures. The compiler derives them from the call graph and shows them in `unio symbol` and `unio doc` (C-11). The word `uses` is reserved.
 
 ### 3.3 Mutability
@@ -168,7 +168,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
 - S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
 - S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6). A function that reports absence instead of an error (`files.exists`, `env.get`) reports a blocked object as absent.
-- S-9. Atomic writes in `std.files`: `write_text` and `write_bytes` replace the target through a temporary file in the same directory followed by a rename, so a reader sees either the old or the new complete content under any kind of termination. The `durable = true` option also syncs the file and the directory to storage. `open_atomic(path)` returns a resource whose content replaces the target only when its `using` block completes normally; on error or fault the target is unchanged and the temporary file is removed. After emergency or abnormal termination a temporary file named `.<name>.unio-tmp-<id>` may remain; it never replaces the target.
+- S-9. Atomic writes in `std.files`: `write_text` and `write_bytes` replace the target through a temporary file in the same directory followed by a rename, so a reader sees either the old or the new complete content under any kind of termination. The `durable = true` option also syncs the file and the directory to storage. `open_atomic(path)` returns a resource whose content replaces the target only when `commit()` is called. Releasing it without a commit, whether on error, on fault, or because the block ended without one, removes the temporary file and leaves the target unchanged. The commit is explicit because `release` cannot know how its block ended. After emergency or abnormal termination a temporary file named `.<name>.unio-tmp-<id>` may remain; it never replaces the target.
 - S-10. The standard library is written in Unio in `stdlib/std/`. Everything the language can express is implemented in it; only operating-system and runtime primitives are `external function` declarations in `unsafe module` files. These sources are the normative API; the reference programs use only it, verified by `spec/check_api.py`.
 
 ## 6. Tooling requirements
@@ -293,5 +293,6 @@ Ten programs covering the core and the standard library; stored in the repositor
 ## 10. Constraints and assumptions
 
 - The implementation language of the 0.1 compiler is Rust; code generation through Cranelift. Moving to LLVM or a self-hosted implementation is considered after 0.1.
+- Everything that does not have to exist before the language runs is written in Unio: the standard library (S-10), the reference utilities, and the project tools in `tools/`. The Python checkers in `spec/` and `.github/scripts/` are temporary support for CI and are removed once the stage 3 interpreter runs their Unio versions.
 - Language decisions are made through RFCs in `docs/rfcs/`; the specification is updated when an RFC is accepted.
 - The questions left open in the first version of the concept are settled in `docs/concept.md`, sections 10–11. Revisiting them is possible only through an RFC.

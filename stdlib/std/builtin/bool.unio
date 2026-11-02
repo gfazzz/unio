@@ -1,0 +1,5 @@
+## Methods of Bool. The operators and, or and not are built into the language.
+
+extend Bool with Display:
+    function to_text(self) returns Text:
+        return "true" if self else "false"

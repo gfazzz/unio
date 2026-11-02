@@ -7,6 +7,8 @@
 | [plan.md](plan.md) | Work plan: stages, exit criteria, roles, risks, metrics, later releases |
 | [examples/todo.unio](examples/todo.unio) | Complete example utility written in the language core |
 | [../spec/README.md](../spec/README.md) | EBNF grammar, its reference checker, and the specification test corpus |
+| [stdlib.md](stdlib.md) | Standard library: overview of its Unio sources in `stdlib/` |
 | [../examples](../examples) | Reference utilities checked against the grammar |
+| [../tools](../tools) | Project tools written in Unio |
 | [rfcs/README.md](rfcs/README.md) | RFC process for language changes |
 | [ru/](ru/README.md) | Russian localization |

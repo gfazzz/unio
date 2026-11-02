@@ -1,0 +1,160 @@
+## Formatting and consistency checks for the documentation and specification files.
+##
+## Usage:
+##     check_docs [ROOT]
+##
+## Checks every file with a checked extension below ROOT (the current directory by default):
+## UTF-8, a final line end, no trailing white space, no tabs (except corpus files that test
+## tabs), relative Markdown links that point to existing files, and a Russian localization for
+## every English document. Prints one line per problem.
+## Exit code: 0 if there are no problems, 1 otherwise, 2 if ROOT cannot be read.
+
+import std.args
+import std.files
+
+let CHECKED_EXTENSIONS as List[Text] = ["md", "unio", "ebnf", "py", "yml", "json", "toml"]
+
+let SKIPPED_DIRECTORIES as List[Text] = [".git", "target", "node_modules", "__pycache__"]
+
+let TABS_ALLOWED as List[Text] = ["spec/tests/invalid/tab_indent.unio"]
+
+## English documents whose Russian localization does not follow the docs/ to docs/ru/ rule.
+let SPECIAL_LOCALIZATIONS as Map[Text, Text] = {"README.md": "docs/ru/README.md", "spec/README.md": "docs/ru/spec.md"}
+
+## Files below the directory that have a checked extension, as paths relative to the root.
+function checked_files(root as Path, relative as Text) returns List[Text] fails with IoError:
+    var found as List[Text] = []
+    let directory = root if relative.is_empty() else root.join(relative)
+    for entry in try files.list_directory(directory):
+        let name = entry.name()
+        let entry_relative = name if relative.is_empty() else "{relative}/{name}"
+        if files.is_directory(entry):
+            if name not in SKIPPED_DIRECTORIES:
+                found.append_all(try checked_files(root, entry_relative))
+        else if entry.extension() in CHECKED_EXTENSIONS:
+            found.append(entry_relative)
+    return found
+
+## The Russian localization required for a file, if any.
+function localization(relative as Text) returns Option[Text]:
+    match SPECIAL_LOCALIZATIONS.get(relative):
+        case some(target):
+            return some(target)
+        case none:
+            if relative.starts_with("docs/") and not relative.starts_with("docs/ru/"):
+                if relative.ends_with(".md") or relative.ends_with(".unio"):
+                    return some("docs/ru/" + relative.slice(5, relative.length()))
+            return none
+
+## Problems with line ends, trailing white space, and tabs.
+function layout_problems(relative as Text, text as Text) returns List[Text]:
+    var problems as List[Text] = []
+    if not text.is_empty() and not text.ends_with("\n"):
+        problems.append("{relative}: no newline at end of file")
+    for number, line in text.lines().enumerate(start = 1):
+        if line != line.trim_end():
+            problems.append("{relative}:{number}: trailing white space")
+        if line.contains("\t") and relative not in TABS_ALLOWED:
+            problems.append("{relative}:{number}: tab character")
+    return problems
+
+## Targets of the Markdown links "[text](target)" and "[text](target#anchor)".
+function link_targets(text as Text) returns List[Text]:
+    var targets as List[Text] = []
+    var start = 0
+    while true:
+        match text.index_of("](", start = start):
+            case some(position):
+                start = position + 2
+                match read_target(text, start):
+                    case some(target):
+                        targets.append(target)
+                    case none:
+                        continue
+            case none:
+                return targets
+
+## The target that starts at the position, or none if the text there is not a link target.
+function read_target(text as Text, start as Int) returns Option[Text]:
+    var end = start
+    while end < text.length():
+        let character = text.slice(end, end + 1)
+        if character == ")" or character == "#":
+            if end == start:
+                return none
+            if character == "#" and not text.slice(end, text.length()).contains(")"):
+                return none
+            return some(text.slice(start, end))
+        if character.trim().is_empty():
+            return none
+        end = end + 1
+    return none
+
+## Whether the target starts with a URL scheme such as "https:".
+function is_url(target as Text) returns Bool:
+    match target.index_of(":"):
+        case some(position):
+            let scheme = target.slice(0, position)
+            return not scheme.is_empty() and scheme == scheme.to_lower() and scheme.to_upper() != scheme
+        case none:
+            return false
+
+function link_problems(root as Path, relative as Text, text as Text) returns List[Text]:
+    var problems as List[Text] = []
+    let directory = root.join(relative).parent() or root
+    for target in link_targets(text):
+        if is_url(target):
+            continue
+        if not files.exists(directory.join(target).normalize()):
+            problems.append("{relative}: broken link {target}")
+    return problems
+
+## All problems of one file.
+function file_problems(root as Path, relative as Text) returns List[Text]:
+    let text = try files.read_text(root.join(relative)) on IoError as e:
+        if e.kind == IoErrorKind.InvalidData:
+            return ["{relative}: not UTF-8"]
+        return ["{relative}: cannot be read: {e.reason}"]
+    var problems = layout_problems(relative, text)
+    if relative.ends_with(".md"):
+        problems.append_all(link_problems(root, relative, text))
+    match localization(relative):
+        case some(target):
+            if not files.exists(root.join(target)):
+                problems.append("{relative}: missing Russian localization {target}")
+        case none:
+            return problems
+    return problems
+
+public function main() returns Int:
+    let arguments = args.list()
+    let root = Path(arguments.first() or ".")
+    let relatives = try checked_files(root, "") on IoError as e:
+        print_error("check_docs: {e.path}: {e.reason}")
+        return 2
+    var problems as List[Text] = []
+    for relative in relatives.sorted():
+        problems.append_all(file_problems(root, relative))
+    for problem in problems:
+        print(problem)
+    if problems.is_empty():
+        print("documentation checks passed")
+        return 0
+    print("{problems.length()} problem(s)")
+    return 1
+
+test "the localization of a document in docs":
+    assert localization("docs/plan.md") == some("docs/ru/plan.md")
+    assert localization("docs/ru/plan.md") == none
+    assert localization("spec/README.md") == some("docs/ru/spec.md")
+    assert localization("examples/wc.unio") == none
+
+test "trailing white space and a missing final line end":
+    let problems = layout_problems("a.md", "one \ntwo")
+    assert problems == ["a.md: no newline at end of file", "a.md:1: trailing white space"]
+
+test "link targets without anchors and URLs":
+    let text = "See [plan](plan.md#stages), [site](https://example.org) and [x] (not a link)."
+    assert link_targets(text) == ["plan.md", "https://example.org"]
+    assert is_url("https://example.org")
+    assert not is_url("plan.md")
