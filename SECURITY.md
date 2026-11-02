@@ -1,0 +1,19 @@
+# Security policy
+
+Russian localization: [docs/ru/security.md](docs/ru/security.md). The architecture of defenses is in [docs/contributing.md](docs/contributing.md).
+
+## Reporting a vulnerability
+
+Report vulnerabilities privately through GitHub's "Report a vulnerability" form for this repository (Security tab), not through public issues or pull requests. Include the affected files or commands, steps to reproduce, and the impact you believe it has.
+
+You will get an acknowledgement within 7 days and a decision on severity and a fix plan within 30 days. Please do not publish details before a fix is released or 90 days have passed, whichever comes first.
+
+## Scope
+
+In scope now: the checkers in `spec/` and `.github/scripts/`, the CI workflows, and anything in the repository that could run code on a contributor's or maintainer's machine or on a CI runner.
+
+In scope later, once they exist: the compiler and runtime, the sandbox (requirements SB-1 to SB-15), the standard library's `unsafe module` files, the package registry, and release artifacts.
+
+## What happens after a report
+
+A confirmed malicious change is reverted before it is analyzed. A compromised dependency, key, or release is revoked, and affected versions are named in the release notes. Every incident ends with a change to the defenses in `docs/contributing.md` or to a check.

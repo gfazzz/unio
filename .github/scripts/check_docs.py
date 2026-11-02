@@ -20,6 +20,7 @@ TABS_ALLOWED = {os.path.join("spec", "tests", "invalid", "tab_indent.unio")}
 SPECIAL = {
     "README.md": "docs/ru/README.md",
     "spec/README.md": "docs/ru/spec.md",
+    "SECURITY.md": "docs/ru/security.md",
 }
 
 

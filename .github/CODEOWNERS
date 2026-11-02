@@ -1,0 +1,14 @@
+# Paths that form the trusted computing base of the repository
+# (docs/contributing.md, section 2). A change here needs the owner's review.
+/.github/            @gfazzz
+/spec/*.py           @gfazzz
+/spec/grammar.ebnf   @gfazzz
+/spec/tests/         @gfazzz
+/tools/              @gfazzz
+/stdlib/std/         @gfazzz
+/AGENTS.md           @gfazzz
+/SECURITY.md         @gfazzz
+/docs/concept.md     @gfazzz
+/docs/requirements.md @gfazzz
+/docs/ru/concept.md  @gfazzz
+/docs/ru/requirements.md @gfazzz

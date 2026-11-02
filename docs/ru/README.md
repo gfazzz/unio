@@ -48,4 +48,6 @@ Unio должен поставляться как единый комплект:
 | [../../tools](../../tools) | Инструменты проекта на Unio |
 | [rfcs/README.md](rfcs/README.md) | Процесс RFC для изменений языка |
 | [influences.md](influences.md) | Что Unio берёт из Zig, Odin, Gleam, Mojo и Unison, а что отклоняет |
+| [contributing.md](contributing.md) | Приём внешних изменений: модель угроз, уровни доверия, слои защиты от плохого и вредоносного кода |
+| [security.md](security.md) | Как сообщить об уязвимости и что происходит дальше |
 | [os.md](os.md) | UnioS: сайт про Unio, на Unio, на ОС, написанной на Unio; архитектура, этапы, риски |
