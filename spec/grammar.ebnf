@@ -118,7 +118,9 @@ variant         = NAME [ "(" variant_field { "," variant_field } ")" ] NEWLINE ;
 variant_field   = NAME "as" type ;
 
 interface_decl  = "interface" NAME [ generic_params ] ":"
-                  NEWLINE INDENT function_sig NEWLINE { function_sig NEWLINE } DEDENT ;
+                  NEWLINE INDENT interface_member { interface_member } DEDENT ;
+interface_member = function_sig ( NEWLINE | ":" block ) ;
+                  (* a method with a block has a default implementation (L-6c) *)
 
 extend_decl     = "extend" [ generic_params ] type [ "with" type ] ":"
                   NEWLINE INDENT member { member } DEDENT ;

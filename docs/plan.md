@@ -136,7 +136,7 @@ Work:
 - 24-hour compiler fuzzing; defect fixes.
 - Readability trial (1.4, item 2) with external participants.
 - Reproducible release build, signatures, SBOM, installers for four platforms.
-- Reference, guide, library documentation in both languages.
+- Reference, guide, library documentation in both languages. The guide includes the chapter on moving from classes (requirement D-2).
 - Acceptance per specification section 9.2.
 
 Result: Unio 0.1, public repository, package registry, documentation site.
@@ -196,7 +196,7 @@ Tracked in CI and published with every release:
 
 | Release | Contents | Dependencies on 0.1 |
 |---|---|---|
-| 0.2 "Server" | Task-based concurrency without shared mutable state, `std.net`, HTTP client and server, `std.crypto` with constant-time primitives and a secure random source, TLS 1.3, CPU and RAM profiler | No shared mutable state in the core; profiler event format |
+| 0.2 "Server" | Task-based concurrency without shared mutable state, an explicit type for shared mutable values (object graphs with identity, concept rationale 17), `std.net`, HTTP client and server, `std.crypto` with constant-time primitives and a secure random source, TLS 1.3, CPU and RAM profiler | No shared mutable state in the core; profiler event format |
 | 0.3 "Compute" | Tensors as resources, lifetime scopes with budgets, autodiff, CPU/GPU backends, buffer planning, VRAM profiling, device-completion-aware release | `Resource`, `using`, generics, effects in signatures |
 | 0.4 "Quantum" | Circuits as values, simulator, hardware interface with capability description | Backend interface from 0.3 |
 | 0.5 "System" | The `system` profile: memory without a GC and code without copy-on-write, control of representation, pointers, memory-mapped devices and assembly in `unsafe module`, interrupts, atomic operations and a memory model, checked constraints on effects; the prototype kernel of concept section 8.1 in a virtual machine | Layers `core`, `alloc`, `std`; derived effects; the memory model must agree with the concurrency of 0.2 |

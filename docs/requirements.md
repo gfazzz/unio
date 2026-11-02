@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.7 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.8 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.7: interface values with dispatch at run time and default methods (L-6b, L-6c); a guide chapter on classes (D-2).
 
 Changes from 0.6: visibility of fields and methods and functions of a type (L-23a to L-23d).
 
@@ -79,6 +81,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - L-5. No implicit conversions between types. Conversion is an explicit call (`to_text`, `to_int`, `to_float`).
 - L-6. User-defined types: `struct`, `enum`, `interface`, `error`; interface implementation via `extend ... with ...`.
 - L-6a. An enum variant is written `Enum.Variant`. The short form `Variant` is allowed when no type, function, constant, or variant of another enum with that name is visible in the module; otherwise the short form is a compile error with a fix that adds the enum name. `some`, `none`, `ok`, and `error` are always visible and cannot be declared.
+- L-6b. An interface used as a type, for example `List[Shape]` or `shape as Shape`, holds a value of any type that implements it, and a method call on it is dispatched at run time to that type's implementation; `on Error as e` is such a value. An interface can be used this way only if its methods use `Self` nowhere but in the receiver and have no generic parameters, because the concrete type is unknown; otherwise the compiler names the method that prevents it. An interface value has no `==` and does not reveal its concrete type: a closed set of types is an `enum`. A resource cannot be held as an interface value. A generic function `[T with Shape]` stays resolved at compile time.
+- L-6c. A method of an interface with a block has a default implementation. The block may reach the value only through the methods of the interface. A type that implements the interface may replace the default in its `extend ... with` block with the same signature; `unio symbol` shows which implementation a type uses. Defaults are the way to share code between types without inheritance of implementation.
 - L-7. Generic functions and types with parameters and interface constraints.
 - L-8. Type inference only for local `let`/`var`. Parameters, results, fields, and exported constants must be annotated.
 - L-9. Equality of structs and enums is by content; the `Equal` implementation is derived automatically. `Float` compares per IEEE 754 and does not implement `Hash`: it cannot be a `Map` key, a `Set` element, or a `match` pattern. Resources do not implement `Equal`; `==` on them is a compile error with the hint `is_same`.
@@ -296,7 +300,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 ## 8. Documentation requirements
 
 - D-1. Language reference: grammar in EBNF, semantics of every construct, list of diagnostic codes.
-- D-2. Guide: from installation to publishing a package, using `todo` as the example.
+- D-2. Guide: from installation to publishing a package, using `todo` as the example. The guide has a chapter on moving from classes to Unio: structs and `extend` instead of classes, interfaces with defaults and interface values instead of base classes, composition instead of inheritance, identifiers and maps instead of shared object graphs.
 - D-3. Standard library reference generated from documentation comments.
 - D-4. The document "How Unio works with AI": JSON formats, recommended loop, prompt examples.
 - D-5. Documentation in English (primary) and Russian (localization in `docs/ru`).

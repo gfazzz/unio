@@ -1,0 +1,4 @@
+# expect-error: 4
+interface Shape:
+    function area(self) returns Float:
+    function name(self) returns Text

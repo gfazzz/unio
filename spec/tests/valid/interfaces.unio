@@ -1,0 +1,49 @@
+## Interfaces: required methods, methods with a default, and interface values (L-6b, L-6c).
+
+interface Shape:
+    function area(self) returns Float
+    function name(self) returns Text
+
+    ## A method with a default: it may call only the methods of the interface.
+    function describe(self) returns Text:
+        return "{self.name()} with area {self.area()}"
+
+struct Circle:
+    radius as Float
+
+struct Square:
+    side as Float
+
+extend Circle with Shape:
+    function area(self) returns Float:
+        return 3.14159 * self.radius * self.radius
+
+    function name(self) returns Text:
+        return "circle"
+
+extend Square with Shape:
+    function area(self) returns Float:
+        return self.side * self.side
+
+    function name(self) returns Text:
+        return "square"
+
+    ## A type may replace a default method with its own.
+    function describe(self) returns Text:
+        return "square {self.side} x {self.side}"
+
+## An interface used as a type holds any value that implements it; calls go through the interface.
+function total_area(shapes as List[Shape]) returns Float:
+    var total = 0.0
+    for shape in shapes:
+        total = total + shape.area()
+    return total
+
+## A generic function is resolved at compile time; use it when all items have one type.
+function largest[T with Shape](shapes as List[T]) returns Option[T]:
+    return shapes.sorted_by(function (shape as T) returns Float: -shape.area()).first()
+
+test "a list of different shapes":
+    let shapes as List[Shape] = [Circle(radius = 1.0), Square(side = 2.0)]
+    assert total_area(shapes) > 7.0
+    assert shapes[1].describe() == "square 2.0 x 2.0"

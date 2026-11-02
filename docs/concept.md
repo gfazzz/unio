@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.8. Changes from 0.7: visibility of fields and methods, functions of a type (sections 2.6, 5).
+Version: 0.9. Changes from 0.8: interface values and default methods; why there are no classes (section 2.6, rationale 17).
+
+Changes from 0.7: visibility of fields and methods, functions of a type (sections 2.6, 5).
 
 Changes from 0.6: test-first development of the language and of programs (section 1.2).
 
@@ -163,6 +165,20 @@ extend User with Display:
 - `struct` is a record with named fields, constructed as `User(id = 1, name = "Anna")`. Struct values compare by content.
 - `enum` is a sum type with variants; variants may have fields. Used for commands, states, and parse results.
 - `interface` is a set of methods. Implementation is declared explicitly with `extend ... with ...`. There is no implementation inheritance; reuse goes through composition and generic functions.
+- An interface is also a type. `List[Shape]` holds circles and squares together, and `shape.area()` calls the implementation of whichever type the value has; a generic function `[T with Shape]` is the compile-time alternative when all items have one type. A method of an interface may have a default implementation that uses the other methods of the interface; a type may replace it. This is how code is shared between types without classes:
+
+```unio
+interface Shape:
+    function area(self) returns Float
+    function name(self) returns Text
+
+    function describe(self) returns Text:          # default, shared by every shape
+        return "{self.name()} with area {self.area()}"
+
+let shapes as List[Shape] = [Circle(radius = 1.0), Square(side = 2.0)]
+for shape in shapes:
+    print(shape.describe())
+```
 - Methods are functions in an `extend` block. The first parameter `self` makes a function a method, called as `account.deposit(100)`; `var self` marks a method that changes the value. A function in `extend` without `self` is a function of the type, called as `Account.open("Anna")`; this is how a type offers named constructors that check their invariants.
 - Visibility inside a type: struct fields and methods are private to the module unless marked `public`. A struct with private fields is built only in its module, so it can protect its invariants. Fields of errors and of variants are always visible with their type, because callers handle them; methods that implement an interface are visible with the interface.
 
@@ -432,6 +448,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Kernels and code without an operating system | One language: library layers `core`, `alloc`, `std` and build profiles that only remove capabilities; system features in a later release (section 8.1) |
 | How changes to the language and to programs are made | Test first: a failing check, then the change, then all checks green (section 1.2) |
 | Visibility inside types | Fields and methods private unless `public`; error and variant fields visible with their type; interface methods visible with the interface; functions of a type called as `T.name(...)` |
+| Classes | None. Structs and `extend` for data and methods, interfaces with defaults and interface values for polymorphism, composition for reuse; a shared mutable value type is designed with the concurrency of 0.2 |
 | Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
@@ -448,7 +465,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–16 were added in version 0.4 after review and after writing the standard library in Unio.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–17 were added in version 0.4 after review and after writing the standard library in Unio.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -466,3 +483,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 14. **Layers and profiles now, system features later.** Splitting the library and the runtime is cheap while they are small and expensive once applications depend on them; checking the layers from the start keeps `core` free of hidden dependencies on the allocator, the GC, and the operating system. The system features themselves need careful design and do not help the first release, so they wait for their own release, while these two boundaries keep the way open, also for embedded devices and high-performance computing.
 15. **Tests first.** Generated code is reviewed briefly, so the reviewer needs a statement of intent that can be executed; a test written before the code is that statement, and it cannot be bent to fit an implementation that already exists. For the language, a failing check before every change keeps the specification, the corpus, and the implementation from drifting apart, which is how the grammar defects of version 0.4 were found.
 16. **Visibility inside types.** A type that keeps an invariant, such as an atomic file that must not be committed twice, needs fields that only its own module can touch; that is the default. Errors and variants are the opposite case: their fields exist to be read by whoever handles them, so requiring `public` on each would only add noise. Functions of a type give named constructors without a separate constructor syntax.
+17. **No classes.** Inheritance of implementation spreads the behavior of a type over a chain of parents and overrides, which is exactly what a reader of unfamiliar code cannot follow; it also assumes shared mutable objects, which the value model of section 2.7 excludes. What classes are used for is kept: methods through `extend`, encapsulation through private fields and functions of a type, open polymorphism through interface values, closed polymorphism through `enum`, and shared code through default methods. Object graphs with identity, such as observers or caches shared by several parts of a program, are represented by identifiers and maps in 0.1; an explicit shared mutable type belongs with the concurrency model of release 0.2, where sharing has to be designed anyway.
