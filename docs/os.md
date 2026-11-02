@@ -37,6 +37,7 @@ UnioS uses what concept section 8.1 defines and adds nothing to the language:
 - **Build profiles.** The kernel is built in the `system` profile (release 0.5): memory without a GC, control of representation, pointers and memory-mapped devices in `unsafe module` files, interrupts, atomic operations, and checked constraints on effects. Services and the site are built in the `application` profile.
 - **Sandbox as capabilities.** The sandbox requirements of the specification (SB-1 onward) are satisfied on UnioS by the kernel's capability model; the same manifest yields the same restrictions on Linux and on UnioS.
 - **Start layer.** A small start layer in assembly or Rust (bootloader entry, early paging) is acceptable under concept section 1.1, with a stated reason and end.
+- **Library for TLS.** The only library work the track adds is what any HTTPS server in Unio needs: `std.crypto` with constant-time primitives and a cryptographically secure random source (plan section 9.2). On UnioS the kernel provides entropy from virtio-rng.
 
 Anything UnioS turns out to need beyond this is proposed as an RFC to the language, not implemented as a private fork.
 
@@ -84,15 +85,15 @@ Design rules:
 
 The track starts together with release 0.5 "System", whose prototype kernel (bootloader, entry into Unio code, serial output, page management, timer, scheduler, user process, system call) is UnioS stage U-1's starting point. It needs native code (plan stage 4), the concurrency model and `std.net` design from 0.2, and the `system` profile from 0.5. Estimates assume a team of 2–3 engineers separate from the language team.
 
-| Stage | Duration | Result | Exit criterion |
+| Stage | Weeks of the track | Result | Exit criterion |
 |---|---|---|---|
-| U-0 Design | 6 weeks, during 0.5 | UnioS specification, device model (virtio), capability model mapped from manifest permissions, system-call interface, service protocol | Specification accepted; the 0.5 prototype kernel boots under QEMU with the UnioS system-call table |
-| U-1 Kernel | 10 weeks | Virtio transport, interrupts, memory regions for processes, process creation and capabilities, serial console, driver processes | A driver process receives interrupts and reads a virtio device; memory and timer tests green under QEMU |
-| U-2 Network and site | 14 weeks | virtio-net driver, TCP/IP and DNS service, `std` over UnioS system calls, HTTP/1.1 server, web framework, the site over HTTP on a local VM | Site serves from a local VM; the network stack survives 24 h of fuzzing |
-| U-3 Storage, TLS, deployment | 14 weeks | virtio-blk driver, file store service with the atomic-write guarantees of S-9, TLS 1.3 subset, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable from the internet over HTTPS for 30 days with uptime recorded |
+| U-0 Design | 1–6, during 0.5 | UnioS specification, device model (virtio), capability model mapped from manifest permissions, system-call interface, service protocol | Specification accepted; the 0.5 prototype kernel boots under QEMU with the UnioS system-call table |
+| U-1 Kernel | 6–16 | Virtio transport, interrupts, memory regions for processes, process creation and capabilities, serial console, driver processes | A driver process receives interrupts and reads a virtio device; memory and timer tests green under QEMU |
+| U-2 Network and site | 14–28 | virtio-net driver, TCP/IP and DNS service, `std` over UnioS system calls, HTTP/1.1 server, web framework, the site over HTTP on a local VM | Site serves from a local VM; the network stack survives 24 h of fuzzing |
+| U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store service with the atomic-write guarantees of S-9, TLS 1.3 subset on `std.crypto`, an ACME client in Unio that obtains and renews the certificate, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable from the internet over HTTPS for 30 days with uptime recorded |
 | U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator device model, model-serving service, QPU device model, broader hardware | Own specification, outside the language roadmap |
 
-Stages U-0 to U-3 total roughly 44 weeks and deliver the proof of concept, the UnioS 0.1 milestone, announced on the site it serves.
+Stages overlap where the next one can start on finished parts; the weeks are the same as in plan section 9.1. Stages U-0 to U-3 take 44 weeks and deliver the proof of concept, the UnioS 0.1 milestone, announced on the site it serves.
 
 ## 7. Risks
 
@@ -104,6 +105,7 @@ Stages U-0 to U-3 total roughly 44 weeks and deliver the proof of concept, the U
 | `std` over UnioS diverges from `std` over Linux | medium | One `std` interface, two backends; the specification test corpus and the reference utilities run on both |
 | Kernel-level AI support stays a slogan | medium | U-4 ships a measurable service: model inference with memory and latency visible in the profiler |
 | Expectation that UnioS runs on quantum hardware | medium | The QPU is a coprocessor device model; stated plainly in section 2 |
+| Timing side channels in cryptography written in Unio | medium | Constant-time primitives in reviewed `unsafe module` files without allocation or GC; statistical timing tests in CI; external review before public exposure |
 
 ## 8. Decision
 

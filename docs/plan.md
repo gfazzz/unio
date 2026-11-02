@@ -195,7 +195,7 @@ Tracked in CI and published with every release:
 
 | Release | Contents | Dependencies on 0.1 |
 |---|---|---|
-| 0.2 "Server" | Task-based concurrency without shared mutable state, `std.net`, HTTP client and server, CPU and RAM profiler | No shared mutable state in the core; profiler event format |
+| 0.2 "Server" | Task-based concurrency without shared mutable state, `std.net`, HTTP client and server, `std.crypto` with constant-time primitives and a secure random source, TLS 1.3, CPU and RAM profiler | No shared mutable state in the core; profiler event format |
 | 0.3 "Compute" | Tensors as resources, lifetime scopes with budgets, autodiff, CPU/GPU backends, buffer planning, VRAM profiling, device-completion-aware release | `Resource`, `using`, generics, effects in signatures |
 | 0.4 "Quantum" | Circuits as values, simulator, hardware interface with capability description | Backend interface from 0.3 |
 | 0.5 "System" | The `system` profile: memory without a GC and code without copy-on-write, control of representation, pointers, memory-mapped devices and assembly in `unsafe module`, interrupts, atomic operations and a memory model, checked constraints on effects; the prototype kernel of concept section 8.1 in a virtual machine | Layers `core`, `alloc`, `std`; derived effects; the memory model must agree with the concurrency of 0.2 |
@@ -217,16 +217,17 @@ The track starts with release 0.5 "System": the prototype kernel of that release
 | U-0 Design | 1–6, during 0.5 | UnioS specification, virtio device model, capabilities mapped from manifest permissions, system-call interface, service protocol | Specification accepted; the 0.5 prototype kernel boots under QEMU with the UnioS system-call table |
 | U-1 Kernel | 6–16 | Virtio transport, interrupts, memory regions for processes, process creation and capabilities, serial console, driver processes | A driver process receives interrupts and reads a virtio device; memory and timer tests green |
 | U-2 Network and site | 14–28 | virtio-net driver, TCP/IP and DNS service, `std` over UnioS system calls, HTTP/1.1 server, web framework, site over HTTP on a local VM | Site serves from a local VM; 24 h of network fuzzing survived |
-| U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store with the S-9 guarantees, TLS 1.3 subset, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable over HTTPS for 30 days with recorded uptime |
+| U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store with the S-9 guarantees, TLS 1.3 subset on `std.crypto`, ACME client for the certificate, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable over HTTPS for 30 days with recorded uptime |
 | U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator and QPU device models, model-serving service | Own specification, outside the language roadmap |
 
 The proof of concept (U-0 to U-3) is the UnioS 0.1 milestone and is announced on the site it serves.
 
 ### 9.2 What the language owes the track
 
-Nothing beyond what is already planned: the `core`, `alloc`, and `std` layers and `unio check --profile=core` in 0.1; task-based concurrency and `std.net` as interfaces without POSIX assumptions in 0.2; the `system` profile, the memory model, and the freestanding prototype in stage 4 and release 0.5. Two consequences are recorded here so that they are not lost:
+Already planned: the `core`, `alloc`, and `std` layers and `unio check --profile=core` in 0.1; task-based concurrency and `std.net` as interfaces without POSIX assumptions in 0.2; the `system` profile, the memory model, and the freestanding prototype in stage 4 and release 0.5. Three consequences are recorded here so that they are not lost:
 
 - `std` has one interface and two backends, a host operating system and UnioS; the specification test corpus and the reference utilities must run on both.
+- An HTTPS server in Unio needs cryptography, which the roadmap did not contain: `std.crypto` (hashes, authenticated encryption, key exchange, signatures for certificates) with constant-time primitives in reviewed `unsafe module` files (S-7, R-5) that allocate nothing and do not touch the GC, and a cryptographically secure random source, kept separate from the fast generator of `std.random`. This is new work for release 0.2, where the HTTP server is, and goes through an RFC.
 - The sandbox requirements (SB-1 onward) are stated so that a kernel capability model satisfies them without a host sandbox.
 
 Any further need the track discovers goes to the language as an RFC.
@@ -240,6 +241,7 @@ Any further need the track discovers goes to the language as an RFC.
 | `std` over UnioS diverges from `std` over Linux | medium | One interface, two backends, one test corpus |
 | "AI in the kernel" remains a slogan | medium | U-4 ships a measurable model-serving service with memory and latency visible in the profiler |
 | Expectation that UnioS runs on quantum hardware | medium | A QPU is a coprocessor device model; stated plainly in `docs/os.md` |
+| Timing side channels in cryptography written in Unio | medium | Constant-time primitives in reviewed `unsafe module` files without allocation or GC; statistical timing tests in CI; external review before public exposure |
 
 ## 10. Immediate actions
 
