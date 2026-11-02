@@ -2,6 +2,8 @@
 
 Version: 0.1 (draft). Basis: `docs/requirements.md`. Russian localization: `docs/ru/plan.md`. Durations are given in weeks from the start of work and assume a team of 3–4 engineers. With a different team the durations scale; the order of stages stays.
 
+Changes from the initial 0.1 draft: UnioS requires human- and AI-accessible administration and an integrated base system (section 9; `docs/os.md`, sections 1.1–1.2).
+
 ## 1. Project principles
 
 - **Specification before code.** A construct enters the compiler only after its syntax and semantics are written in the reference.
@@ -209,6 +211,8 @@ Each later release starts with its own specification modeled on `docs/requiremen
 
 UnioS is the operating system written in Unio. Concept section 8.1 keeps a general-purpose operating system off the language roadmap, so UnioS is a separate project with its own specification and team. Its first deliverable is the proof of concept: the project site, written in Unio, served by a web server and framework in Unio, on UnioS, on a VM of the class 8 GB RAM / 4 cores / 80 GB, reachable over HTTPS. Design, architecture, and risks are in `docs/os.md`; this section fixes the track's place in the schedule and what the language owes it.
 
+The OS inherits the language's requirements for human and AI understanding, explicit behavior, and controlled resources. Its base system follows the FreeBSD approach: kernel, libraries, essential services, and administrative tools are developed and released together, with a documented inventory and common conventions. Additional applications extend that base. Local and remote management, including SSH, share documented CLI/API contracts, structured diagnostics, and permission checks. These are baseline requirements of `docs/os.md`, sections 1.1–1.2, with acceptance scenarios; model serving is a later capability.
+
 ### 9.1 Schedule
 
 The track starts with release 0.5 "System": the prototype kernel of that release (bootloader, entry into Unio code, serial output, page management, timer, scheduler, user process, system call) is the starting point of stage U-1. Weeks count from the start of the track; the team of 2–3 engineers is separate from the language team.
@@ -221,7 +225,7 @@ The track starts with release 0.5 "System": the prototype kernel of that release
 | U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store with the S-9 guarantees, TLS 1.3 subset on `std.crypto`, ACME client for the certificate, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable over HTTPS for 30 days with recorded uptime |
 | U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator and QPU device models, model-serving service | Own specification, outside the language roadmap |
 
-The proof of concept (U-0 to U-3) is the UnioS 0.1 milestone and is announced on the site it serves.
+The proof of concept (U-0 to U-3) is the UnioS 0.1 milestone and is announced on the site it serves. U-0 fixes the base-system inventory per release and the administration acceptance scenarios. U-2 must pass the local scenarios for site services. Before public deployment, U-3 must also pass them over authenticated SSH with a standard client, including permission denial and recovery after a disconnected request, and demonstrate the site's update and recovery path. These requirements apply to both the CLI and agent workflows described in `docs/os.md`. The minimal management CLI precedes the general-purpose shell and application package manager in U-4. The draft estimates must be reassessed in U-0 against this scope.
 
 ### 9.2 What the language owes the track
 
