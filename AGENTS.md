@@ -18,6 +18,14 @@ Read the relevant sources before changing language behavior:
 - [spec/README.md](spec/README.md): checker usage, corpus conventions, and
   the boundary between syntax checks and future compiler checks.
 - [docs/rfcs/README.md](docs/rfcs/README.md): the language change process.
+- [docs/influences.md](docs/influences.md): what was taken from other
+  languages and what was declined, with reasons. Read it before proposing a
+  feature seen elsewhere; a declined feature needs an RFC, not a new proposal.
+- [docs/os.md](docs/os.md): UnioS, the operating system track. It uses the
+  language as specified and adds nothing to it; a need it discovers goes to
+  the language as an RFC.
+- [docs/stdlib.md](docs/stdlib.md): the standard library overview, kept in
+  step with `stdlib/`.
 
 The directories listed in the roadmap include future work. Inspect the actual
 checkout before choosing build commands or adding infrastructure.
@@ -79,3 +87,38 @@ Report which checks actually ran and distinguish static validation from executio
 - Keep changes focused and preserve existing user work. In a managed cloud task,
   use the existing checkout: each task is already isolated, so create a Git
   worktree only when the user explicitly requests one.
+
+## Coordinating with parallel work
+
+Several sessions push to `main` in the same hour. Treat `origin/main` as moving:
+
+- Fetch `origin/main` right before branching and again right before pushing.
+  Push as a fast-forward; if the push is rejected, rebase onto the new
+  `origin/main` and resolve conflicts by keeping the other side's text and
+  adding yours, never by dropping it.
+- Version headers collide first. The concept starts with `Version: N. Changes
+  from N-1: ...` and keeps the older `Changes from` paragraphs below it; the
+  requirements start with `Specification version: N (draft)` followed by
+  `Changes from` paragraphs. Pick `N` from the fetched `origin/main`, and after
+  a rebase renumber your note and any rationale or requirement numbers it cites.
+- Append, do not renumber: rows go at the end of the settled-questions table
+  (concept section 10), rationale paragraphs take the next number in section
+  11, and a requirement that refines an existing one takes a letter suffix
+  next to it (`C-11a`), so parallel additions do not shift each other.
+- Deleting a remote branch may not be possible from a cloud session. Prefer
+  fast-forward pushes to `main` over branches that only duplicate it; a branch
+  that is left behind is deleted by hand on GitHub.
+
+## Document conventions
+
+- Requirement identifiers are translated by prefix: `L` is `Я` (language),
+  `C` is `К` (compiler), `S` is `Б` (library), `T` is `И` (tools), `R` is `Н`
+  (non-functional), `D` is `Д` (documentation), and `SB` stays `SB`. The number
+  and the letter suffix are the same in both languages.
+- A new English document under `docs/` needs its Russian twin in the same
+  commit (`check_docs.py` fails otherwise), plus a link in `README.md`,
+  `docs/README.md`, and `docs/ru/README.md`. Russian documents cite
+  `docs/ru/...` paths and name the English version as primary in their header.
+- A design note that records a decision (like `docs/influences.md`) states
+  where the decision landed: the concept section, the requirement identifier,
+  or the plan section, so that the note and the normative text cannot drift.
