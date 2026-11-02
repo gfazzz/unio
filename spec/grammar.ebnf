@@ -104,15 +104,17 @@ field           = [ "var" ] NAME "as" type [ "=" expression ] NEWLINE ;
 
 enum_decl       = "enum" NAME [ generic_params ] ":"
                   NEWLINE INDENT variant { variant } DEDENT ;
-variant         = NAME [ "(" variant_field { "," variant_field } ")" ] NEWLINE ;
+variant         = ( NAME | "error" ) [ "(" variant_field { "," variant_field } ")" ] NEWLINE ;
+                  (* "error" is declared only by the prelude, in Result *)
 variant_field   = NAME "as" type ;
 
 interface_decl  = "interface" NAME [ generic_params ] ":"
                   NEWLINE INDENT function_sig NEWLINE { function_sig NEWLINE } DEDENT ;
 
-extend_decl     = "extend" type [ "with" type ] ":"
+extend_decl     = "extend" [ generic_params ] type [ "with" type ] ":"
                   NEWLINE INDENT member { member } DEDENT ;
-member          = [ "public" ] function_decl ;
+member          = [ "public" ] ( function_decl | external_decl ) ;
+                  (* external_decl only in an unsafe module, like at top level *)
 
 constant_decl   = "let" NAME [ "as" type ] "=" expression NEWLINE ;
 
@@ -229,7 +231,7 @@ bind_pattern    = primary_pattern [ "as" NAME ] ;
 primary_pattern = "_"
                 | literal_pattern
                 | constructor_pattern
-                | NAME                         (* binding or variant: resolved by check *)
+                | pattern_name                 (* binding, variant, or Enum.Variant *)
                 | list_pattern
                 | tuple_pattern ;
 literal_pattern = [ "-" ] INT | TEXT | "true" | "false" ;

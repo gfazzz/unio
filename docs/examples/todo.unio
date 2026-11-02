@@ -19,7 +19,7 @@ struct Task:
 enum Command:
     Add(title as Text)
     Done(id as Int)
-    List
+    Show
     Help
 
 error StorageError:
@@ -29,13 +29,13 @@ error StorageError:
 error UsageError:
     message as Text
 
-## Storage path: $TODO_FILE or ~/.todo.json.
+## Storage path: $TODO_FILE, otherwise ~/.todo.json, or ./.todo.json without a home directory.
 function storage_path() returns Path:
     match env.get("TODO_FILE"):
         case some(value):
             return Path(value)
         case none:
-            return env.home_dir().join(".todo.json")
+            return (env.home_dir() or Path(".")).join(".todo.json")
 
 function load_tasks(path as Path) returns List[Task] fails with StorageError:
     if not files.exists(path):
@@ -63,7 +63,7 @@ function parse_command(arguments as List[Text]) returns Command fails with Usage
                 case none:
                     fail UsageError(message = "task number must be an integer: {id_text}")
         case ["list"]:
-            return List
+            return Show
         case ["help"] | []:
             return Help
         case _:
@@ -80,14 +80,14 @@ function run(command as Command, path as Path) fails with StorageError, UsageErr
             try save_tasks(path, tasks)
             print("Added: {title}")
         case Done(id):
-            match tasks.find(function (task as Task) returns Bool: task.id == id):
-                case some(task):
-                    task.done = true
+            match tasks.find_index(function (task as Task) returns Bool: task.id == id):
+                case some(index):
+                    tasks[index].done = true
                     try save_tasks(path, tasks)
-                    print("Done: {task.title}")
+                    print("Done: {tasks[index].title}")
                 case none:
                     fail UsageError(message = "no task with number {id}")
-        case List:
+        case Show:
             if tasks.is_empty():
                 print("No tasks")
             for task in tasks:

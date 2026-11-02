@@ -17,7 +17,7 @@ function control(items as List[Int], limit as Int) returns Int:
         total = total + item
     for index, item in items.enumerate():
         print("{index}: {item}")
-    var queue = items.copy()
+    var queue = items
     while not queue.is_empty():
         total = total - queue.pop()
     assert total >= 0
@@ -52,7 +52,7 @@ function patterns(value as Option[Int], words as List[Text], point as Tuple[Int,
             return "circle {r}"
         case ok(Shape.Rectangle(w, h)):
             return "rectangle"
-        case ok(Empty):
+        case ok(Shape.Empty):
             return "empty shape"
         case error(ParseError as e):
             return e.message

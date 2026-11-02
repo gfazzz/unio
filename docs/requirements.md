@@ -63,9 +63,10 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 3.2 Types
 
-- L-4. Built-in types: `Int`, `Float`, `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Result[T, E]`, `Tuple`, `Path`, `Function`.
+- L-4. Built-in types: `Int`, `Float`, `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Result[T, E]`, `Tuple`, `Path`, `Function`, `Never`. `Never` is the result type of a function that does not return; inside an interface `Self` stands for the implementing type.
 - L-5. No implicit conversions between types. Conversion is an explicit call (`to_text`, `to_int`, `to_float`).
 - L-6. User-defined types: `struct`, `enum`, `interface`, `error`; interface implementation via `extend ... with ...`.
+- L-6a. An enum variant is written `Enum.Variant`. The short form `Variant` is allowed when no type, function, constant, or variant of another enum with that name is visible in the module; otherwise the short form is a compile error with a fix that adds the enum name. `some`, `none`, `ok`, and `error` are always visible and cannot be declared.
 - L-7. Generic functions and types with parameters and interface constraints.
 - L-8. Type inference only for local `let`/`var`. Parameters, results, fields, and exported constants must be annotated.
 - L-9. Equality of structs and enums is by content; the `Equal` implementation is derived automatically. `Float` compares per IEEE 754 and does not implement `Hash`: it cannot be a `Map` key, a `Set` element, or a `match` pattern. Resources do not implement `Equal`; `==` on them is a compile error with the hint `is_same`.
@@ -75,7 +76,9 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 3.3 Mutability
 
 - L-10. `let` is immutable, `var` is mutable. Reassigning a `let` is a compile error.
-- L-11. Mutating collection methods are available only on `var`. A function modifies an argument only through a parameter declared `var`; the caller must pass a `var` value.
+- L-11. A value changes only through a place rooted in a `var` binding or a `var` parameter, and a struct field changes only if it is declared `var`: `tasks[index].done = true`. Names bound by `let`, by patterns (`case some(task)`), and by `for` are immutable. Mutating collection methods are available only on such places. A function modifies an argument only through a parameter declared `var`; the caller passes a `var` variable, and the same variable cannot be passed to two `var` parameters of one call.
+- L-11a. Structs, enums, collections, and text are values: binding, passing, returning, and storing never share mutable state, so a change through one name is never seen through another. Anonymous functions capture values when they are created and cannot assign to captured variables. Resources are not values: they have identity (L-9) and are never copied.
+- L-11b. Values are shared until changed. Changing a shared value copies only the changed level, nested values stay shared; changing an unshared value happens in place, and appending to an unshared list takes amortized constant time. The cost of copies is measured in the performance suite (section 7.1).
 
 ### 3.4 Errors and missing values
 
@@ -149,7 +152,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - SB-3. The external policy is a file given by the operator with `--policy <file>` or the environment variable `UNIO_POLICY`. It can only narrow the manifest permissions and sets limits: heap size, wall time, CPU time, number of processes, size of written files. Extra permissions in a policy have no effect and produce a warning. A policy that cannot be read or parsed stops the start with code 103.
 - SB-4. Mechanisms: Linux — Landlock for the file system, seccomp-bpf for system calls, `no_new_privs`, resource limits; macOS — a Seatbelt profile and resource limits; Windows — AppContainer and a Job Object. The choice is confirmed by prototypes in stage 4 of the plan; the requirement is the outcome, verified by SB-8.
 - SB-5. The sandbox fails closed: if the operating system lacks a required mechanism, the program does not start (code 103). Only the operator can allow a weaker sandbox, with `--allow-weaker-sandbox` or `allow_weaker = true` in the policy; the runtime then prints the restrictions that are missing. The program itself cannot do this.
-- SB-6. An operation blocked by the sandbox ends with the error that the standard library function already declares (for example, `IoError` of kind `permission_denied` naming the denied permission), not with a fault. Safe code reaches the operating system only through the standard library.
+- SB-6. An operation blocked by the sandbox ends with the error that the standard library function already declares (for example, `IoError` of kind `PermissionDenied` naming the denied permission), not with a fault. Safe code reaches the operating system only through the standard library.
 - SB-7. The compile-time check stays: using a standard-library module outside the declared permissions is a compile error, and derived effects are shown in `unio symbol`. The sandbox is the second line of defence, not a replacement.
 - SB-8. A test suite of programs that attempt forbidden actions through every standard-library module and through child processes runs on all four platforms; every attempt must be denied.
 - SB-9. The documentation states the limits of the sandbox: it does not protect against kernel vulnerabilities and side channels, nor against misuse of granted permissions. For AI-generated code it recommends a minimal manifest, an external policy with limits, and a separate user, container, or virtual machine for untrusted code.
@@ -164,8 +167,9 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-5. `std.json`: parse to a value, encode and decode structs from their declaration, without annotations.
 - S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
 - S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
-- S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6).
+- S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6). A function that reports absence instead of an error (`files.exists`, `env.get`) reports a blocked object as absent.
 - S-9. Atomic writes in `std.files`: `write_text` and `write_bytes` replace the target through a temporary file in the same directory followed by a rename, so a reader sees either the old or the new complete content under any kind of termination. The `durable = true` option also syncs the file and the directory to storage. `open_atomic(path)` returns a resource whose content replaces the target only when its `using` block completes normally; on error or fault the target is unchanged and the temporary file is removed. After emergency or abnormal termination a temporary file named `.<name>.unio-tmp-<id>` may remain; it never replaces the target.
+- S-10. The standard library is written in Unio in `stdlib/std/`. Everything the language can express is implemented in it; only operating-system and runtime primitives are `external function` declarations in `unsafe module` files. These sources are the normative API; the reference programs use only it, verified by `spec/check_api.py`.
 
 ## 6. Tooling requirements
 

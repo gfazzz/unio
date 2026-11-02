@@ -26,3 +26,5 @@ jobs:
       - name: Reference programs
         shell: bash
         run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio
+      - name: Reference programs use only the documented API
+        run: python spec/check_api.py

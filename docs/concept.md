@@ -1,6 +1,6 @@
 # Unio: refined concept
 
-Version: 0.4. Changes from 0.3: the sandbox is mandatory (section 6), the rule for calling a function with `fails with` is the same in every position (section 3.2), and the guarantees on termination are split by kind (sections 3.3, 4.1). This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
+Version: 0.4. Changes from 0.3: the sandbox is mandatory (section 6), the rule for calling a function with `fails with` is the same in every position (section 3.2), and the guarantees on termination are split by kind (sections 3.3, 4.1), values are never shared between names (section 2.7), and variants with a colliding name are written in full (section 2.6). This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
 
 ## 1. Purpose and principle
 
@@ -15,7 +15,7 @@ Guiding principle: **clear code, explicit behavior, controlled resources**.
 Consequences of the principle, against which every language decision is checked:
 
 1. One task, one way to write it. If there are two ways, one is declared standard and the formatter rewrites to it.
-2. Nothing happens implicitly: no implicit type conversions, no hidden copying of large data, no hidden exceptions.
+2. Nothing happens implicitly: no implicit type conversions, no state shared between names behind the reader's back, no hidden exceptions.
 3. A function signature is a complete contract: input, result, errors, and later effects.
 4. Everything that can go wrong is either expressed in a type (`Option`, `fails with`) or is a fault with defined behavior.
 
@@ -125,7 +125,9 @@ extend User with Display:
 - `interface` is a set of methods. Implementation is declared explicitly with `extend ... with ...`. There is no implementation inheritance; reuse goes through composition and generic functions.
 - Generics: `function first[T](items as List[T]) returns Option[T]`. Constraints: `[T with Display]`.
 
-Built-in core types: `Int` (64-bit signed), `Float` (64-bit), `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Tuple`, `Path`, `Function`.
+Built-in core types: `Int` (64-bit signed), `Float` (64-bit), `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Tuple`, `Path`, `Function`, and `Never`, the result type of a function that does not return (`assert_fail`).
+
+Enum variants are written `Command.Add(...)`. The short form `Add(...)` is allowed when nothing else visible in the module has that name. A variant named like a type must therefore be written in full: `Value.Text("Anna")`, and `List` as a variant of `Command` cannot be written alone.
 
 Equality:
 
@@ -136,11 +138,25 @@ Equality:
 
 ### 2.7 Mutability and values
 
-- All built-in collections have an immutable interface by default. Mutating methods (`append`, `remove`, `sort`) are available only on values declared with `var` and are marked as such in documentation.
-- Passing a struct to a function passes a reference to an immutable value. A function cannot modify an argument unless the parameter is declared `var name as List[Int]`; the caller must then pass a `var` value.
-- Copying is explicit: `items.copy()`.
+- Structs, enums, collections, and text are values. Binding, passing, returning, and storing never share mutable state: a change made through one name is never seen through another.
+- A value changes only through a place that starts with a `var` name or a `var` parameter, and a field changes only if it is declared `var`. Names bound by `let`, by patterns, and by `for` are immutable:
 
-This is enough for a reader who sees `var` in a signature to understand that the function modifies the state passed to it.
+```unio
+var tasks = load()
+match tasks.find_index(function (task as Task) returns Bool: task.id == id):
+    case some(index):
+        tasks[index].done = true        # changes the list
+    case none:
+        fail NotFound(id = id)
+```
+
+  Writing `task.done = true` for a task bound by `case some(task)` is a compile error with a hint to change the element through the collection.
+- Mutating methods (`append`, `remove`, `sort`) are available only on `var` places and are marked as such in documentation.
+- A function modifies an argument only through a parameter declared `var name as List[Int]`; the caller passes a `var` variable, and one variable cannot go to two `var` parameters of the same call.
+- Anonymous functions capture values when they are created and cannot assign to captured variables.
+- Resources are not values: they have identity and are never copied (section 4).
+
+Values are shared until changed; changing a shared value copies only the level that changes, and changing an unshared value happens in place. No copy can change the behavior of a program, and the cost of copies is measured. A reader who sees `var` in a signature knows that the function modifies the state passed to it, and a reader who sees `let` knows that the value cannot change at all.
 
 ## 3. Missing values and errors
 
@@ -332,11 +348,13 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Effects in signatures | Not in 0.1: package-level permissions; function effects are derived by the compiler and shown in `unio symbol`. `uses` is reserved for 0.3 |
 | `==` for `Float` | IEEE 754; `Float` without `Hash`, not a key and not a `match` pattern; `total_order()` and `is_nan()` |
 | `==` for resources | Compile error; identity via `is_same(a, b)` |
+| Changing a value found in a collection | Values, not shared references: change through the collection, `tasks[index].done = true`; names from patterns and loops are immutable |
+| Variant with the name of a type | Short form only when the name is unambiguous; otherwise `Enum.Variant` |
 | Compiler implementation language | Rust with code generation through Cranelift in 0.1; self-hosted implementation in Unio by 1.0, once the language is stable |
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6 and 7 were added in version 0.4 after review.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–9 were added in version 0.4 after review.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -345,3 +363,5 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 5. **Rust and Cranelift.** Unio's safe subset rests on a safe compiler; Rust provides that without manual memory checking. Cranelift gives fast, deterministic builds, which matters more than peak optimization for CLI utilities and for the "generate, check" loop. LLVM may become a second backend for `--release` if the 0.2 benchmarks require it. Self-hosting moves to 1.0: writing a compiler in a language that is still changing means writing it twice.
 6. **Sandbox as a requirement, not an option.** Permissions in the manifest are checked by the compiler, but a compiler check protects only against what the compiler understands. Code written by AI is run often and reviewed briefly, so the consequences of a mistake must be limited by the operating system. Failing closed keeps a missing kernel feature from silently turning the sandbox off.
 7. **Honest guarantees on termination.** Running `release` needs memory and a working runtime, which are exactly what is missing after memory exhaustion or a kill signal. Promising more would be untestable; atomic replacement of files gives a guarantee that does not depend on how the program ends.
+8. **Values instead of shared references.** If a name from `case some(task)` could change an element of the list, the reader would have to track every alias to know what a line changes. With values, a change is visible only through the place where it is written, which is the property a reviewer of generated code needs most. Sharing until change keeps the cost of this low.
+9. **Qualified variants when names collide.** `return List` reads as a type, not as a command. The short form is kept where it is unambiguous because it makes `match` readable; the compiler adds the enum name where it is not.

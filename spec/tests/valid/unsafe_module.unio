@@ -5,3 +5,13 @@ external function os_read(descriptor as Int, size as Int) returns Bytes fails wi
 
 public function read_chunk(descriptor as Int) returns Bytes fails with IoError:
     return try os_read(descriptor, 4096)
+
+extend Text:
+    public external function byte_length(self) returns Int
+
+    public function is_blank(self) returns Bool:
+        return self.trim().is_empty()
+
+public enum Result[T, E]:
+    ok(value as T)
+    error(value as E)

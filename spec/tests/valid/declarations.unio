@@ -64,3 +64,14 @@ function sort_in_place(var items as List[Int]):
 
 test "first of an empty list":
     assert first([]) == none
+
+struct Box[T]:
+    item as T
+
+extend[T] Box[T]:
+    function get(self) returns T:
+        return self.item
+
+extend[T with Display] Box[T] with Display:
+    function to_text(self) returns Text:
+        return "Box({self.item.to_text()})"
