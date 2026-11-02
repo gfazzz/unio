@@ -90,7 +90,7 @@ public struct AtomicFile:
     temporary as Path
     descriptor as Int
     durable as Bool
-    steps as AtomicSteps = SYSTEM_STEPS
+    var steps as AtomicSteps = SYSTEM_STEPS
     var state as AtomicState = AtomicState.Writing
 
 struct TemporaryFile:
@@ -273,14 +273,24 @@ test "without durable the directory is not synced":
             assert_fail(e.reason)
         assert file.state == AtomicState.Replaced
 
-test "a commit after a failed directory sync retries only the directory sync":
-    using file = fake_file(fake_steps(rename = fail_rename, sync_directory = fail_sync_directory), durable = true):
-        file.state = AtomicState.Replaced
+## End to end: the first commit fails at the directory sync, the second one succeeds.
+## In the second phase the data sync, close and rename fail if they are called, so a successful
+## second commit shows that each of them ran exactly once, in the first phase. The directory sync
+## ran twice: it failed in the first phase (the error kind shows it was called) and succeeded in
+## the second (the state becomes Durable only after it).
+test "a commit after a failed directory sync repeats only the directory sync and becomes durable":
+    using file = fake_file(fake_steps(sync_directory = fail_sync_directory), durable = true):
         try:
             file.commit()
-            assert_fail("expected the directory sync to fail again")
+            assert_fail("expected the directory sync to fail")
         on IoError as e:
             assert e.kind == IoErrorKind.DurabilityUnconfirmed
+        assert file.state == AtomicState.Replaced
+        file.steps = fake_steps(sync_data = fail_descriptor, close = fail_descriptor, rename = fail_rename)
+        try file.commit() on IoError as e:
+            assert_fail("the second commit repeated a finished step: {e.reason}")
+        assert file.state == AtomicState.Durable
+        assert file.cleanup() == []
 
 test "writing after commit started is an error":
     using file = fake_file(fake_steps(), durable = false):

@@ -85,7 +85,7 @@ Work:
 - Minimal standard library: `text`, `collections`, `files`, `path`, `env`, `args`, `json`.
 - `unio test` with text and JSON output, `expect_fault`.
 
-Exit criterion: `todo`, `wc`, `grep-lite`, `json-query` run in the interpreter and their tests pass; the tools in `tools/` run in the interpreter, give the same results as the Python checkers, and replace them in CI; reliability tests for faults inside `using` are green.
+Exit criterion: `todo`, `wc`, `grep-lite`, `json-query` run in the interpreter and their tests pass; the tools in `tools/` run in the interpreter, give the same results as the Python checkers, and replace them in CI; the `test` blocks of the standard library pass in the interpreter, including the end-to-end test of the `commit` protocol (a failed directory sync followed by a successful second commit); reliability tests for faults inside `using` are green.
 
 ### Stage 4. Native build (weeks 20–32)
 
