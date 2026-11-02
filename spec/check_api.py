@@ -98,11 +98,25 @@ def signature_name(node):
     return None
 
 
+LAYERS = ["core", "alloc", "std"]   # each layer may use only itself and the layers before it
+
+
+def layer_of_stdlib(rel):
+    """The layer of a standard-library file: the first directory under stdlib/."""
+    return rel.replace(os.sep, "/").split("/")[0]
+
+
 def module_of(rel):
-    parts = rel.replace(os.sep, "/")[:-len(".unio")].split("/")
-    if parts[:2] == ["std", "builtin"] or parts == ["std", "prelude"]:
+    """stdlib/<layer>/files.unio is std.files; prelude.unio and builtin/ form the prelude."""
+    parts = rel.replace(os.sep, "/")[:-len(".unio")].split("/")[1:]
+    if parts == ["prelude"] or parts[:1] == ["builtin"]:
         return "prelude"
-    return ".".join(parts)
+    return "std." + ".".join(parts)
+
+
+def note_layer(layers, key, layer):
+    index = LAYERS.index(layer)
+    layers[key] = min(layers.get(key, index), index)
 
 
 def load_api(grammar, problems):
@@ -112,6 +126,7 @@ def load_api(grammar, problems):
     prelude = set()    # functions visible everywhere, including built-in constructors
     methods = set()    # methods of built-in and library types
     types, variants = set(), {}
+    layers = {}        # "method:length", "function:print", "std.files:read_text", "module:std.files" -> layer index
     files = sorted(glob.glob(os.path.join(root, "**", "*.unio"), recursive=True))
     if not files:
         problems.append("stdlib/: no sources found")
@@ -125,6 +140,11 @@ def load_api(grammar, problems):
         if not unsafe and any(rule == "external_decl" for rule, _ in walk(tree)):
             problems.append(f"stdlib/{rel}: external function outside an unsafe module")
         module = module_of(rel)
+        layer = layer_of_stdlib(rel)
+        if layer not in LAYERS:
+            problems.append(f"stdlib/{rel}: not in a layer directory ({', '.join(LAYERS)})")
+            continue
+        before_methods = set(methods)
         public_functions = set()
         for rule, kids in top_items(tree):
             if rule == "declaration" and is_public(kids):
@@ -154,11 +174,16 @@ def load_api(grammar, problems):
                 for r2, k2 in walk(kids[1]):
                     if r2 == "function_sig":
                         methods.add(names_in(k2)[0])
+        for name in methods - before_methods:
+            note_layer(layers, "method:" + name, layer)
+        for name in public_functions:
+            note_layer(layers, ("function:" if module == "prelude" else module + ":") + name, layer)
+        note_layer(layers, "module:" + module, layer)
         if module == "prelude":
             prelude |= public_functions
         else:
             modules.setdefault(module, set()).update(public_functions)
-    return modules, prelude, methods, types, variants
+    return modules, prelude, methods, types, variants, layers
 
 
 def tokens_with_interpolations(tokens):
@@ -171,7 +196,16 @@ def tokens_with_interpolations(tokens):
 
 
 def check_program(path, grammar, api, problems):
-    modules, prelude, methods, lib_types, lib_variants = api
+    modules, prelude, methods, lib_types, lib_variants, layers = api
+    rel_to_stdlib = os.path.relpath(path, os.path.join(ROOT, "stdlib"))
+    program_layer = LAYERS.index(layer_of_stdlib(rel_to_stdlib)) if not rel_to_stdlib.startswith("..") \
+        and layer_of_stdlib(rel_to_stdlib) in LAYERS else LAYERS.index("std")
+
+    def check_layer(key, what, line):
+        needed = layers.get(key)
+        if needed is not None and needed > program_layer:
+            problems.append(f"{path}:{line}: {what} needs the layer {LAYERS[needed]}, "
+                            f"but this file is in the layer {LAYERS[program_layer]}")
     text = open(path, encoding="utf-8").read()
     tree, err = cg.check_source(text, grammar, build_tree=True)
     if err:
@@ -234,6 +268,9 @@ def check_program(path, grammar, api, problems):
     for alias, module in aliases.items():
         if module not in modules:
             problems.append(f"{path}: module {module} is not in stdlib/ or in the package")
+        check_layer("module:" + module, f"module {module}", 1)
+    for module in set(imported.values()):
+        check_layer("module:" + module, f"module {module}", 1)
     for name, module in imported.items():
         if module not in modules:
             problems.append(f"{path}: module {module} is not in stdlib/ or in the package")
@@ -274,6 +311,8 @@ def check_program(path, grammar, api, problems):
                 continue
             if t.value not in methods and t.value not in own_functions:
                 problems.append(f"{path}:{t.line}: method {t.value} is not in stdlib/")
+            elif t.value not in own_functions:
+                check_layer("method:" + t.value, f"method {t.value}", t.line)
             continue
         if prev is not None and prev.kind == "function":
             continue
@@ -281,6 +320,8 @@ def check_program(path, grammar, api, problems):
                  | set(imported) | locals_)
         if t.value not in known:
             problems.append(f"{path}:{t.line}: {t.value} is neither declared nor in stdlib/")
+        elif t.value in prelude and t.value not in own_functions and t.value not in locals_:
+            check_layer("function:" + t.value, f"function {t.value}", t.line)
 
 
 def main(argv):

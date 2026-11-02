@@ -1,0 +1,70 @@
+## The core prelude: interfaces, Option, Result and functions that need neither an allocator, nor a GC, nor an
+## operating system. Every module sees the preludes of the layers its profile provides (concept, section 8.1).
+unsafe module
+
+## Text form of a value, used by interpolation and by print.
+public interface Display:
+    function to_text(self) returns Text
+
+## Common interface of all errors. Every error declaration implements it; to_text names the type and its fields.
+public interface Error:
+    function to_text(self) returns Text
+
+## Equality used by == and !=. Derived for structs and enums whose fields implement it.
+public interface Equal:
+    function equals(self, other as Self) returns Bool
+
+## Order used by <, <=, > and >=: negative if self comes first, zero if equal, positive otherwise.
+public interface Order:
+    function compare(self, other as Self) returns Int
+
+## Hash used by Map keys and Set elements. Float does not implement it.
+public interface Hash:
+    function hash(self) returns Int
+
+## Operator +.
+public interface Add:
+    function add(self, other as Self) returns Self
+
+## Operator -.
+public interface Subtract:
+    function subtract(self, other as Self) returns Self
+
+## Operator *.
+public interface Multiply:
+    function multiply(self, other as Self) returns Self
+
+## Operator /.
+public interface Divide:
+    function divide(self, other as Self) returns Self
+
+## A value with an explicit lifetime: created in using and released when the block ends.
+public interface Resource:
+    function release(var self)
+
+## A value that may be absent. The operator or gives a default; ?. passes none along.
+public enum Option[T]:
+    some(value as T)
+    none
+
+## A result kept as a value. try propagates or handles its error like a call with fails with.
+public enum Result[T, E]:
+    ok(value as T)
+    error(value as E)
+
+## Ends the program, or the current test, with a fault that carries the message.
+public external function assert_fail(message as Text) returns Never
+
+## Runs the action and fails the test unless the action ends with a fault. Available only in test blocks.
+public external function expect_fault(action as Function[()])
+
+## Whether two names refer to the same resource; resources have no ==.
+public external function is_same[T with Resource](a as T, b as T) returns Bool
+
+## The smaller of two values; a when they are equal.
+public function min[T with Order](a as T, b as T) returns T:
+    return b if b < a else a
+
+## The larger of two values; a when they are equal.
+public function max[T with Order](a as T, b as T) returns T:
+    return b if b > a else a

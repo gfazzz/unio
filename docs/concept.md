@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.5. Changes from 0.4: file writes keep their guarantees after power loss on named file systems, and the compiler and package tools run isolated (sections 3.3, 6).
+Version: 0.6. Changes from 0.5: library layers and build profiles, and the plan for system programming (section 8.1).
+
+Changes from 0.4: file writes keep their guarantees after power loss on named file systems, and the compiler and package tools run isolated (sections 3.3, 6).
 
 Changes from 0.3: the language is built in the language (section 1.1); the sandbox is mandatory (section 6), the rule for calling a function with `fails with` is the same in every position (section 3.2), and the guarantees on termination are split by kind (sections 3.3, 4.1), values are never shared between names (section 2.7), and variants with a colliding name are written in full (section 2.6). This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
 
@@ -281,7 +283,7 @@ function count_lines(path as Path) returns Int fails with IoError:
 
 ### 4.2 What the first release includes
 
-The first release contains the GC and resources with `using`. Memory budgets, lifetimes for tensors, and accounting for GPU computation completion belong to the compute extension and are designed on top of the same `Resource` interface: a tensor is a resource; a lifetime scope is an owning resource with a budget.
+The first release contains the GC and resources with `using`. The GC belongs to the `alloc` and `std` layers; `core` does not depend on it, so that code without a GC remains possible (section 8.1). Memory budgets, lifetimes for tensors, and accounting for GPU computation completion belong to the compute extension and are designed on top of the same `Resource` interface: a tensor is a resource; a lifetime scope is an owning resource with a budget.
 
 ### 4.3 Garbage collector
 
@@ -339,6 +341,34 @@ Not part of the first release. Constraints on the core so that the extensions re
 
 Quantum module: circuits as values, a simulator as a backend, hardware through the same backend interface with a capability description. Speedup is not promised; verifiability of a circuit before execution is guaranteed.
 
+### 8.1 System programming: library layers and build profiles
+
+A web server and the services and applications of an operating system are ordinary programs: they need networking and concurrency (release 0.2), not a different language. A kernel is different: an ordinary program receives memory, files, threads, and isolation from the operating system, while a kernel has to create them itself. Unio supports both kinds of work as one language.
+
+**Library layers.** The standard library and the runtime are split into three layers, and a module may use only its own layer and the layers before it:
+
+- `core`: basic types and operations that need neither an allocator, nor a GC, nor an operating system;
+- `alloc`: what needs an allocator (text that is built at run time, lists, maps, JSON); in 0.1 the allocator is the GC heap;
+- `std`: what needs the operating system (files, environment, processes, standard output, the sandbox).
+
+Module names do not contain the layer (`std.json` lives in `alloc`), so applications are not affected; the layer is a property of where a module lives and is checked.
+
+**Build profiles.** A profile chooses which layers are available. The `application` profile has all three, the GC, and the sandbox of the operating system. The `system` profile always has `core`, has `alloc` only with an allocator that the program provides, and has neither a GC nor `std`. The syntax, the types, and error handling are the same in every profile; a profile only removes capabilities and never changes what a construct means. If a function needs a layer that the profile lacks, the compiler reports the chain of calls that leads to it. Release 0.1 implements the `application` profile and the check `unio check --profile=core`, which verifies that a package depends on nothing but `core`.
+
+**What the system extension adds.** These capabilities are designed through RFCs for a later release and are available only in the `system` profile and in `unsafe module` files where noted:
+
+1. Predictable memory: explicitly owned buffers, data placed in given regions, work without a GC, and code where copy-on-write is forbidden: the compiler reports every place where a copy could occur, because an unexpected copy of a large array is not acceptable there.
+2. Control of representation: size and alignment of structs, hardware registers, page tables, calling conventions, and the placement of sections in the executable.
+3. Controlled low-level access: pointers, memory-mapped devices, special processor instructions, and small amounts of assembly, only in `unsafe module` files.
+4. Interrupts and synchronization: interrupt handlers, atomic operations, and a defined memory model that agrees with the concurrency of release 0.2. `volatile` access and synchronization between threads are different operations.
+5. Checked constraints: a function can require that it does not allocate, block, or use the GC, and the compiler checks the whole chain of called functions, not only the body. This builds on the derived effects of section 6 (`allocates` is derived from 0.1 on) and is designed together with `uses`.
+
+**Guarantees.** The sandbox of an application relies on the operating system. A kernel on real hardware manages privileges and isolation itself, so its low-level part belongs to the trusted computing base. The first experiments run in virtual machines.
+
+**The first operating system in Unio** is a small kernel with services in separate processes, so that most components stay in safe Unio and the hardware complexity is concentrated in a small part. The first checkable prototype is the chain: an existing bootloader, entry into Unio code, output to the serial port, management of memory pages, a timer, a simple scheduler, a user process, and a system call. A small start layer in Rust or assembly is acceptable under the rule of section 1.1, with a stated reason and end. Whether Cranelift supports the needed calling conventions and binary format is checked by an early prototype. An operating system with drivers and Linux-level compatibility is a project of many years in which the language is a small part, and it is not on the roadmap of the language.
+
+A GC does not make an operating system impossible: it can serve services and some subsystems. Early boot, interrupt handlers, and critical sections need the independent memory model of the `system` profile; a fully managed kernel would make its runtime a separate complex project.
+
 ## 9. Complete example
 
 See `docs/examples/todo.unio`: a command-line utility with a task list, a storage file, argument parsing, and error handling. The example shows every construct of the core.
@@ -354,6 +384,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Out of memory | Not a fault: exit code 102, no user code runs; files are protected only by atomic writes |
 | Enforcement of permissions | Mandatory OS sandbox, narrowed by an external policy; fails closed |
 | What the language and its tools are written in | In Unio wherever possible (section 1.1); another language only temporarily, with a reason and an end |
+| Kernels and code without an operating system | One language: library layers `core`, `alloc`, `std` and build profiles that only remove capabilities; system features in a later release (section 8.1) |
 | Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
@@ -370,7 +401,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–13 were added in version 0.4 after review and after writing the standard library in Unio.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–14 were added in version 0.4 after review and after writing the standard library in Unio.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -385,3 +416,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 11. **`pass` instead of empty blocks.** An empty block looks like unfinished code; `pass` states that doing nothing is intended. The word is familiar from Python and adds no new idea.
 12. **Shared state through `var self` methods.** Values make every change visible where it is written. The cost is that changed state must be named at every call; a struct with `var self` methods keeps that explicit without repeating parameters.
 13. **The language built in the language.** A design checked only on examples misses what a large program needs; a library and tools written in Unio are such programs, and they are needed anyway. Writing them first in Unio turns every awkward spot into a concrete finding, while the cost of a temporary second implementation is limited to the time until the interpreter runs.
+14. **Layers and profiles now, system features later.** Splitting the library and the runtime is cheap while they are small and expensive once applications depend on them; checking the layers from the start keeps `core` free of hidden dependencies on the allocator, the GC, and the operating system. The system features themselves need careful design and do not help the first release, so they wait for their own release, while these two boundaries keep the way open, also for embedded devices and high-performance computing.

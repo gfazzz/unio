@@ -1,0 +1,6 @@
+## Text form of Float; producing new text needs an allocator.
+unsafe module
+
+extend Float with Display:
+    ## The shortest text that reads back as the same number, such as "0.1" or "1e+300".
+    external function to_text(self) returns Text

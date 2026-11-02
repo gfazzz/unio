@@ -25,7 +25,7 @@ jobs:
         run: python spec/check_grammar.py --corpus
       - name: Unio sources parse (reference programs, standard library, tools)
         shell: bash
-        run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio stdlib/std/*.unio stdlib/std/builtin/*.unio tools/*.unio
+        run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
       - name: Unio sources use only the standard library API
         run: python spec/check_api.py
       # The Python checkers are temporary: tools/*.unio do the same work and replace

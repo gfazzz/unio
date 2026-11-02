@@ -7,9 +7,6 @@ public let MINIMUM_INT as Int = -9223372036854775807 - 1
 ## The largest Int.
 public let MAXIMUM_INT as Int = 9223372036854775807
 
-extend Int with Display:
-    external function to_text(self) returns Text
-
 extend Int:
     ## Sum, or none on overflow.
     public external function checked_add(self, other as Int) returns Option[Int]

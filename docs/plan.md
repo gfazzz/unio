@@ -70,6 +70,7 @@ Work:
 - Resource checking: `using`, no escape of a resource into ordinary structs.
 - Mutability checking (`let`/`var`, `var` parameters).
 - `unio symbol` and `unio explain` for every code of the stage.
+- Derived effect `allocates` and the lowest needed layer for every function; `unio check --profile=core` with call chains (C-21).
 
 Exit criterion: the corpus of 200 programs with errors (R-10) yields the expected diagnostics; the ten utilities pass `check`.
 
@@ -80,7 +81,7 @@ Goal: core programs run, even if slowly; semantics are locked by tests before na
 Work:
 - Intermediate representation (IR) with explicit errors, resources, and fault points.
 - IR interpreter for fast semantic validation and for `unio test` in the early stages.
-- Runtime: precise GC, `Resource` and `using`, faults with trace and exit codes; the termination model of specification section 4.5 with a memory reserve for `release` and a preallocated diagnostic for code 102.
+- Runtime: precise GC, `Resource` and `using`, faults with trace and exit codes; the termination model of specification section 4.5 with a memory reserve for `release` and a preallocated diagnostic for code 102. The runtime is split into the `core`, `alloc`, and `std` parts of S-12 from the start.
 - Atomic writes in `std.files` (S-9) and tests that kill the process and exhaust memory during writing.
 - Minimal standard library: `text`, `collections`, `files`, `path`, `env`, `args`, `json`.
 - `unio test` with text and JSON output, `expect_fault`.
@@ -96,6 +97,7 @@ Work:
 - Stack maps for the precise GC; stack traces without external debug formats.
 - Deterministic build (C-4), verified in CI by hash comparison.
 - Cross-compilation to the four targets; CI on all of them.
+- System prototype: a freestanding x86-64 binary built from a `core`-only Unio program through Cranelift, started by an existing bootloader in a virtual machine, writing to the serial port. It checks calling conventions, sections, and the binary format needed by the system profile; the result goes into the RFC for that profile.
 - Benchmarks of specification section 7.1 in CI with thresholds.
 - Sandbox (specification section 4.6) on four platforms: Landlock and seccomp-bpf, Seatbelt, AppContainer with a Job Object; the external policy and its limits; the SB-8 suite of forbidden actions in CI. Isolated workers for `check`, `build`, `fmt`, and `doc` (SB-10, SB-11) and the hostile-project suite SB-15. Power-loss tests of atomic writes (S-9b).
 
@@ -168,6 +170,7 @@ Stages overlap: the front end and semantics proceed in parallel with specificati
 |---|---|---|---|
 | Resource checking (escape from `using`) proves too strict or too weak | medium | semantics rework after stage 2 | Prototype the analysis on paper in stage 0; resource test corpus before implementation |
 | Precise GC with Cranelift takes longer than planned | high | stage 4 slips | Start with conservative stack scanning as a fallback; move to stack maps if time allows |
+| Cranelift lacks what system code needs (calling conventions, sections, interrupt entry) | medium | the system profile needs a second backend | Freestanding prototype in stage 4; LLVM is already considered as a second backend (requirements, section 10) |
 | Diagnostics prove awkward for AI; the 80% goal is missed | medium | extra refinement cycle | Run the R-10 trial from stage 2 on a partial corpus instead of waiting for stage 6 |
 | Text and JSON performance below CPython | medium | 7.1 violated | Benchmarks in CI from stage 3; optimize `Text` (UTF-8 with cached length) before stage 4 |
 | Language vocabulary grows under feature pressure | high | loss of readability, the main property | RFC process with a mandatory section "why existing constructs cannot express this" |
@@ -194,6 +197,7 @@ Tracked in CI and published with every release:
 | 0.2 "Server" | Task-based concurrency without shared mutable state, `std.net`, HTTP client and server, CPU and RAM profiler | No shared mutable state in the core; profiler event format |
 | 0.3 "Compute" | Tensors as resources, lifetime scopes with budgets, autodiff, CPU/GPU backends, buffer planning, VRAM profiling, device-completion-aware release | `Resource`, `using`, generics, effects in signatures |
 | 0.4 "Quantum" | Circuits as values, simulator, hardware interface with capability description | Backend interface from 0.3 |
+| 0.5 "System" | The `system` profile: memory without a GC and code without copy-on-write, control of representation, pointers, memory-mapped devices and assembly in `unsafe module`, interrupts, atomic operations and a memory model, checked constraints on effects; the prototype kernel of concept section 8.1 in a virtual machine | Layers `core`, `alloc`, `std`; derived effects; the memory model must agree with the concurrency of 0.2 |
 | 1.0 | Language stabilization, compatibility guarantee, self-hosted compiler in Unio | All of the above |
 
 Each later release starts with its own specification modeled on `docs/requirements.md` and does not change core syntax without an RFC and an automatic migration.

@@ -2,27 +2,38 @@
 
 Версия 0.1-draft. Английская версия (основная): [../stdlib.md](../stdlib.md). Основание: раздел 5 ТЗ, разделы 2–4 концепции.
 
-Стандартная библиотека написана на Unio в [stdlib/std/](../../stdlib/std). Исходники — нормативный API: сигнатуры, документирующие комментарии и реализации. Всё, что язык может выразить, реализовано на Unio; только примитивы операционной системы и среды выполнения объявлены как `external function`, и только в файлах с пометкой `unsafe module` (Б-7, Б-10). Этот документ — обзор; справочник по исходникам будет строить `unio doc` (Д-3).
+Стандартная библиотека написана на Unio в [stdlib/](../../stdlib) и разделена на три слоя. Исходники — нормативный API: сигнатуры, документирующие комментарии и реализации. Всё, что язык может выразить, реализовано на Unio; только примитивы операционной системы и среды выполнения объявлены как `external function`, и только в файлах с пометкой `unsafe module` (Б-7, Б-10). Этот документ — обзор; справочник по исходникам будет строить `unio doc` (Д-3).
 
 Библиотека содержит то, чем пользуются эталонные программы и инструменты проекта. `spec/check_api.py` проверяет, что `docs/examples/`, `examples/`, `tools/` и сама библиотека не вызывают ничего, что в ней не объявлено. Остальные модули требования Б-1 (`std.collections`, `std.math`, `std.decimal`, `std.path`, `std.process`, `std.time`, `std.random`, `std.log`, `std.test`) добавляются на этапе 5 в том же виде.
+
+## Слои
+
+| Слой | Что нужно | Каталог | Кто пользуется |
+|---|---|---|---|
+| `core` | ничего: ни аллокатора, ни GC, ни операционной системы | [stdlib/core/](../../stdlib/core) | любой профиль, включая системный (концепция, раздел 8.1) |
+| `alloc` | аллокатор; в 0.1 это куча GC | [stdlib/alloc/](../../stdlib/alloc) | приложения и системный код, который предоставляет аллокатор |
+| `std` | операционная система | [stdlib/std/](../../stdlib/std) | приложения |
+
+Файл может пользоваться только своим слоем и предшествующими; `spec/check_api.py` и `tools/check_api.unio` проверяют это для импортов, функций прелюдии и методов. Имена модулей не содержат слоя: `stdlib/alloc/json.unio` — это `std.json`, `stdlib/std/files.unio` — `std.files`. Файлы `prelude.unio` и `builtin/` всех доступных слоёв вместе образуют прелюдию. Тип можно расширять в нескольких слоях: `Int` получает арифметику с проверкой в `core`, а текстовую форму, которая создаёт новый текст, — в `alloc`.
 
 ## Файлы
 
 | Файл | Содержание | На Unio | Внешние примитивы |
 |---|---|---|---|
-| [prelude.unio](../../stdlib/std/prelude.unio) | `Display`, `Error`, `Equal`, `Order`, `Hash`, интерфейсы операторов, `Resource`, `Option`, `Result`, `print`, `print_error`, `range`, `min`, `max` | интерфейсы, перечисления, `print`, `range`, `min`, `max` | стандартный вывод, `assert_fail`, `expect_fault`, `is_same` |
-| [builtin/text.unio](../../stdlib/std/builtin/text.unio) | Методы `Text` | поиск, разбиение, обрезка, `char_at`, `to_int`, `replace`, `lines` | длина, символы, срезы, `index_of`, регистр, `to_float` |
-| [builtin/list.unio](../../stdlib/std/builtin/list.unio) | Методы `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted`, `sorted_by`, `sorted_with` (сортировка слиянием) | длина, `get`, `append`, `remove_last` |
-| [builtin/option.unio](../../stdlib/std/builtin/option.unio) | Методы `Option[T]` | `is_some`, `is_none` | — |
-| [builtin/set.unio](../../stdlib/std/builtin/set.unio) | `Set[T]` и `List.to_set` | `union`, `intersection`, `difference`, `to_set` | хранение элементов |
-| [builtin/map.unio](../../stdlib/std/builtin/map.unio) | Методы `Map[K, V]` | `contains`, `keys`, `values` | хранение записей |
-| [builtin/path.unio](../../stdlib/std/builtin/path.unio) | `Path` | компоненты, `name`, `extension`, `parent`, `join`, `normalize` | создание, текстовая форма, разделитель платформы |
-| [builtin/int.unio](../../stdlib/std/builtin/int.unio), [float.unio](../../stdlib/std/builtin/float.unio), [bool.unio](../../stdlib/std/builtin/bool.unio) | Числа и `Bool` | `checked_divide`, `Bool.to_text` | арифметика с проверкой, преобразования |
-| [text.unio](../../stdlib/std/text.unio) | `std.text`: `join`, `split` | обе | `from_code_point` |
-| [args.unio](../../stdlib/std/args.unio) | `std.args`: аргументы программы | — | аргументы |
-| [env.unio](../../stdlib/std/env.unio) | `std.env`: переменные, домашний каталог | — | обе функции |
-| [files.unio](../../stdlib/std/files.unio) | `std.files`: чтение, каталоги, атомарная запись | `write_text`, `list_tree`, логика `AtomicFile` | открытие, чтение, список, запись, переименование |
-| [json.unio](../../stdlib/std/json.unio) | `std.json`: `Value`, `parse`, `encode`, `decode` | разбор и запись | преобразования между типом и `Value`, которые порождает компилятор |
+| [core/prelude.unio](../../stdlib/core/prelude.unio) | `Display`, `Error`, `Equal`, `Order`, `Hash`, интерфейсы операторов, `Resource`, `Option`, `Result`, `min`, `max`, `assert_fail`, `expect_fault`, `is_same` | интерфейсы, перечисления, `min`, `max` | аварии, тождественность ресурсов |
+| [core/builtin/int.unio](../../stdlib/core/builtin/int.unio), [float.unio](../../stdlib/core/builtin/float.unio), [bool.unio](../../stdlib/core/builtin/bool.unio), [option.unio](../../stdlib/core/builtin/option.unio) | Числа, `Bool`, `Option` | `checked_divide`, `Bool.to_text`, `is_some`, `is_none` | арифметика с проверкой, `is_nan`, `is_finite` |
+| [alloc/prelude.unio](../../stdlib/alloc/prelude.unio) | `range` | `range` | — |
+| [alloc/builtin/text.unio](../../stdlib/alloc/builtin/text.unio) | Методы `Text` | поиск, разбиение, обрезка, `char_at`, `to_int`, `replace`, `lines` | длина, символы, срезы, `index_of`, регистр, `to_float` |
+| [alloc/builtin/list.unio](../../stdlib/alloc/builtin/list.unio) | Методы `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted`, `sorted_by`, `sorted_with` (сортировка слиянием) | длина, `get`, `append`, `remove_last` |
+| [alloc/builtin/map.unio](../../stdlib/alloc/builtin/map.unio), [set.unio](../../stdlib/alloc/builtin/set.unio) | `Map[K, V]`, `Set[T]`, `List.to_set` | `contains`, `keys`, `values`, `union`, `intersection`, `difference` | хранение записей |
+| [alloc/builtin/int.unio](../../stdlib/alloc/builtin/int.unio), [float.unio](../../stdlib/alloc/builtin/float.unio) | Текстовая форма чисел | — | `to_text` |
+| [alloc/text.unio](../../stdlib/alloc/text.unio) | `std.text`: `join`, `split` | обе | `from_code_point` |
+| [alloc/json.unio](../../stdlib/alloc/json.unio) | `std.json`: `Value`, `parse`, `encode`, `decode` | разбор и запись | преобразования между типом и `Value`, которые порождает компилятор |
+| [std/prelude.unio](../../stdlib/std/prelude.unio) | `print`, `print_error` | обе | стандартный вывод и поток ошибок |
+| [std/builtin/path.unio](../../stdlib/std/builtin/path.unio) | `Path` | компоненты, `name`, `extension`, `parent`, `join`, `normalize` | создание, текстовая форма, разделитель платформы |
+| [std/args.unio](../../stdlib/std/args.unio) | `std.args`: аргументы программы | — | аргументы |
+| [std/env.unio](../../stdlib/std/env.unio) | `std.env`: переменные, домашний каталог | — | обе функции |
+| [std/files.unio](../../stdlib/std/files.unio) | `std.files`: чтение, каталоги, атомарная запись | `write_text`, `list_tree`, протокол фиксации `AtomicFile` | отдельные системные вызовы |
 
 ## Общие правила модулей
 

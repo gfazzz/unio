@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.4 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.5 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.4: library layers `core`, `alloc`, `std` (S-11, S-12), build profiles and `unio check --profile=core` (L-26, C-21), the derived effect `allocates` (C-11); system programming is placed out of scope with its own release (section 2.2).
 
 Changes from 0.3: atomic replacement, ordering, and durability of file writes are separate guarantees for named file systems (S-9, S-9a, S-9b), and `commit` records each step so that a failure after the rename is reported precisely (S-9c); the tools and package operations run in isolated workers (SB-10–SB-15).
 
@@ -38,6 +40,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - Language: the constructs of `docs/concept.md`, sections 2–5.
 - Compiler with type and error checking; native builds for Linux x86-64, Linux arm64, macOS arm64, Windows x86-64.
 - Runtime: GC, resources, faults, termination model, `main` startup.
+- Library and runtime layers `core`, `alloc`, `std` and the check of a package against the `core` layer (S-11, S-12, C-21).
 - Sandbox: enforcement of manifest permissions and of an external policy by operating-system mechanisms (section 4.6).
 - Standard library for CLI (section 5).
 - Tools: `unio build`, `run`, `check`, `fmt`, `test`, `add`, `remove`, `update`, `doc`, `symbol`, `explain`.
@@ -54,6 +57,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - FFI for user code (`external function` is used only inside the standard library).
 - Self-hosted compiler written in Unio.
 - Profiler (ships in 0.2; 0.1 only defines the event format).
+- System programming: the `system` profile, memory without a GC, control of data representation, pointers and assembly, interrupts, atomic operations and a memory model, constraints on effects (concept, section 8.1; a later release).
 
 ## 3. Language requirements
 
@@ -110,6 +114,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 3.7 Tests in the language
 
 - L-25. A top-level `test "description":` block. `assert`, `assert_fail`, and `expect_fault` are available. Tests are excluded from `build` output.
+- L-26. A build profile chooses the available library layers (S-11): `application` has `core`, `alloc`, and `std`; the `system` profile is defined by a later release. A profile only removes capabilities: a construct means the same in every profile, and a program that uses an unavailable layer is rejected with the chain of calls that leads to it.
 
 ## 4. Compiler and runtime requirements
 
@@ -131,7 +136,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 4.3 Symbol context
 
-- C-11. `unio symbol <full name>` returns (text and JSON): signature, documentation, declaration site, usage list, and for functions the error set, derived effects (`files`, `network`, `process`, `env`), and the list of called functions.
+- C-11. `unio symbol <full name>` returns (text and JSON): signature, documentation, declaration site, usage list, and for functions the error set, derived effects (`files`, `network`, `process`, `env`, `allocates`), the lowest library layer the function needs, and the list of called functions.
 - C-12. `unio outline <file>` returns the file's declarations with signatures.
 
 ### 4.4 Runtime
@@ -147,6 +152,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - C-18. Emergency termination (code 102): the heap is exhausted beyond the reserve, the heap limit of the policy is exceeded, or the stack overflows. The runtime writes a preallocated diagnostic to stderr and exits without running user code. Descriptors are closed by the operating system; data buffered inside the program is lost.
 - C-19. Abnormal termination: a kill signal, power loss, a crash of external code, an operating-system failure. The runtime gives no guarantees; only the guarantees of the operating system and of atomic writes (S-9) remain. For files, guarantees 2 and 3 of S-9 still apply on the file systems of S-9a.
 - C-20. The documentation lists for each kind of termination which guarantees hold for resources, standard output, and files. Writes through an open file handle without `open_atomic` are not called safe: after emergency or abnormal termination their content may be cut off at any point.
+- C-21. `unio check --profile=core` verifies that a package needs nothing but the `core` layer: no allocation, no GC, no operating system. Each violation is reported with the chain of calls from a function of the package to the first function of a higher layer.
 
 ### 4.6 Sandbox
 
@@ -186,7 +192,9 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-9a. Supported file systems and mechanisms: Linux ext4, XFS, and Btrfs (`fsync` of the file before `rename`, `fsync` of the directory for durability); macOS APFS (`fcntl(F_FULLFSYNC)`, because `fsync` there does not reach storage); Windows NTFS (`FlushFileBuffers`, then `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and `MOVEFILE_WRITE_THROUGH`). On other file systems (FAT, exFAT, network file systems) the write is performed, but guarantees 1–3 are not promised; a write with `durable = true` there fails with kind `Unsupported`, because the requested guarantee cannot be given. Storage that acknowledges writes it has not stored is beyond what software can guarantee, and the documentation says so.
 - S-9c. `commit` is a sequence of steps, and each step records its result in the state of the file before the next one starts: `Writing` (descriptor open), `Closed` (data synced, descriptor released), `Replaced` (the target holds the new content), `Durable` (the directory is synced). `close` releases the descriptor even when it reports an error, so the state becomes `Closed` before `close` is called. A failed `commit` can be called again and continues from the recorded state. If the directory sync fails after the rename, `commit` fails with kind `DurabilityUnconfirmed`: the target is already replaced and guarantees 1 and 2 hold, but survival after power loss is not confirmed; `is_replaced()` reports this. `release` acts only on what the file still owns: in `Writing` it closes the descriptor once and removes the temporary file, in `Closed` it only removes the temporary file, after the replacement it does nothing.
 - S-9b. Verification: on Linux, block writes are recorded during atomic writes (dm-log-writes) and every prefix of them is replayed and checked; on all four platforms, processes are killed at random points and virtual machines are powered off during writes. The runtime has a fault-injection hook in test builds that fails a chosen system call; the suite fails each step of `commit` in turn (data sync, close, rename, directory sync) on every platform and checks the state, the error kind, the content of the target, the presence of the temporary file, and, through the descriptor table, that no descriptor is closed twice. The same protocol is checked without the operating system by the `test` blocks of `stdlib/std/files.unio`, which replace the system steps with failing ones.
-- S-10. The standard library is written in Unio in `stdlib/std/`. Everything the language can express is implemented in it; only operating-system and runtime primitives are `external function` declarations in `unsafe module` files. These sources are the normative API; the reference programs use only it, verified by `spec/check_api.py`.
+- S-10. The standard library is written in Unio in `stdlib/`. Everything the language can express is implemented in it; only operating-system and runtime primitives are `external function` declarations in `unsafe module` files. These sources are the normative API; the reference programs use only it, verified by `spec/check_api.py`.
+- S-11. The standard library is divided into layers: `core` needs neither an allocator, nor a GC, nor an operating system; `alloc` needs an allocator, in 0.1 the GC heap; `std` needs the operating system. A module may use only its own layer and the layers before it. The layer is given by the directory (`stdlib/core/`, `stdlib/alloc/`, `stdlib/std/`) and is not part of the module name. Checked by `spec/check_api.py` in stage 0 and by the compiler from stage 2.
+- S-12. The runtime is divided the same way: the `core` runtime (program entry, fault reporting through a hook, checked arithmetic) makes no calls to the operating system; the allocator and the GC form the `alloc` runtime; files, processes, standard output, and the sandbox form the `std` runtime. The `core` runtime reaches the others only through hooks that the `application` profile provides.
 
 ## 6. Tooling requirements
 
@@ -197,7 +205,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 | `unio new <name>` | Create a package with manifest and example | `--lib`, `--bin` |
 | `unio build` | Build an executable | `--release`, `--target` |
 | `unio run` | Build and run | arguments after `--`, `--policy` |
-| `unio check` | Check without building | `--diagnostics=json` |
+| `unio check` | Check without building | `--diagnostics=json`, `--profile` |
 | `unio fmt` | Format | `--check` for CI |
 | `unio test` | Run tests | `--json`, name filter, `--policy` |
 | `unio add/remove/update` | Manage dependencies | version, `--unsafe-ok` |

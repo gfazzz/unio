@@ -1,0 +1,10 @@
+## The alloc prelude: functions that need an allocator.
+
+## The integers from start up to, but not including, end.
+public function range(start as Int, end as Int) returns List[Int]:
+    var numbers as List[Int] = []
+    var current = start
+    while current < end:
+        numbers.append(current)
+        current = current + 1
+    return numbers

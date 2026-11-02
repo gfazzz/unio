@@ -1,0 +1,5 @@
+## Text form of Int; producing new text needs an allocator.
+unsafe module
+
+extend Int with Display:
+    external function to_text(self) returns Text

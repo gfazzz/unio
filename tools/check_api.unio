@@ -26,6 +26,9 @@ let GRAMMAR_PATH as Text = "spec/grammar.ebnf"
 
 let STDLIB as Text = "stdlib"
 
+## The layers of the standard library; each may use only itself and the layers before it.
+let LAYERS as List[Text] = ["core", "alloc", "std"]
+
 let PROGRAM_DIRECTORIES as List[Text] = ["docs/examples", "docs/ru/examples", "examples", "tools"]
 
 let PRELUDE_VARIANTS as List[Text] = ["some", "none", "ok", "error"]
@@ -45,6 +48,8 @@ struct Api:
     methods as List[Text]
     types as List[Text]
     variants as Map[Text, List[Text]]
+    ## "method:length", "function:print", "std.files:read_text", "module:std.files" -> index in LAYERS.
+    layers as Map[Text, Int]
 
 public function main() returns Int:
     var problems as List[Text] = []
@@ -83,11 +88,16 @@ function load_api(language as grammar.Grammar, var problems as List[Text]) retur
     var methods as List[Text] = []
     var types as List[Text] = []
     var variants as Map[Text, List[Text]] = {}
+    var layers as Map[Text, Int] = {}
     let sources = unio_files_below(Path(STDLIB))
     if sources.is_empty():
         problems.append("stdlib/: no sources found")
     for path in sources:
         let name = relative(path, Path(STDLIB))
+        let layer = layer_index(split(name, "/")[0])
+        if layer < 0:
+            problems.append("stdlib/{name}: not in a layer directory ({join(LAYERS, ", ")})")
+            continue
         let source = try files.read_text(path) on IoError as e:
             problems.append("stdlib/{name}: {e.reason}")
             continue
@@ -111,6 +121,7 @@ function load_api(language as grammar.Grammar, var problems as List[Text]) retur
                 if inner_rule == "interface_decl":
                     for signature in signatures(inner):
                         add_unique(methods, signature)
+                        note_layer(layers, "method:" + signature, layer)
                 if is_public(children):
                     if inner_rule in ["function_decl", "external_decl"]:
                         add_unique(public_functions, signature_name(inner))
@@ -125,22 +136,50 @@ function load_api(language as grammar.Grammar, var problems as List[Text]) retur
                 for child in children:
                     if grammar.rule_of(child) == "member" and (with_interface or is_public(grammar.children_of(child))):
                         add_unique(methods, signature_name(child))
+                        note_layer(layers, "method:" + signature_name(child), layer)
         let module_name = module_of(name)
+        note_layer(layers, "module:" + module_name, layer)
+        for function_name in public_functions:
+            note_layer(layers, ("function:" if module_name == "prelude" else module_name + ":") + function_name, layer)
         if module_name == "prelude":
             prelude = merge_unique(prelude, public_functions)
         else:
             modules.put(module_name, merge_unique(modules.get(module_name) or [], public_functions))
-    return Api(modules = modules, prelude = prelude, methods = methods, types = types, variants = variants)
+    return Api(modules = modules, prelude = prelude, methods = methods, types = types, variants = variants, layers = layers)
 
-## "std.files" for std/files.unio; "prelude" for the prelude and the built-in types.
+## "std.files" for std/files.unio in any layer; "prelude" for the preludes and the built-in types.
+## The first component is the layer directory and is not part of the module name.
 function module_of(name as Text) returns Text:
     let parts = split(name.replace("\\", "/"), "/")
     let file = parts[parts.length() - 1]
-    var segments = parts.slice(0, parts.length() - 1)
+    var segments = parts.slice(1, parts.length() - 1)
     segments.append(file.slice(0, file.length() - ".unio".length()) if file.ends_with(".unio") else file)
-    if segments == ["std", "prelude"] or (segments.length() >= 2 and segments.slice(0, 2) == ["std", "builtin"]):
+    if segments == ["prelude"] or (not segments.is_empty() and segments[0] == "builtin"):
         return "prelude"
-    return join(segments, ".")
+    return "std." + join(segments, ".")
+
+## The position of the layer in LAYERS, or -1.
+function layer_index(layer as Text) returns Int:
+    return LAYERS.find_index(function (candidate as Text) returns Bool: candidate == layer) or -1
+
+## Records the lowest layer that defines the name.
+function note_layer(var layers as Map[Text, Int], key as Text, layer as Int):
+    layers.put(key, min(layers.get(key) or layer, layer))
+
+## The layer of a program: its layer directory inside stdlib/, otherwise std.
+function program_layer(path as Path) returns Int:
+    let parts = path.components()
+    if parts.length() >= 2 and parts[0] == STDLIB and layer_index(parts[1]) >= 0:
+        return layer_index(parts[1])
+    return layer_index("std")
+
+function check_layer(api as Api, key as Text, what as Text, file_layer as Int, location as Text, var problems as List[Text]):
+    match api.layers.get(key):
+        case some(needed):
+            if needed > file_layer:
+                problems.append("{location}: {what} needs the layer {LAYERS[needed]}, but this file is in the layer {LAYERS[file_layer]}")
+        case none:
+            pass
 
 
 # ---------------------------------------------------------------- one program
@@ -159,6 +198,7 @@ function check_program(path as Path, language as grammar.Grammar, api as Api, va
         case none:
             check_variant_names(name, tree, problems)
     let own = declarations(tree)
+    let layer = program_layer(path)
     var locals as List[Text] = []
     for rule, children in walk(tree):
         if rule in ["param", "let_statement"]:
@@ -187,6 +227,7 @@ function check_program(path as Path, language as grammar.Grammar, api as Api, va
                     problems.append("{name}: module {module_name} is not in stdlib/")
         else if module_name not in known_modules:
             problems.append("{name}: module {module_name} is not in stdlib/")
+        check_layer(api, "module:" + module_name, "module {module_name}", layer, name, problems)
         if first_kind(children) == "import":
             let alias = (names_in(children).last() or module_name) if has_token(children, "as") else (names_in(module_path_of(children)).last() or module_name)
             aliases.put(alias, module_name)
@@ -234,12 +275,16 @@ function check_program(path as Path, language as grammar.Grammar, api as Api, va
                 continue
             if token.value not in api.methods and token.value not in own.functions:
                 problems.append("{name}:{token.line}: method {token.value} is not in stdlib/")
+            else if token.value not in own.functions:
+                check_layer(api, "method:" + token.value, "method {token.value}", layer, "{name}:{token.line}", problems)
             continue
         if previous == "function":
             continue
         let known = token.value in own.functions or token.value in own.types or token.value in plain_variants or token.value in api.prelude or token.value in PRELUDE_VARIANTS or token.value in imported or token.value in locals
         if not known:
             problems.append("{name}:{token.line}: {token.value} is neither declared nor in stdlib/")
+        else if token.value in api.prelude and token.value not in own.functions and token.value not in locals:
+            check_layer(api, "function:" + token.value, "function {token.value}", layer, "{name}:{token.line}", problems)
 
 ## Rule L-6a: a variant whose name is also a visible type is written Enum.Variant.
 function check_variant_names(name as Text, tree as grammar.Tree, var problems as List[Text]):
@@ -449,13 +494,19 @@ function relative(path as Path, root as Path) returns Text:
     return join(parts.slice(prefix.length(), parts.length()), "/")
 
 
-test "module names follow the file path":
+test "module names follow the file path below the layer directory":
     assert module_of("std/files.unio") == "std.files"
-    assert module_of("std/prelude.unio") == "prelude"
-    assert module_of("std/builtin/text.unio") == "prelude"
+    assert module_of("alloc/json.unio") == "std.json"
+    assert module_of("core/prelude.unio") == "prelude"
+    assert module_of("alloc/builtin/text.unio") == "prelude"
+
+test "the layer of a program":
+    assert program_layer(Path("stdlib/core/builtin/int.unio")) == 0
+    assert program_layer(Path("stdlib/alloc/json.unio")) == 1
+    assert program_layer(Path("examples/wc.unio")) == 2
 
 test "relative paths drop the root":
-    assert relative(Path("stdlib/std/json.unio"), Path("stdlib")) == "std/json.unio"
+    assert relative(Path("stdlib/alloc/json.unio"), Path("stdlib")) == "alloc/json.unio"
 
 test "merging keeps the first occurrence":
     assert merge_unique(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
