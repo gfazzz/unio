@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.5 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.6 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.5: test-first development (T-5a, T-5b).
 
 Changes from 0.4: library layers `core`, `alloc`, `std` (S-11, S-12), build profiles and `unio check --profile=core` (L-26, C-21), the derived effect `allocates` (C-11); system programming is placed out of scope with its own release (section 2.2).
 
@@ -223,6 +225,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - T-4. Tests from `test` blocks run in isolation; results in text and JSON with name, status, time, and output.
 - T-5. Tests can check faults with `expect_fault`.
+- T-5a. A `test` block that does not compile is reported by `unio test` as a failing test with its diagnostics; the other tests of the file and the package still run. An error outside `test` blocks still stops the run, because the tested code itself is wrong.
+- T-5b. Every change to the compiler, the runtime, the standard library, and the tools comes with a check that fails before the change and passes after it (concept, section 1.2); CI rejects a change to the grammar without new corpus files and a change to diagnostics without a program in the control set.
 
 ### 6.4 Packages
 

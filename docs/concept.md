@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.6. Changes from 0.5: library layers and build profiles, and the plan for system programming (section 8.1).
+Version: 0.7. Changes from 0.6: test-first development of the language and of programs (section 1.2).
+
+Changes from 0.5: library layers and build profiles, and the plan for system programming (section 8.1).
 
 Changes from 0.4: file writes keep their guarantees after power loss on named file systems, and the compiler and package tools run isolated (sections 3.3, 6).
 
@@ -30,6 +32,30 @@ Unio is developed in Unio wherever that is possible: the standard library, the p
 Where Unio cannot be used yet, a temporary implementation in another language does the work and is removed as soon as Unio can replace it: the compiler and the runtime are in Rust until self-hosting, the checkers in `spec/` are in Python until the interpreter of stage 3 runs their Unio versions in `tools/`. A part written in another language needs a stated reason and a stated end.
 
 This has already paid off: writing the standard library and the checkers in Unio exposed the explicit commit of atomic files, contextual keywords, `pass`, package modules, and missing library functions, all settled in version 0.4.
+
+### 1.2 Tests first
+
+Unio is developed test first, and the language and its tools make test-first development the natural way to write Unio programs.
+
+For the language itself, every change starts with a check that fails:
+
+- a grammar rule starts with corpus files in `spec/tests/`: a valid program that does not parse yet and an invalid one with its expected error;
+- a diagnostic starts with a program in the control set that must produce it (requirement R-10), and the code with its explanation;
+- a function of the standard library or a tool starts with its `test` blocks;
+- a defect starts with a test that reproduces it, which then stays as a regression test;
+- a guarantee of the runtime (termination, atomic writes, the sandbox) starts with the test that would show its violation, such as fault injection or a hostile program.
+
+A change is complete when the new check passes and all old checks still pass. A requirement that cannot be checked is rewritten until it can be, or removed.
+
+For programs in Unio the same cycle is the recommended way to work, for people and for AI agents alike:
+
+1. state the intent in a documentation comment;
+2. write a `test` block that expresses it;
+3. run `unio test` and see the test fail, because the function does not exist or does the wrong thing;
+4. write the smallest code that makes it pass, checked by `unio check`;
+5. clean up with `unio fmt` while all tests stay green.
+
+The tools support this cycle. A `test` block that does not compile yet, for example because it calls a function that is not written, is reported as a failing test with its diagnostics, and the other tests of the file still run; the "red" step therefore never blocks the whole package. Tests live next to the code in the same file, so a reader sees the intended behavior and the implementation together, and `unio test --json` gives an agent the same results a person sees.
 
 ## 2. Syntax
 
@@ -326,9 +352,9 @@ What an AI agent gets from the tooling:
 2. **Symbol context**: `unio symbol app.users.find_user` returns the signature, documentation, usages, result type, and error set.
 3. **Check without build**: `unio check` fast enough for the loop "generate, check, fix".
 4. **One style**: `unio fmt` makes generated code indistinguishable from hand-written code, so review looks at meaning, not layout.
-5. **Tests next to code**: `test "description":` blocks in the same file, run with `unio test --json`.
+5. **Tests next to code, written first**: `test "description":` blocks in the same file, run with `unio test --json`. A test that does not compile yet is reported as a failing test, so an agent can write the test before the function (section 1.2).
 
-What is required from the AI: describe intent in documentation comments and tests; the code stays unambiguous.
+What is required from the AI: describe intent in documentation comments, express it as tests before writing the code, and change the code until the tests pass; the code stays unambiguous, and the tests show the reviewer what was intended.
 
 ## 8. AI computation and the quantum extension
 
@@ -385,6 +411,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Enforcement of permissions | Mandatory OS sandbox, narrowed by an external policy; fails closed |
 | What the language and its tools are written in | In Unio wherever possible (section 1.1); another language only temporarily, with a reason and an end |
 | Kernels and code without an operating system | One language: library layers `core`, `alloc`, `std` and build profiles that only remove capabilities; system features in a later release (section 8.1) |
+| How changes to the language and to programs are made | Test first: a failing check, then the change, then all checks green (section 1.2) |
 | Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
@@ -401,7 +428,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–14 were added in version 0.4 after review and after writing the standard library in Unio.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–15 were added in version 0.4 after review and after writing the standard library in Unio.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -417,3 +444,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 12. **Shared state through `var self` methods.** Values make every change visible where it is written. The cost is that changed state must be named at every call; a struct with `var self` methods keeps that explicit without repeating parameters.
 13. **The language built in the language.** A design checked only on examples misses what a large program needs; a library and tools written in Unio are such programs, and they are needed anyway. Writing them first in Unio turns every awkward spot into a concrete finding, while the cost of a temporary second implementation is limited to the time until the interpreter runs.
 14. **Layers and profiles now, system features later.** Splitting the library and the runtime is cheap while they are small and expensive once applications depend on them; checking the layers from the start keeps `core` free of hidden dependencies on the allocator, the GC, and the operating system. The system features themselves need careful design and do not help the first release, so they wait for their own release, while these two boundaries keep the way open, also for embedded devices and high-performance computing.
+15. **Tests first.** Generated code is reviewed briefly, so the reviewer needs a statement of intent that can be executed; a test written before the code is that statement, and it cannot be bent to fit an implementation that already exists. For the language, a failing check before every change keeps the specification, the corpus, and the implementation from drifting apart, which is how the grammar defects of version 0.4 were found.

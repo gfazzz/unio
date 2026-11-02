@@ -10,6 +10,7 @@ Version: 0.1 (draft). Basis: `docs/requirements.md`. Russian localization: `docs
 - **RFCs for language changes.** Any change to syntax or semantics after stage 1 is written up in `docs/rfcs/NNNN-title.md` with rationale, examples, and a migration plan.
 - **Measurement from the first stage.** Performance and diagnostic size are tracked in CI; a regression blocks the merge.
 - **Unio first** (concept, section 1.1). Everything that does not have to exist before the language runs is written in Unio: the standard library in `stdlib/`, the reference utilities, and the project tools in `tools/`. Until the interpreter of stage 3 runs them, CI uses temporary Python checkers that do the same work; they are deleted at the end of stage 3. The compiler and the runtime stay in Rust until self-hosting in 1.0.
+- **Tests first** (concept, section 1.2). Every task starts with a check that fails: corpus files for the grammar, a program of the control set for a diagnostic, `test` blocks for library and tool code, a reproducing test for a defect. A task is done when that check passes and all others still do.
 
 ## 2. Repository layout
 
