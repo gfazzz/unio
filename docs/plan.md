@@ -25,6 +25,7 @@ unio/
   examples/        reference utilities
   bench/           performance tests
   editors/vscode/  extension
+  unios/           UnioS kernel, services, and the project site (track of section 9, after 0.5)
 ```
 
 ## 3. Stages of release 0.1
@@ -199,12 +200,51 @@ Tracked in CI and published with every release:
 | 0.4 "Quantum" | Circuits as values, simulator, hardware interface with capability description | Backend interface from 0.3 |
 | 0.5 "System" | The `system` profile: memory without a GC and code without copy-on-write, control of representation, pointers, memory-mapped devices and assembly in `unsafe module`, interrupts, atomic operations and a memory model, checked constraints on effects; the prototype kernel of concept section 8.1 in a virtual machine | Layers `core`, `alloc`, `std`; derived effects; the memory model must agree with the concurrency of 0.2 |
 | 1.0 | Language stabilization, compatibility guarantee, self-hosted compiler in Unio | All of the above |
+| UnioS (separate track, with 0.5) | The operating system written in Unio and the proof of concept: the project site, in Unio, served on UnioS on a VM over HTTPS. See section 9 and `docs/os.md` | Native code (stage 4), concurrency and `std.net` from 0.2, the `system` profile and prototype kernel from 0.5 |
 
 Each later release starts with its own specification modeled on `docs/requirements.md` and does not change core syntax without an RFC and an automatic migration.
 
-## 9. Immediate actions
+## 9. UnioS track
+
+UnioS is the operating system written in Unio. Concept section 8.1 keeps a general-purpose operating system off the language roadmap, so UnioS is a separate project with its own specification and team. Its first deliverable is the proof of concept: the project site, written in Unio, served by a web server and framework in Unio, on UnioS, on a VM of the class 8 GB RAM / 4 cores / 80 GB, reachable over HTTPS. Design, architecture, and risks are in `docs/os.md`; this section fixes the track's place in the schedule and what the language owes it.
+
+### 9.1 Schedule
+
+The track starts with release 0.5 "System": the prototype kernel of that release (bootloader, entry into Unio code, serial output, page management, timer, scheduler, user process, system call) is the starting point of stage U-1. Weeks count from the start of the track; the team of 2–3 engineers is separate from the language team.
+
+| Stage | Weeks | Result | Exit criterion |
+|---|---|---|---|
+| U-0 Design | 1–6, during 0.5 | UnioS specification, virtio device model, capabilities mapped from manifest permissions, system-call interface, service protocol | Specification accepted; the 0.5 prototype kernel boots under QEMU with the UnioS system-call table |
+| U-1 Kernel | 6–16 | Virtio transport, interrupts, memory regions for processes, process creation and capabilities, serial console, driver processes | A driver process receives interrupts and reads a virtio device; memory and timer tests green |
+| U-2 Network and site | 14–28 | virtio-net driver, TCP/IP and DNS service, `std` over UnioS system calls, HTTP/1.1 server, web framework, site over HTTP on a local VM | Site serves from a local VM; 24 h of network fuzzing survived |
+| U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store with the S-9 guarantees, TLS 1.3 subset, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable over HTTPS for 30 days with recorded uptime |
+| U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator and QPU device models, model-serving service | Own specification, outside the language roadmap |
+
+The proof of concept (U-0 to U-3) is the UnioS 0.1 milestone and is announced on the site it serves.
+
+### 9.2 What the language owes the track
+
+Nothing beyond what is already planned: the `core`, `alloc`, and `std` layers and `unio check --profile=core` in 0.1; task-based concurrency and `std.net` as interfaces without POSIX assumptions in 0.2; the `system` profile, the memory model, and the freestanding prototype in stage 4 and release 0.5. Two consequences are recorded here so that they are not lost:
+
+- `std` has one interface and two backends, a host operating system and UnioS; the specification test corpus and the reference utilities must run on both.
+- The sandbox requirements (SB-1 onward) are stated so that a kernel capability model satisfies them without a host sandbox.
+
+Any further need the track discovers goes to the language as an RFC.
+
+### 9.3 Risks specific to the track
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| UnioS pulls engineers from the language before 0.5 is stable | high | Separate team; U-1 starts only when the 0.5 prototype kernel boots |
+| TLS written from scratch has protocol defects | medium | TLS 1.3 only, one cipher suite, RFC test vectors, interoperability with three existing clients, external review before public exposure |
+| `std` over UnioS diverges from `std` over Linux | medium | One interface, two backends, one test corpus |
+| "AI in the kernel" remains a slogan | medium | U-4 ships a measurable model-serving service with memory and latency visible in the profiler |
+| Expectation that UnioS runs on quantum hardware | medium | A QPU is a coprocessor device model; stated plainly in `docs/os.md` |
+
+## 10. Immediate actions
 
 1. Concept 0.4 closes the review findings: mandatory sandbox, one rule for calls with `fails with`, termination model. Set up the RFC process in `docs/rfcs/` for future changes. Concept 0.5 and requirements 0.4 close the second review: guarantees of file writes after power loss and isolated tools.
 2. Fix the EBNF grammar (`spec/grammar.ebnf`) and a small set of reference programs (`spec/tests/`) checked against it automatically.
 3. Create the repository layout of section 2 and CI with document formatting checks and the grammar check.
 4. Write the remaining reference utilities in Unio following `docs/examples/todo.unio`.
+5. Keep the `std` interface free of host assumptions so the UnioS backend of section 9.2 stays possible; record it in the standard library review checklist.

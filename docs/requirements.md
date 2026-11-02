@@ -58,6 +58,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - Self-hosted compiler written in Unio.
 - Profiler (ships in 0.2; 0.1 only defines the event format).
 - System programming: the `system` profile, memory without a GC, control of data representation, pointers and assembly, interrupts, atomic operations and a memory model, constraints on effects (concept, section 8.1; a later release).
+- UnioS, the operating system written in Unio, and its proof of concept (`docs/os.md`; a separate track with release 0.5).
 
 ## 3. Language requirements
 

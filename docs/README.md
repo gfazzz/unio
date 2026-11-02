@@ -11,4 +11,5 @@
 | [../examples](../examples) | Reference utilities checked against the grammar |
 | [../tools](../tools) | Project tools written in Unio |
 | [rfcs/README.md](rfcs/README.md) | RFC process for language changes |
+| [os.md](os.md) | UnioS: a site about Unio, in Unio, on an operating system written in Unio; architecture, stages, risks |
 | [ru/](ru/README.md) | Russian localization |

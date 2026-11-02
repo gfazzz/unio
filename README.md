@@ -43,4 +43,5 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Reference utilities](examples)
 - [Project tools in Unio](tools)
 - [RFC process](docs/rfcs/README.md)
+- [UnioS](docs/os.md): the operating system in Unio and the self-hosted site proof of concept
 - [Русская версия документации](docs/ru/README.md)
