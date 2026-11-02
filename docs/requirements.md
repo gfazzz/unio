@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.3 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.4 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.3: atomic replacement, ordering, and durability of file writes are separate guarantees for named file systems (S-9, S-9a, S-9b); the tools and package operations run in isolated workers (SB-10–SB-15).
 
 Changes from 0.2: a mandatory sandbox enforced by the operating system and an external policy (section 4.6); a single rule for calling a function with `fails with` (L-14, L-16); a termination model with separate guarantees for faults, memory exhaustion, and abnormal termination, and atomic file writes (sections 4.5, S-9, R-2).
 
@@ -143,7 +145,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - C-16. Normal termination: `main` returns. Buffered output is written, resources are already released by their `using` blocks.
 - C-17. Controlled termination (fault, code 101): user code stops at the fault point; the runtime prints the diagnostic and the stack trace, unwinds the stack, and calls `release` for every open `using` in reverse order. `release` runs with a memory reserve set aside at startup. A fault or error inside `release` during termination is reported, and the remaining resources are still released; the exit code stays 101.
 - C-18. Emergency termination (code 102): the heap is exhausted beyond the reserve, the heap limit of the policy is exceeded, or the stack overflows. The runtime writes a preallocated diagnostic to stderr and exits without running user code. Descriptors are closed by the operating system; data buffered inside the program is lost.
-- C-19. Abnormal termination: a kill signal, power loss, a crash of external code, an operating-system failure. The runtime gives no guarantees; only the guarantees of the operating system and of atomic writes (S-9) remain.
+- C-19. Abnormal termination: a kill signal, power loss, a crash of external code, an operating-system failure. The runtime gives no guarantees; only the guarantees of the operating system and of atomic writes (S-9) remain. For files, guarantees 2 and 3 of S-9 still apply on the file systems of S-9a.
 - C-20. The documentation lists for each kind of termination which guarantees hold for resources, standard output, and files. Writes through an open file handle without `open_atomic` are not called safe: after emergency or abnormal termination their content may be cut off at any point.
 
 ### 4.6 Sandbox
@@ -157,6 +159,12 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - SB-7. The compile-time check stays: using a standard-library module outside the declared permissions is a compile error, and derived effects are shown in `unio symbol`. The sandbox is the second line of defence, not a replacement.
 - SB-8. A test suite of programs that attempt forbidden actions through every standard-library module and through child processes runs on all four platforms; every attempt must be denied.
 - SB-9. The documentation states the limits of the sandbox: it does not protect against kernel vulnerabilities and side channels, nor against misuse of granted permissions. For AI-generated code it recommends a minimal manifest, an external policy with limits, and a separate user, container, or virtual machine for untrusted code.
+- SB-10. The tools handle untrusted input too. `unio check`, `build`, `fmt`, `doc`, the compile step of `test`, the language server, and the package operations (`add`, `remove`, `update`, installing from `unio.lock`) run their work in isolated worker processes, with the mechanisms of SB-4 and failing closed as in SB-5. The tool itself only starts workers and shows their results.
+- SB-11. A compiler worker may read only the package, its locked dependencies in the package cache, and the standard library, and may write only to the build directory (`target/`) and its own temporary directory. It has no network, cannot start processes, and sees no environment variables except those that select the language of messages. Imports cannot leave the package root. Limits on memory and time come from the policy or from defaults (2 GiB and 10 minutes per build); a worker that exceeds them is stopped and the tool reports a diagnostic instead of hanging.
+- SB-12. Package operations are split between two workers. The download worker may connect only to the registries in the configuration and write only to the download area. The unpacking worker has no network and writes only the cache entry of the package being installed; it checks signatures and hashes before unpacking and rejects archive entries with absolute paths, `..`, links, or device files.
+- SB-13. The language server analyses every opened project in such a worker, so opening an untrusted project in an editor is no more dangerous than reading its files.
+- SB-14. The compiler never executes code of the package or of its dependencies (R-7): Unio 0.1 has no build scripts, macros, or compile-time evaluation of user code. A later feature of this kind runs inside the sandbox of SB-1 and needs an RFC.
+- SB-15. The SB-8 suite includes hostile projects: archives with path traversal and links, deeply nested and oversized sources, imports that try to reach files outside the package, and inputs that make the checker work for a long time. Every case must be denied or stopped by a limit on every platform.
 
 ## 5. Standard library requirements
 
@@ -169,7 +177,14 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
 - S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
 - S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6). A function that reports absence instead of an error (`files.exists`, `env.get`) reports a blocked object as absent.
-- S-9. Atomic writes in `std.files`: `write_text` and `write_bytes` replace the target through a temporary file in the same directory followed by a rename, so a reader sees either the old or the new complete content under any kind of termination. The `durable = true` option also syncs the file and the directory to storage. `open_atomic(path)` returns a resource whose content replaces the target only when `commit()` is called. Releasing it without a commit, whether on error, on fault, or because the block ended without one, removes the temporary file and leaves the target unchanged. The commit is explicit because `release` cannot know how its block ended. After emergency or abnormal termination a temporary file named `.<name>.unio-tmp-<id>` may remain; it never replaces the target.
+- S-9. Writing in `std.files` replaces the target through a temporary file in the same directory. Three guarantees are stated separately:
+  1. Atomic replacement: a reader sees either the old or the new complete content, never a partly written file, however the program ends (normally, by fault, by memory exhaustion, or by a kill signal).
+  2. Ordering: the data of the temporary file always reaches storage before the rename, so after power loss or an operating-system crash the target still holds either the old or the new complete content; which of the two is not specified.
+  3. Durability: with `durable = true` the directory is synced after the rename as well, and once `write_text` or `commit` has returned successfully, the new content survives power loss.
+
+  Guarantees 1–3 hold on the file systems of S-9a. `write_text` and `write_bytes` perform the whole sequence in one call. `open_atomic(path)` returns a resource whose content replaces the target only when `commit()` is called. Releasing it without a commit, whether on error, on fault, or because the block ended without one, removes the temporary file and leaves the target unchanged. The commit is explicit because `release` cannot know how its block ended. After emergency or abnormal termination a temporary file named `.<name>.unio-tmp-<id>` may remain; it never replaces the target.
+- S-9a. Supported file systems and mechanisms: Linux ext4, XFS, and Btrfs (`fsync` of the file before `rename`, `fsync` of the directory for durability); macOS APFS (`fcntl(F_FULLFSYNC)`, because `fsync` there does not reach storage); Windows NTFS (`FlushFileBuffers`, then `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and `MOVEFILE_WRITE_THROUGH`). On other file systems (FAT, exFAT, network file systems) the write is performed, but guarantees 1–3 are not promised; a write with `durable = true` there fails with kind `Unsupported`, because the requested guarantee cannot be given. Storage that acknowledges writes it has not stored is beyond what software can guarantee, and the documentation says so.
+- S-9b. Verification: on Linux, block writes are recorded during atomic writes (dm-log-writes) and every prefix of them is replayed and checked; on all four platforms, processes are killed at random points and virtual machines are powered off during writes.
 - S-10. The standard library is written in Unio in `stdlib/std/`. Everything the language can express is implemented in it; only operating-system and runtime primitives are `external function` declarations in `unsafe module` files. These sources are the normative API; the reference programs use only it, verified by `spec/check_api.py`.
 
 ## 6. Tooling requirements
@@ -237,7 +252,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 ### 7.2 Reliability
 
 - R-1. The compiler does not crash on any input; verified by fuzzing for at least 24 hours before release.
-- R-2. On memory exhaustion the runtime exits with code 102 and a preallocated diagnostic. Files written with the atomic operations of S-9 keep either the old or the new complete content; verified by tests that exhaust memory and kill the process during writing on every platform. No other guarantee about files is given.
+- R-2. On memory exhaustion the runtime exits with code 102 and a preallocated diagnostic. Files written with the atomic operations of S-9 keep either the old or the new complete content; verified by tests that exhaust memory and kill the process during writing on every platform. No other guarantee about files is given. Power loss is covered by S-9 and S-9b.
 - R-3. A fault inside `using` releases all resources; verified by tests on every platform.
 
 ### 7.3 Security
@@ -246,7 +261,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 - R-5. All `external function` code in the standard library is reviewed by two people and tested with memory sanitizers.
 - R-6. The release build is reproducible, artifacts are signed, an SBOM is published.
 - R-7. The compiler and package manager do not execute dependency code during a build.
-- R-7a. The sandbox (section 4.6) passes the SB-8 suite on every platform; a release with a failing SB-8 test is not published.
+- R-7a. The sandbox (section 4.6) passes the SB-8 and SB-15 suites on every platform; a release with a failing test of either suite is not published.
 
 ### 7.4 Compatibility and platforms
 

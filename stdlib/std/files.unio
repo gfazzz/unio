@@ -1,4 +1,13 @@
-## Files and directories. Writing is atomic: a reader sees either the old or the new complete content (S-9).
+## Files and directories.
+##
+## Writing replaces the target through a temporary file in the same directory (requirement S-9):
+## 1. atomic replacement: a reader sees the old or the new complete content, however the program ends;
+## 2. ordering: the data is synced before the rename, so this also holds after power loss;
+## 3. durability: with durable = true the directory is synced too, and after a successful return
+##    the new content survives power loss.
+## These hold on ext4, XFS, Btrfs, APFS and NTFS (S-9a). On other file systems the write is
+## performed without the guarantees, and durable = true fails with kind Unsupported.
+##
 ## An operation blocked by the sandbox fails with kind PermissionDenied; exists and is_directory report it as false.
 unsafe module
 
@@ -7,6 +16,7 @@ public enum IoErrorKind:
     PermissionDenied
     AlreadyExists
     InvalidData
+    Unsupported
     Other
 
 public error IoError:
@@ -36,7 +46,7 @@ public function list_tree(root as Path) returns List[Path] fails with IoError:
             found.append(entry)
     return found
 
-## Replaces the file with the text atomically. durable = true also syncs it to storage. Permission: files.write.
+## Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.
 public function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError:
     using file = try open_atomic(path, durable = durable):
         try file.write(text)
@@ -51,7 +61,8 @@ public struct AtomicFile:
     durable as Bool
     var committed as Bool = false
 
-## Opens a temporary file in the directory of the target. Permission: files.write.
+## Opens a temporary file in the directory of the target. With durable = true it fails with kind
+## Unsupported on a file system where durability cannot be guaranteed. Permission: files.write.
 public external function open_atomic(path as Path, durable as Bool = false) returns AtomicFile fails with IoError
 
 extend AtomicFile:
@@ -77,7 +88,8 @@ extend AtomicFile with Resource:
 
 external function write_descriptor(descriptor as Int, text as Text, path as Path) fails with IoError
 
-## Flushes, optionally syncs, closes, and renames the temporary file over the target.
+## Syncs the data of the temporary file to storage (fsync, F_FULLFSYNC on macOS, FlushFileBuffers
+## on Windows), closes it, renames it over the target, and with durable also syncs the directory.
 external function finish(descriptor as Int, temporary as Path, target as Path, durable as Bool) fails with IoError
 
 ## Closes and removes the temporary file; errors are ignored because nothing is left to protect.

@@ -97,7 +97,7 @@ Work:
 - Deterministic build (C-4), verified in CI by hash comparison.
 - Cross-compilation to the four targets; CI on all of them.
 - Benchmarks of specification section 7.1 in CI with thresholds.
-- Sandbox (specification section 4.6) on four platforms: Landlock and seccomp-bpf, Seatbelt, AppContainer with a Job Object; the external policy and its limits; the SB-8 suite of forbidden actions in CI.
+- Sandbox (specification section 4.6) on four platforms: Landlock and seccomp-bpf, Seatbelt, AppContainer with a Job Object; the external policy and its limits; the SB-8 suite of forbidden actions in CI. Isolated workers for `check`, `build`, `fmt`, and `doc` (SB-10, SB-11) and the hostile-project suite SB-15. Power-loss tests of atomic writes (S-9b).
 
 Exit criterion: all ten utilities build natively on four platforms and run in the sandbox with the permissions from their manifests; the SB-8 suite is green on all platforms; the 7.1 metrics are met, or deviations are recorded with a remediation plan.
 
@@ -109,7 +109,7 @@ Work:
 - Modules `process`, `time`, `random`, `log`, `math`, `decimal`, `test`; documentation and examples for every public function.
 - Review and sanitizers for all `external function` code.
 - `unio.toml`, `unio.lock`, scoped permissions (T-6), `unsafe module`.
-- Registry: signed publishing, verification, no deletion; `add`, `remove`, `update`.
+- Registry: signed publishing, verification, no deletion; `add`, `remove`, `update`. Download and unpacking in separate workers (SB-12).
 - Documentation generation with `unio doc`.
 
 Exit criterion: all ten utilities use only the standard library and build offline from the lock file; the registry accepts and serves a test package.
@@ -119,7 +119,7 @@ Exit criterion: all ten utilities use only the standard library and build offlin
 Goal: the language is comfortable in an editor and in an AI agent's loop.
 
 Work:
-- Language server: diagnostics, go to definition, hints, completion, rename, formatting.
+- Language server: diagnostics, go to definition, hints, completion, rename, formatting. Analysis runs in an isolated worker (SB-13).
 - VS Code extension.
 - The document "How Unio works with AI", agent scenarios, the R-10 trial with published methodology and results.
 - Diagnostic message refinement from trial results.
@@ -174,6 +174,8 @@ Stages overlap: the front end and semantics proceed in parallel with specificati
 | Windows support lags | medium | R-8 violated | Windows CI from stage 1; paths through `Path`, no assumptions about separators |
 | Sandbox mechanisms differ between platforms or are missing on older systems | high | SB-1 holds unevenly; stage 4 slips | Prototype all three mechanisms in stage 0–1; one SB-8 suite for all platforms; fail closed with code 103 instead of a silently weaker sandbox |
 | Termination guarantees cannot be tested reliably | medium | R-2 unverified | Guarantees limited to atomic writes; tests that kill the process at random points of a write |
+| File systems differ in what survives power loss | medium | S-9 holds unevenly | Guarantees only for named file systems with per-platform sync calls; `durable` fails elsewhere; replay of recorded block writes on Linux, power-off tests in virtual machines |
+| Isolating the compiler slows the edit-check loop | medium | 7.1 `check` time violated | Long-lived workers reused between runs of the language server; the cost of starting a worker is measured in the performance suite |
 
 ## 7. Project metrics
 
@@ -198,7 +200,7 @@ Each later release starts with its own specification modeled on `docs/requiremen
 
 ## 9. Immediate actions
 
-1. Concept 0.4 closes the review findings: mandatory sandbox, one rule for calls with `fails with`, termination model. Set up the RFC process in `docs/rfcs/` for future changes.
+1. Concept 0.4 closes the review findings: mandatory sandbox, one rule for calls with `fails with`, termination model. Set up the RFC process in `docs/rfcs/` for future changes. Concept 0.5 and requirements 0.4 close the second review: guarantees of file writes after power loss and isolated tools.
 2. Fix the EBNF grammar (`spec/grammar.ebnf`) and a small set of reference programs (`spec/tests/`) checked against it automatically.
 3. Create the repository layout of section 2 and CI with document formatting checks and the grammar check.
 4. Write the remaining reference utilities in Unio following `docs/examples/todo.unio`.
