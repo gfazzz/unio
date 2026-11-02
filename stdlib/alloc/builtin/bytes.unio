@@ -1,0 +1,14 @@
+## Bytes: an immutable sequence of bytes, for file contents that are not text.
+unsafe module
+
+## An empty sequence of bytes.
+public external function Bytes() returns Bytes
+
+extend Bytes:
+    public external function length(self) returns Int
+
+    ## The bytes as text; none if they are not valid UTF-8.
+    public external function to_text(self) returns Option[Text]
+
+    public function is_empty(self) returns Bool:
+        return self.length() == 0

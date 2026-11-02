@@ -249,5 +249,5 @@ Any further need the track discovers goes to the language as an RFC.
 1. Concept 0.4 closes the review findings: mandatory sandbox, one rule for calls with `fails with`, termination model. Set up the RFC process in `docs/rfcs/` for future changes. Concept 0.5 and requirements 0.4 close the second review: guarantees of file writes after power loss and isolated tools.
 2. Fix the EBNF grammar (`spec/grammar.ebnf`) and a small set of reference programs (`spec/tests/`) checked against it automatically.
 3. Create the repository layout of section 2 and CI with document formatting checks and the grammar check.
-4. Write the remaining reference utilities in Unio following `docs/examples/todo.unio`.
+4. The ten reference utilities of requirements section 9.1 are written in Unio with their tests (`examples/README.md`); they grow with the language.
 5. Keep the `std` interface free of host assumptions so the UnioS backend of section 9.2 stays possible; record it in the standard library review checklist.

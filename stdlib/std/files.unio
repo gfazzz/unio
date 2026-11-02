@@ -53,6 +53,41 @@ public function write_text(path as Path, text as Text, durable as Bool = false) 
         try file.write(text)
         try file.commit()
 
+## The whole file as bytes. Permission: files.read.
+public external function read_bytes(path as Path) returns Bytes fails with IoError
+
+## Replaces the file with the bytes atomically, like write_text. Permission: files.write.
+public function write_bytes(path as Path, data as Bytes, durable as Bool = false) fails with IoError:
+    using file = try open_atomic(path, durable = durable):
+        try file.write_bytes(data)
+        try file.commit()
+
+## Copies the content of a file; the target is replaced atomically, like write_bytes.
+## Permission: files.read for the source, files.write for the target.
+public function copy_file(source as Path, target as Path, durable as Bool = false) fails with IoError:
+    try write_bytes(target, try read_bytes(source), durable = durable)
+
+## Gives a file or directory a new path on the same file system. It fails with kind AlreadyExists
+## instead of replacing an existing target, so that renaming never destroys data. Permission: files.write.
+public external function rename(source as Path, target as Path) fails with IoError
+
+## Creates one directory; fails with kind AlreadyExists if it exists and NotFound if its parent
+## does not. Permission: files.write.
+public external function create_directory(path as Path) fails with IoError
+
+## Creates the directory and every missing parent; an existing directory is not an error.
+## Permission: files.write.
+public function create_directories(path as Path) fails with IoError:
+    if is_directory(path):
+        return
+    match path.parent():
+        case some(parent):
+            if parent.to_text() != ".":
+                try create_directories(parent)
+        case none:
+            pass
+    try create_directory(path)
+
 ## The progress of an atomic file. Each step of commit records its result before the next step
 ## starts, so release and a repeated commit know exactly what the file still owns.
 public enum AtomicState:
@@ -69,13 +104,14 @@ public enum AtomicState:
 ## Contract of close: the descriptor is released even when close reports an error.
 struct AtomicSteps:
     write_data as Function[(Int, Text) fails with IoError]
+    write_bytes as Function[(Int, Bytes) fails with IoError]
     sync_data as Function[(Int) fails with IoError]
     close as Function[(Int) fails with IoError]
     rename as Function[(Path, Path) fails with IoError]
     sync_directory as Function[(Path) fails with IoError]
     remove as Function[(Path)]
 
-let SYSTEM_STEPS as AtomicSteps = AtomicSteps(write_data = system_write, sync_data = system_sync_data, close = system_close, rename = system_rename, sync_directory = system_sync_directory, remove = system_remove)
+let SYSTEM_STEPS as AtomicSteps = AtomicSteps(write_data = system_write, write_bytes = system_write_bytes, sync_data = system_sync_data, close = system_close, rename = system_rename, sync_directory = system_sync_directory, remove = system_remove)
 
 ## What release still has to do.
 enum Cleanup:
@@ -114,6 +150,12 @@ extend AtomicFile:
 
     public function write_line(var self, text as Text) fails with IoError:
         try self.write(text + "\n")
+
+    public function write_bytes(var self, data as Bytes) fails with IoError:
+        if self.state != AtomicState.Writing:
+            fail IoError(path = self.target, kind = IoErrorKind.Other, reason = "the file is already being committed")
+        let write_bytes = self.steps.write_bytes
+        try write_bytes(self.descriptor, data)
 
     ## Whether the target already holds the new content.
     public function is_replaced(self) returns Bool:
@@ -176,6 +218,8 @@ external function system_open_temporary(target as Path) returns TemporaryFile fa
 
 external function system_write(descriptor as Int, text as Text) fails with IoError
 
+external function system_write_bytes(descriptor as Int, data as Bytes) fails with IoError
+
 ## fsync on Linux, fcntl(F_FULLFSYNC) on macOS, FlushFileBuffers on Windows.
 external function system_sync_data(descriptor as Int) fails with IoError
 
@@ -201,6 +245,9 @@ function succeed_descriptor(descriptor as Int) fails with IoError:
 function succeed_write(descriptor as Int, text as Text) fails with IoError:
     return
 
+function succeed_write_bytes(descriptor as Int, data as Bytes) fails with IoError:
+    return
+
 function succeed_rename(temporary as Path, target as Path) fails with IoError:
     return
 
@@ -220,7 +267,7 @@ function fail_sync_directory(directory as Path) fails with IoError:
     fail IoError(path = directory, kind = IoErrorKind.Other, reason = "injected failure")
 
 function fake_steps(sync_data as Function[(Int) fails with IoError] = succeed_descriptor, close as Function[(Int) fails with IoError] = succeed_descriptor, rename as Function[(Path, Path) fails with IoError] = succeed_rename, sync_directory as Function[(Path) fails with IoError] = succeed_sync_directory) returns AtomicSteps:
-    return AtomicSteps(write_data = succeed_write, sync_data = sync_data, close = close, rename = rename, sync_directory = sync_directory, remove = ignore_remove)
+    return AtomicSteps(write_data = succeed_write, write_bytes = succeed_write_bytes, sync_data = sync_data, close = close, rename = rename, sync_directory = sync_directory, remove = ignore_remove)
 
 function fake_file(steps as AtomicSteps, durable as Bool) returns AtomicFile:
     return AtomicFile(target = Path("dir/target.txt"), temporary = Path("dir/.target.txt.unio-tmp-1"), descriptor = 3, durable = durable, steps = steps)
@@ -299,5 +346,10 @@ test "writing after commit started is an error":
         try:
             file.write("late")
             assert_fail("expected an error")
+        on IoError as e:
+            assert e.kind == IoErrorKind.Other
+        try:
+            file.write_bytes(Bytes())
+            assert_fail("expected an error for bytes too")
         on IoError as e:
             assert e.kind == IoErrorKind.Other

@@ -1,0 +1,105 @@
+## Copies a directory tree, leaving out names that match patterns.
+##
+## Usage:
+##     backup SOURCE TARGET [--exclude PATTERN]...
+##
+## A pattern is a name ("node_modules"), a name with a leading "*" ("*.tmp"), or a name with a
+## trailing "*" ("cache*"). It is compared with the names of files and directories; an excluded
+## directory is skipped with everything in it. TARGET is created if needed and must not lie inside
+## SOURCE. Every file is written atomically, so an interrupted backup never leaves a half-copied file.
+## Exit code: 0 on success, 1 if copying failed, 2 on wrong usage.
+
+import std.args
+import std.files
+
+struct Options:
+    source as Path
+    target as Path
+    patterns as List[Text]
+
+struct Summary:
+    var copied as Int = 0
+    var excluded as Int = 0
+
+error UsageError:
+    message as Text
+
+let USAGE as Text = "Usage: backup SOURCE TARGET [--exclude PATTERN]..."
+
+function parse_options(arguments as List[Text]) returns Options fails with UsageError:
+    if arguments.length() < 2:
+        fail UsageError(message = USAGE)
+    var patterns as List[Text] = []
+    var index = 2
+    while index < arguments.length():
+        if arguments[index] != "--exclude" or index + 1 >= arguments.length():
+            fail UsageError(message = USAGE)
+        patterns.append(arguments[index + 1])
+        index = index + 2
+    let options = Options(source = Path(arguments[0]), target = Path(arguments[1]), patterns = patterns)
+    if is_inside(options.target, options.source):
+        fail UsageError(message = "TARGET must not lie inside SOURCE")
+    return options
+
+## Whether the path is the directory itself or lies below it, after normalizing both.
+function is_inside(path as Path, directory as Path) returns Bool:
+    let parts = path.normalize().components()
+    let prefix = directory.normalize().components()
+    if prefix == ["."]:
+        return not path.is_absolute()
+    return parts.length() >= prefix.length() and parts.slice(0, prefix.length()) == prefix
+
+function matches(name as Text, pattern as Text) returns Bool:
+    if pattern.starts_with("*"):
+        return name.ends_with(pattern.slice(1, pattern.length()))
+    if pattern.ends_with("*"):
+        return name.starts_with(pattern.slice(0, pattern.length() - 1))
+    return name == pattern
+
+function is_excluded(name as Text, patterns as List[Text]) returns Bool:
+    return patterns.find(function (pattern as Text) returns Bool: matches(name, pattern)).is_some()
+
+## Copies the directory into the target and counts what it copied and left out.
+function copy_tree(source as Path, target as Path, patterns as List[Text], var summary as Summary) fails with IoError:
+    try files.create_directories(target)
+    for entry in try files.list_directory(source):
+        let name = entry.name()
+        if is_excluded(name, patterns):
+            summary.excluded = summary.excluded + 1
+        else if files.is_directory(entry):
+            try copy_tree(entry, target.join(name), patterns, summary)
+        else:
+            try files.copy_file(entry, target.join(name))
+            summary.copied = summary.copied + 1
+
+public function main() returns Int:
+    let options = try parse_options(args.list()) on UsageError as e:
+        print_error(e.message)
+        return 2
+    var summary = Summary()
+    try copy_tree(options.source, options.target, options.patterns, summary) on IoError as e:
+        print_error("backup: {e.path}: {e.reason}")
+        return 1
+    print("{summary.copied} file(s) copied, {summary.excluded} name(s) excluded")
+    return 0
+
+test "patterns match whole names, suffixes and prefixes":
+    assert matches("node_modules", "node_modules")
+    assert matches("draft.tmp", "*.tmp")
+    assert matches("cache-2026", "cache*")
+    assert not matches("notes.txt", "*.tmp")
+    assert is_excluded(".git", [".git", "*.tmp"])
+
+test "options with excludes":
+    let options = try parse_options(["src", "copy", "--exclude", "*.tmp", "--exclude", ".git"]) on UsageError as e:
+        assert_fail(e.message)
+    assert options.patterns == ["*.tmp", ".git"]
+
+test "a target inside the source is refused":
+    assert is_inside(Path("src").join("backup"), Path("src"))
+    assert not is_inside(Path("backup"), Path("src"))
+    try:
+        parse_options(["project", "project/backup"])
+        assert_fail("expected a usage error")
+    on UsageError as e:
+        assert e.message == "TARGET must not lie inside SOURCE"

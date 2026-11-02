@@ -1,0 +1,128 @@
+## Sums numeric columns of a CSV file.
+##
+## Usage:
+##     csv-sum FILE COLUMN...
+##
+## The first line of FILE names the columns. Fields are separated by commas; a field in double
+## quotes may contain commas, and "" inside quotes stands for one quote. Fields cannot span lines.
+## Empty fields are skipped. Prints one line per column: its name, the sum, and the number of values.
+## Exit code: 0 on success, 1 if the file cannot be read or has an error, 2 on wrong usage.
+
+import std.args
+import std.files
+
+struct Total:
+    column as Text
+    sum as Float
+    count as Int
+
+error CsvError:
+    line as Int
+    message as Text
+
+## The fields of one line; number is the line number for errors.
+function split_fields(line as Text, number as Int) returns List[Text] fails with CsvError:
+    var fields as List[Text] = []
+    var current = ""
+    var quoted = false
+    var index = 0
+    let characters = line.chars()
+    while index < characters.length():
+        let character = characters[index]
+        if quoted:
+            if character == "\"" and characters.get(index + 1) == some("\""):
+                current = current + "\""
+                index = index + 1
+            else if character == "\"":
+                quoted = false
+            else:
+                current = current + character
+        else if character == "\"" and current.is_empty():
+            quoted = true
+        else if character == ",":
+            fields.append(current)
+            current = ""
+        else:
+            current = current + character
+        index = index + 1
+    if quoted:
+        fail CsvError(line = number, message = "a quoted field is not closed")
+    fields.append(current)
+    return fields
+
+function sum_columns(text as Text, columns as List[Text]) returns List[Total] fails with CsvError:
+    let lines = text.lines()
+    if lines.is_empty():
+        fail CsvError(line = 1, message = "the file is empty")
+    let header = try split_fields(lines[0], 1)
+    var indexes as List[Int] = []
+    for column in columns:
+        match header.find_index(function (name as Text) returns Bool: name.trim() == column):
+            case some(index):
+                indexes.append(index)
+            case none:
+                fail CsvError(line = 1, message = "no column named \"{column}\"")
+    var sums = [0.0 for _ in columns]
+    var counts = [0 for _ in columns]
+    for number, line in lines.slice(1, lines.length()).enumerate(start = 2):
+        if line.trim().is_empty():
+            continue
+        let fields = try split_fields(line, number)
+        for position, index in indexes.enumerate():
+            let field = (fields.get(index) or "").trim()
+            if field.is_empty():
+                continue
+            match field.to_float():
+                case some(value):
+                    sums[position] = sums[position] + value
+                    counts[position] = counts[position] + 1
+                case none:
+                    fail CsvError(line = number, message = "\"{field}\" in column {columns[position]} is not a number")
+    return [Total(column = column, sum = sums[position], count = counts[position]) for position, column in columns.enumerate()]
+
+public function main() returns Int:
+    let arguments = args.list()
+    if arguments.length() < 2:
+        print_error("Usage: csv-sum FILE COLUMN...")
+        return 2
+    let name = arguments[0]
+    let text = try files.read_text(Path(name)) on IoError as e:
+        print_error("csv-sum: {name}: {e.reason}")
+        return 1
+    let totals = try sum_columns(text, arguments.slice(1, arguments.length())) on CsvError as e:
+        print_error("csv-sum: {name}:{e.line}: {e.message}")
+        return 1
+    for total in totals:
+        print("{total.column}: {total.sum} ({total.count} values)")
+    return 0
+
+test "quoted fields keep their commas and doubled quotes":
+    let fields = try split_fields("1,\"Smith, Anna\",\"say \"\"hi\"\"\"", 1) on CsvError as e:
+        assert_fail(e.message)
+    assert fields == ["1", "Smith, Anna", "say \"hi\""]
+
+test "an unclosed quote is an error with its line":
+    try:
+        split_fields("1,\"open", 7)
+        assert_fail("expected a CSV error")
+    on CsvError as e:
+        assert e.line == 7
+
+test "columns are summed and empty fields are skipped":
+    let text = "name,amount,tax\nbread,2.5,0.25\nmilk,,0.1\ncheese,10,1\n"
+    let totals = try sum_columns(text, ["amount", "tax"]) on CsvError as e:
+        assert_fail(e.message)
+    assert totals[0] == Total(column = "amount", sum = 12.5, count = 2)
+    assert totals[1].count == 3
+
+test "a missing column and a word in a number column are errors":
+    try:
+        sum_columns("a,b\n1,2\n", ["c"])
+        assert_fail("expected a missing column")
+    on CsvError as e:
+        assert e.message == "no column named \"c\""
+    try:
+        sum_columns("a\n1\nx\n", ["a"])
+        assert_fail("expected a number error")
+    on CsvError as e:
+        assert e.line == 3

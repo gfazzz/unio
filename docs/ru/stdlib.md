@@ -4,7 +4,7 @@
 
 Стандартная библиотека написана на Unio в [stdlib/](../../stdlib) и разделена на три слоя. Исходники — нормативный API: сигнатуры, документирующие комментарии и реализации. Всё, что язык может выразить, реализовано на Unio; только примитивы операционной системы и среды выполнения объявлены как `external function`, и только в файлах с пометкой `unsafe module` (Б-7, Б-10). Этот документ — обзор; справочник по исходникам будет строить `unio doc` (Д-3).
 
-Библиотека содержит то, чем пользуются эталонные программы и инструменты проекта. `spec/check_api.py` проверяет, что `docs/examples/`, `examples/`, `tools/` и сама библиотека не вызывают ничего, что в ней не объявлено. Остальные модули требования Б-1 (`std.collections`, `std.math`, `std.decimal`, `std.path`, `std.process`, `std.time`, `std.random`, `std.log`, `std.test`) добавляются на этапе 5 в том же виде.
+Библиотека содержит то, чем пользуются эталонные программы и инструменты проекта. `spec/check_api.py` проверяет, что `docs/examples/`, `examples/`, `tools/` и сама библиотека не вызывают ничего, что в ней не объявлено. Остальные модули требования Б-1 (`std.collections`, `std.math`, `std.decimal`, `std.path`, `std.time`, `std.random`, `std.log`, `std.test`) добавляются на этапе 5 в том же виде.
 
 ## Слои
 
@@ -27,13 +27,15 @@
 | [alloc/builtin/list.unio](../../stdlib/alloc/builtin/list.unio) | Методы `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted`, `sorted_by`, `sorted_with` (сортировка слиянием) | длина, `get`, `append`, `remove_last` |
 | [alloc/builtin/map.unio](../../stdlib/alloc/builtin/map.unio), [set.unio](../../stdlib/alloc/builtin/set.unio) | `Map[K, V]`, `Set[T]`, `List.to_set` | `contains`, `keys`, `values`, `union`, `intersection`, `difference` | хранение записей |
 | [alloc/builtin/int.unio](../../stdlib/alloc/builtin/int.unio), [float.unio](../../stdlib/alloc/builtin/float.unio) | Текстовая форма чисел | — | `to_text` |
+| [alloc/builtin/bytes.unio](../../stdlib/alloc/builtin/bytes.unio) | `Bytes` | `is_empty` | создание, `length`, `to_text` |
 | [alloc/text.unio](../../stdlib/alloc/text.unio) | `std.text`: `join`, `split` | обе | `from_code_point` |
 | [alloc/json.unio](../../stdlib/alloc/json.unio) | `std.json`: `Value`, `parse`, `encode`, `decode` | разбор и запись | преобразования между типом и `Value`, которые порождает компилятор |
 | [std/prelude.unio](../../stdlib/std/prelude.unio) | `print`, `print_error` | обе | стандартный вывод и поток ошибок |
 | [std/builtin/path.unio](../../stdlib/std/builtin/path.unio) | `Path` | компоненты, `name`, `extension`, `parent`, `join`, `normalize` | создание, текстовая форма, разделитель платформы |
 | [std/args.unio](../../stdlib/std/args.unio) | `std.args`: аргументы программы | — | аргументы |
 | [std/env.unio](../../stdlib/std/env.unio) | `std.env`: переменные, домашний каталог | — | обе функции |
-| [std/files.unio](../../stdlib/std/files.unio) | `std.files`: чтение, каталоги, атомарная запись | `write_text`, `list_tree`, протокол фиксации `AtomicFile` | отдельные системные вызовы |
+| [std/files.unio](../../stdlib/std/files.unio) | `std.files`: чтение, каталоги, атомарная запись, копирование, переименование | `write_text`, `write_bytes`, `copy_file`, `create_directories`, `list_tree`, протокол фиксации `AtomicFile` | отдельные системные вызовы, `rename` без замены |
+| [std/process.unio](../../stdlib/std/process.unio) | `std.process`: запуск программ без оболочки, с ограничением времени | — | `run` |
 
 ## Общие правила модулей
 

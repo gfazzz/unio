@@ -1,0 +1,120 @@
+## Prints the last lines of a log file, filtered by level and text.
+##
+## Usage:
+##     log-tail [--lines N] [--level LEVEL] [--contains TEXT] FILE
+##
+## A log line has the form "TIME LEVEL message", for example "2026-11-02T10:15:00Z ERROR disk full".
+## LEVEL is DEBUG, INFO, WARN, or ERROR: --level WARN shows warnings and errors, and lines without
+## a level are shown only when no level is given. N is 10 by default.
+## Exit code: 0 on success, 1 if FILE cannot be read, 2 on wrong usage.
+
+import std.args
+import std.files
+from std.text import join
+
+let LEVELS as List[Text] = ["DEBUG", "INFO", "WARN", "ERROR"]
+
+let USAGE as Text = "Usage: log-tail [--lines N] [--level LEVEL] [--contains TEXT] FILE"
+
+struct Options:
+    count as Int
+    minimum_rank as Int
+    contains as Text
+    path as Path
+
+error UsageError:
+    message as Text
+
+function parse_options(arguments as List[Text]) returns Options fails with UsageError:
+    var count = 10
+    var minimum_rank = 0
+    var contains = ""
+    var index = 0
+    while index + 1 < arguments.length():
+        let flag = arguments[index]
+        let value = arguments[index + 1]
+        if flag == "--lines":
+            match value.to_int():
+                case some(number) if number > 0:
+                    count = number
+                case _:
+                    fail UsageError(message = "--lines needs a positive number, not {value}")
+        else if flag == "--level":
+            match rank(value):
+                case some(found):
+                    minimum_rank = found
+                case none:
+                    fail UsageError(message = "unknown level {value}; use {join(LEVELS, ", ")}")
+        else if flag == "--contains":
+            contains = value
+        else:
+            fail UsageError(message = USAGE)
+        index = index + 2
+    if index != arguments.length() - 1:
+        fail UsageError(message = USAGE)
+    return Options(count = count, minimum_rank = minimum_rank, contains = contains, path = Path(arguments[index]))
+
+## The position of a level in LEVELS, ignoring case.
+function rank(level as Text) returns Option[Int]:
+    return LEVELS.find_index(function (name as Text) returns Bool: name == level.to_upper())
+
+## The rank of the level written in the second word of the line, if there is one.
+function line_rank(line as Text) returns Option[Int]:
+    match line.split_whitespace().get(1):
+        case some(word):
+            return rank(word)
+        case none:
+            return none
+
+function keeps(line as Text, options as Options) returns Bool:
+    if not options.contains.is_empty() and not line.contains(options.contains):
+        return false
+    match line_rank(line):
+        case some(found):
+            return found >= options.minimum_rank
+        case none:
+            return options.minimum_rank == 0
+
+## The last lines that pass the filter, in their original order.
+function select(lines as List[Text], options as Options) returns List[Text]:
+    let kept = lines.filter(function (line as Text) returns Bool: keeps(line, options))
+    return kept.slice(max(0, kept.length() - options.count), kept.length())
+
+public function main() returns Int:
+    let options = try parse_options(args.list()) on UsageError as e:
+        print_error(e.message)
+        return 2
+    let text = try files.read_text(options.path) on IoError as e:
+        print_error("log-tail: {options.path}: {e.reason}")
+        return 1
+    for line in select(text.lines(), options):
+        print(line)
+    return 0
+
+let SAMPLE as List[Text] = ["t1 INFO started", "t2 DEBUG cache warm", "t3 WARN slow disk", "t4 ERROR disk full", "plain text"]
+
+test "the last lines are kept in order":
+    let options = Options(count = 2, minimum_rank = 0, contains = "", path = Path("log"))
+    assert select(SAMPLE, options) == ["t4 ERROR disk full", "plain text"]
+
+test "a level shows that level and the more severe ones":
+    let options = Options(count = 10, minimum_rank = 2, contains = "", path = Path("log"))
+    assert select(SAMPLE, options) == ["t3 WARN slow disk", "t4 ERROR disk full"]
+
+test "text filters combine with levels":
+    let options = Options(count = 10, minimum_rank = 0, contains = "disk", path = Path("log"))
+    assert select(SAMPLE, options) == ["t3 WARN slow disk", "t4 ERROR disk full"]
+
+test "options are read in any order":
+    let options = try parse_options(["--level", "warn", "--lines", "5", "app.log"]) on UsageError as e:
+        assert_fail(e.message)
+    assert options.minimum_rank == 2
+    assert options.count == 5
+    assert options.path == Path("app.log")
+
+test "a file is required":
+    try:
+        parse_options(["--lines", "5"])
+        assert_fail("expected a usage error")
+    on UsageError as e:
+        assert e.message == USAGE

@@ -1,0 +1,155 @@
+## Checks that the environment has the variables and programs a project needs.
+##
+## Usage:
+##     env-check FILE
+##
+## FILE lists one requirement per line; empty lines and lines starting with "#" are ignored:
+##     env NAME                the environment variable NAME must be set
+##     program NAME VERSION    "NAME --version" must report at least VERSION, such as 1.2 or 2.40.1
+##
+## Prints every unmet requirement and a summary.
+## Exit code: 0 if every requirement is met, 1 if one is not, 2 if FILE cannot be read or parsed.
+
+import std.args
+import std.env
+import std.files
+import std.process
+from std.text import join, split
+
+enum Requirement:
+    Variable(name as Text)
+    Program(name as Text, minimum as List[Int])
+
+error FormatError:
+    line as Int
+    message as Text
+
+function parse_requirements(text as Text) returns List[Requirement] fails with FormatError:
+    var requirements as List[Requirement] = []
+    for number, line in text.lines().enumerate(start = 1):
+        let words = line.split_whitespace()
+        if words.is_empty() or words[0].starts_with("#"):
+            continue
+        match words:
+            case ["env", name]:
+                requirements.append(Requirement.Variable(name = name))
+            case ["program", name, version]:
+                match parse_version(version):
+                    case some(minimum):
+                        requirements.append(Requirement.Program(name = name, minimum = minimum))
+                    case none:
+                        fail FormatError(line = number, message = "invalid version {version}")
+            case _:
+                fail FormatError(line = number, message = "expected \"env NAME\" or \"program NAME VERSION\"")
+    return requirements
+
+## "2.40.1" as [2, 40, 1]; none unless every part is a non-negative number.
+function parse_version(text as Text) returns Option[List[Int]]:
+    var parts as List[Int] = []
+    for part in split(text, "."):
+        match part.to_int():
+            case some(number) if number >= 0:
+                parts.append(number)
+            case _:
+                return none
+    return some(parts)
+
+## The first version number in the output of "NAME --version", such as 2.40.1 in "git version 2.40.1".
+function find_version(output as Text) returns Option[List[Int]]:
+    for word in output.split_whitespace():
+        let candidate = trim_version(word)
+        if candidate.contains("."):
+            match parse_version(candidate):
+                case some(version):
+                    return some(version)
+                case none:
+                    pass
+    return none
+
+## The word without a leading "v" and without trailing characters that are not digits: "v18.2," is "18.2".
+function trim_version(word as Text) returns Text:
+    var text = word.slice(1, word.length()) if word.starts_with("v") else word
+    while not text.is_empty() and not is_digit(text.char_at(text.length() - 1)):
+        text = text.slice(0, text.length() - 1)
+    return text
+
+function is_digit(character as Text) returns Bool:
+    return character.length() == 1 and "0123456789".contains(character)
+
+## Whether the version is at least the minimum; missing parts count as 0, so 2.40 equals 2.40.0.
+function at_least(version as List[Int], minimum as List[Int]) returns Bool:
+    for index in range(0, max(version.length(), minimum.length())):
+        let have = version.get(index) or 0
+        let need = minimum.get(index) or 0
+        if have != need:
+            return have > need
+    return true
+
+function format_version(version as List[Int]) returns Text:
+    return join(version.map(function (part as Int) returns Text: part.to_text()), ".")
+
+## The problem with one requirement, or none if it is met.
+function check(requirement as Requirement) returns Option[Text]:
+    match requirement:
+        case Requirement.Variable(name):
+            if env.get(name).is_none():
+                return some("environment variable {name} is not set")
+            return none
+        case Requirement.Program(name, minimum):
+            let output = try process.run(name, ["--version"], timeout_seconds = 10) on ProcessError as e:
+                return some("{name}: {e.reason}")
+            match find_version(output.stdout + " " + output.stderr):
+                case some(version):
+                    if not at_least(version, minimum):
+                        return some("{name} {format_version(version)} is older than {format_version(minimum)}")
+                    return none
+                case none:
+                    return some("{name}: no version number in the output of \"{name} --version\"")
+
+public function main() returns Int:
+    match args.list():
+        case [name]:
+            let text = try files.read_text(Path(name)) on IoError as e:
+                print_error("env-check: {name}: {e.reason}")
+                return 2
+            let requirements = try parse_requirements(text) on FormatError as e:
+                print_error("env-check: {name}:{e.line}: {e.message}")
+                return 2
+            var unmet = 0
+            for requirement in requirements:
+                match check(requirement):
+                    case some(problem):
+                        print("missing: {problem}")
+                        unmet = unmet + 1
+                    case none:
+                        pass
+            print("{requirements.length() - unmet} of {requirements.length()} requirements met")
+            return 0 if unmet == 0 else 1
+        case _:
+            print_error("Usage: env-check FILE")
+            return 2
+
+test "requirements are read line by line":
+    let text = "# tools\nenv HOME\n\nprogram git 2.30\n"
+    let requirements = try parse_requirements(text) on FormatError as e:
+        assert_fail(e.message)
+    assert requirements == [Requirement.Variable(name = "HOME"), Requirement.Program(name = "git", minimum = [2, 30])]
+
+test "a malformed line names its number":
+    try:
+        parse_requirements("env HOME\nprogram git\n")
+        assert_fail("expected a format error")
+    on FormatError as e:
+        assert e.line == 2
+
+test "versions are found in typical outputs":
+    assert find_version("git version 2.40.1") == some([2, 40, 1])
+    assert find_version("Python 3.13.0") == some([3, 13, 0])
+    assert find_version("v18.19.0\n") == some([18, 19, 0])
+    assert find_version("no number here") == none
+
+test "versions compare part by part":
+    assert at_least([2, 40, 1], [2, 30])
+    assert at_least([2, 40], [2, 40, 0])
+    assert not at_least([1, 9, 9], [2])
+    assert format_version([2, 40, 1]) == "2.40.1"

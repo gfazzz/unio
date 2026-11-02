@@ -1,0 +1,96 @@
+## Writes release notes in Markdown from the git history between two revisions.
+##
+## Usage:
+##     release-notes FROM [TO]
+##
+## Runs "git log FROM..TO" (TO is HEAD by default) and groups the commit subjects by their prefix:
+## "feat:" under Features, "fix:" under Fixes, "docs:" under Documentation, and everything else
+## under Other changes. The prefix is dropped and the short hash is added to each line.
+## Needs the permission process = ["git"].
+## Exit code: 0 on success, 1 if git fails, 2 on wrong usage.
+
+import std.args
+import std.process
+from std.text import join, split
+
+struct Commit:
+    hash as Text
+    subject as Text
+
+error GitError:
+    message as Text
+
+## Prefixes and the headings of their sections, in the order the sections are written.
+let SECTIONS as List[Tuple[Text, Text]] = [("feat:", "Features"), ("fix:", "Fixes"), ("docs:", "Documentation")]
+
+## git separates the hash and the subject with this character, which a subject cannot contain.
+let SEPARATOR as Text = "\u{1F}"
+
+function git_log(start as Text, end as Text) returns List[Commit] fails with GitError:
+    let output = try process.run("git", ["log", "--format=%h%x1f%s", "{start}..{end}"]) on ProcessError as e:
+        fail GitError(message = e.reason)
+    if output.status != 0:
+        fail GitError(message = output.stderr.trim())
+    return parse_log(output.stdout)
+
+function parse_log(text as Text) returns List[Commit]:
+    var commits as List[Commit] = []
+    for line in text.lines():
+        let parts = split(line, SEPARATOR)
+        if parts.length() == 2:
+            commits.append(Commit(hash = parts[0], subject = parts[1].trim()))
+    return commits
+
+## The prefix of the section the commit belongs to; none for other changes.
+function prefix_of(commit as Commit) returns Option[Text]:
+    for prefix, _ in SECTIONS:
+        if commit.subject.to_lower().starts_with(prefix):
+            return some(prefix)
+    return none
+
+function entry(commit as Commit, prefix as Text) returns Text:
+    return "- {commit.subject.slice(prefix.length(), commit.subject.length()).trim()} ({commit.hash})"
+
+function add_section(var lines as List[Text], heading as Text, entries as List[Text]):
+    if entries.is_empty():
+        return
+    lines.append("")
+    lines.append("## {heading}")
+    lines.append_all(entries)
+
+function format_notes(title as Text, commits as List[Commit]) returns Text:
+    var lines = ["# {title}"]
+    if commits.is_empty():
+        lines.append("")
+        lines.append("No changes.")
+    for prefix, heading in SECTIONS:
+        let group = commits.filter(function (commit as Commit) returns Bool: prefix_of(commit) == some(prefix))
+        add_section(lines, heading, [entry(commit, prefix) for commit in group])
+    let others = commits.filter(function (commit as Commit) returns Bool: prefix_of(commit).is_none())
+    add_section(lines, "Other changes", [entry(commit, "") for commit in others])
+    return join(lines, "\n") + "\n"
+
+public function main() returns Int:
+    let arguments = args.list()
+    if arguments.is_empty() or arguments.length() > 2:
+        print_error("Usage: release-notes FROM [TO]")
+        return 2
+    let start = arguments[0]
+    let end = arguments.get(1) or "HEAD"
+    let commits = try git_log(start, end) on GitError as e:
+        print_error("release-notes: git: {e.message}")
+        return 1
+    print(format_notes("Changes from {start} to {end}", commits).trim_end())
+    return 0
+
+test "the log is split into hashes and subjects":
+    let commits = parse_log("a1b2c3\u{1F}feat: add rename\nd4e5f6\u{1F}Fix typo\n")
+    assert commits == [Commit(hash = "a1b2c3", subject = "feat: add rename"), Commit(hash = "d4e5f6", subject = "Fix typo")]
+
+test "commits are grouped by prefix, and empty sections are left out":
+    let commits = [Commit(hash = "1", subject = "feat: add rename"), Commit(hash = "2", subject = "Fix: handle empty files"), Commit(hash = "3", subject = "update CI")]
+    let expected = "# Notes\n\n## Features\n- add rename (1)\n\n## Fixes\n- handle empty files (2)\n\n## Other changes\n- update CI (3)\n"
+    assert format_notes("Notes", commits) == expected
+
+test "no commits":
+    assert format_notes("Notes", []) == "# Notes\n\nNo changes.\n"
