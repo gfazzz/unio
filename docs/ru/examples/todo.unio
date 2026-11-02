@@ -1,0 +1,124 @@
+## Консольный список задач. Хранит задачи в JSON-файле рядом с домашним каталогом.
+##
+## Использование:
+##     todo add "купить хлеб"
+##     todo done 3
+##     todo list
+
+import std.args
+import std.files
+import std.json as json
+import std.env
+from std.text import join
+
+struct Task:
+    id as Int
+    title as Text
+    var done as Bool = false
+
+enum Command:
+    Add(title as Text)
+    Done(id as Int)
+    List
+    Help
+
+error StorageError:
+    path as Path
+    reason as Text
+
+error UsageError:
+    message as Text
+
+## Путь к файлу хранения: $TODO_FILE или ~/.todo.json.
+function storage_path() returns Path:
+    match env.get("TODO_FILE"):
+        case some(value):
+            return Path(value)
+        case none:
+            return env.home_dir().join(".todo.json")
+
+function load_tasks(path as Path) returns List[Task] fails with StorageError:
+    if not files.exists(path):
+        return []
+    let text = try files.read_text(path) on IoError as e:
+        fail StorageError(path = path, reason = e.reason)
+    let value = try json.parse(text) on ParseError as e:
+        fail StorageError(path = path, reason = "повреждённый JSON: {e.message}")
+    return try json.decode[List[Task]](value) on DecodeError as e:
+        fail StorageError(path = path, reason = e.message)
+
+function save_tasks(path as Path, tasks as List[Task]) fails with StorageError:
+    let text = json.encode(tasks, pretty = true)
+    try files.write_text(path, text) on IoError as e:
+        fail StorageError(path = path, reason = e.reason)
+
+function parse_command(arguments as List[Text]) returns Command fails with UsageError:
+    match arguments:
+        case ["add", rest...] if not rest.is_empty():
+            return Add(title = join(rest, " "))
+        case ["done", id_text]:
+            match id_text.to_int():
+                case some(id):
+                    return Done(id = id)
+                case none:
+                    fail UsageError(message = "номер задачи должен быть числом: {id_text}")
+        case ["list"]:
+            return List
+        case ["help"] | []:
+            return Help
+        case _:
+            fail UsageError(message = "неизвестная команда: {join(arguments, " ")}")
+
+function next_id(tasks as List[Task]) returns Int:
+    return (tasks.map(function (task as Task) returns Int: task.id).max() or 0) + 1
+
+function run(command as Command, path as Path) fails with StorageError, UsageError:
+    var tasks = try load_tasks(path)
+    match command:
+        case Add(title):
+            tasks.append(Task(id = next_id(tasks), title = title))
+            try save_tasks(path, tasks)
+            print("Добавлено: {title}")
+        case Done(id):
+            match tasks.find(function (task as Task) returns Bool: task.id == id):
+                case some(task):
+                    task.done = true
+                    try save_tasks(path, tasks)
+                    print("Выполнено: {task.title}")
+                case none:
+                    fail UsageError(message = "нет задачи с номером {id}")
+        case List:
+            if tasks.is_empty():
+                print("Задач нет")
+            for task in tasks:
+                let mark = "x" if task.done else " "
+                print("[{mark}] {task.id}. {task.title}")
+        case Help:
+            print("Команды: add <текст>, done <номер>, list, help")
+
+public function main() returns Int:
+    try:
+        let command = parse_command(args.list())
+        run(command, storage_path())
+        return 0
+    on UsageError as e:
+        print_error("Ошибка: {e.message}")
+        return 2
+    on StorageError as e:
+        print_error("Хранилище {e.path}: {e.reason}")
+        return 1
+
+test "parse_command распознаёт add":
+    let command = try parse_command(["add", "купить", "хлеб"]) on UsageError as e:
+        assert_fail(e.message)
+    assert command == Add(title = "купить хлеб")
+
+test "parse_command отклоняет нечисловой номер":
+    match parse_command(["done", "abc"]):
+        case ok(_):
+            assert_fail("ожидалась ошибка")
+        case error(UsageError as e):
+            assert e.message.contains("должен быть числом")
+
+test "next_id для пустого списка":
+    assert next_id([]) == 1

@@ -1,7 +1,7 @@
-## Консольный список задач. Хранит задачи в JSON-файле рядом с домашним каталогом.
+## Command-line task list. Stores tasks in a JSON file in the home directory.
 ##
-## Использование:
-##     todo add "купить хлеб"
+## Usage:
+##     todo add "buy bread"
 ##     todo done 3
 ##     todo list
 
@@ -29,7 +29,7 @@ error StorageError:
 error UsageError:
     message as Text
 
-## Путь к файлу хранения: $TODO_FILE или ~/.todo.json.
+## Storage path: $TODO_FILE or ~/.todo.json.
 function storage_path() returns Path:
     match env.get("TODO_FILE"):
         case some(value):
@@ -43,7 +43,7 @@ function load_tasks(path as Path) returns List[Task] fails with StorageError:
     let text = try files.read_text(path) on IoError as e:
         fail StorageError(path = path, reason = e.reason)
     let value = try json.parse(text) on ParseError as e:
-        fail StorageError(path = path, reason = "повреждённый JSON: {e.message}")
+        fail StorageError(path = path, reason = "corrupted JSON: {e.message}")
     return try json.decode[List[Task]](value) on DecodeError as e:
         fail StorageError(path = path, reason = e.message)
 
@@ -61,13 +61,13 @@ function parse_command(arguments as List[Text]) returns Command fails with Usage
                 case some(id):
                     return Done(id = id)
                 case none:
-                    fail UsageError(message = "номер задачи должен быть числом: {id_text}")
+                    fail UsageError(message = "task number must be an integer: {id_text}")
         case ["list"]:
             return List
         case ["help"] | []:
             return Help
         case _:
-            fail UsageError(message = "неизвестная команда: {join(arguments, " ")}")
+            fail UsageError(message = "unknown command: {join(arguments, " ")}")
 
 function next_id(tasks as List[Task]) returns Int:
     return (tasks.map(function (task as Task) returns Int: task.id).max() or 0) + 1
@@ -78,23 +78,23 @@ function run(command as Command, path as Path) fails with StorageError, UsageErr
         case Add(title):
             tasks.append(Task(id = next_id(tasks), title = title))
             try save_tasks(path, tasks)
-            print("Добавлено: {title}")
+            print("Added: {title}")
         case Done(id):
             match tasks.find(function (task as Task) returns Bool: task.id == id):
                 case some(task):
                     task.done = true
                     try save_tasks(path, tasks)
-                    print("Выполнено: {task.title}")
+                    print("Done: {task.title}")
                 case none:
-                    fail UsageError(message = "нет задачи с номером {id}")
+                    fail UsageError(message = "no task with number {id}")
         case List:
             if tasks.is_empty():
-                print("Задач нет")
+                print("No tasks")
             for task in tasks:
                 let mark = "x" if task.done else " "
                 print("[{mark}] {task.id}. {task.title}")
         case Help:
-            print("Команды: add <текст>, done <номер>, list, help")
+            print("Commands: add <text>, done <number>, list, help")
 
 public function main() returns Int:
     try:
@@ -102,23 +102,23 @@ public function main() returns Int:
         run(command, storage_path())
         return 0
     on UsageError as e:
-        print_error("Ошибка: {e.message}")
+        print_error("Error: {e.message}")
         return 2
     on StorageError as e:
-        print_error("Хранилище {e.path}: {e.reason}")
+        print_error("Storage {e.path}: {e.reason}")
         return 1
 
-test "parse_command распознаёт add":
-    let command = try parse_command(["add", "купить", "хлеб"]) on UsageError as e:
+test "parse_command recognizes add":
+    let command = try parse_command(["add", "buy", "bread"]) on UsageError as e:
         assert_fail(e.message)
-    assert command == Add(title = "купить хлеб")
+    assert command == Add(title = "buy bread")
 
-test "parse_command отклоняет нечисловой номер":
+test "parse_command rejects a non-numeric number":
     match parse_command(["done", "abc"]):
         case ok(_):
-            assert_fail("ожидалась ошибка")
+            assert_fail("expected an error")
         case error(UsageError as e):
-            assert e.message.contains("должен быть числом")
+            assert e.message.contains("must be an integer")
 
-test "next_id для пустого списка":
+test "next_id for an empty list":
     assert next_id([]) == 1

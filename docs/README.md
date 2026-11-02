@@ -1,8 +1,9 @@
-# Документация Unio
+# Unio documentation
 
-| Документ | Содержание |
+| Document | Contents |
 |---|---|
-| [concept.md](concept.md) | Доработанная концепция языка: синтаксис, типы, ошибки, память, модули, безопасность, работа с ИИ; решённые и открытые вопросы |
-| [requirements.md](requirements.md) | Техническое задание на выпуск 0.1 «Ядро»: границы, требования к языку, компилятору, библиотеке, инструментам, приёмка |
-| [plan.md](plan.md) | План работ: этапы, критерии выхода, роли, риски, метрики, последующие выпуски |
-| [examples/todo.unio](examples/todo.unio) | Полный пример утилиты на ядре языка |
+| [concept.md](concept.md) | Refined language concept: syntax, types, errors, memory, modules, security, working with AI; settled decisions and their rationale |
+| [requirements.md](requirements.md) | Requirements specification for release 0.1 "Core": scope, language, compiler, library, tooling, acceptance |
+| [plan.md](plan.md) | Work plan: stages, exit criteria, roles, risks, metrics, later releases |
+| [examples/todo.unio](examples/todo.unio) | Complete example utility written in the language core |
+| [ru/](ru/README.md) | Russian localization |

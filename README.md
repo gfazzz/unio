@@ -1,52 +1,39 @@
 # Unio
 
-**Unio — концепция общего языка программирования, который легко читать человеку, удобно генерировать ИИ и можно строго проверять перед выполнением.** Он объединяет простоту Python, выразительность Ruby, надёжность статической типизации и возможности нативной компиляции.
+**Unio is a concept for a general-purpose programming language that is easy for people to read, convenient for AI to generate, and strictly checkable before it runs.** It combines the simplicity of Python, the expressiveness of Ruby, the reliability of static typing, and the capabilities of native compilation.
 
-Главный принцип: **понятный код, явное поведение, контролируемые ресурсы**.
+Guiding principle: **clear code, explicit behavior, controlled resources**.
 
-## Синтаксис
-
-Синтаксис приближен к естественному языку: блоки задаются отступами, назначение конструкций объясняется словами, математические операции сохраняют привычную запись.
+The syntax stays close to natural language: blocks are defined by indentation, the purpose of each construct is spelled out in words, and mathematical operations keep their familiar notation.
 
 ```unio
 function greet(name as Text) returns Text:
-    return "Привет, " + name + "!"
+    return "Hello, {name}!"
 
 function active_names(users as List[User]) returns List[Text]:
     return [user.name for user in users if user.active]
 ```
 
-Unio имеет небольшой словарь конструкций и один стандартный стиль. Это помогает человеку проверять сгенерированные программы. Естественный язык используется для постановки задачи; исполняемый код имеет однозначную семантику.
+Unio has a small vocabulary of constructs and a single standard style. This helps people verify generated programs. Natural language is used to state the task; executable code has unambiguous semantics.
 
-## Ключевые решения
+The concept rests on the following decisions:
 
-- **Простота со строгими проверками.** Типы локальных значений выводятся автоматически. Интерфейсы функций явно описывают вход, результат и ожидаемые ошибки. Отсутствующие значения обрабатываются через `Option`, ошибки — через типизированные результаты и читаемые конструкции `fails with`, `try`, `fail`.
+- **Simplicity with strict checks.** Types of local values are inferred automatically. Function interfaces explicitly describe input, result, and expected errors. Missing values are handled through `Option`; errors through typed results and the readable constructs `fails with`, `try`, and `fail`.
+- **Object-oriented and functional approaches.** Structures, methods, interfaces, and composition organize the domain. Functions, immutable values, and collection transformations describe computation. Mutable state is marked explicitly.
+- **Two memory-management models.** Ordinary objects are served by a GC. Large tensors and external resources have managed lifetimes, budgets, and verifiable ownership. Freeing GPU memory accounts for the completion of device computation.
+- **AI-assisted development.** The compiler provides precise machine-readable errors and context for individual symbols. Unified tools for formatting, testing, and analysis help produce small, verifiable changes. People and AI work in the same language.
+- **Development of AI itself.** The compute extension provides tensors, automatic differentiation, CPU/GPU backends, buffer planning, and RAM/VRAM profiling. Memory savings come from suitable algorithms, data formats, and cache management, and are evaluated together with speed and model quality.
+- **Security on several levels.** A safe subset of the language rules out common memory errors. Execution isolation, least privilege, dependency verification, and a protected release process limit the consequences of compromise. Out-of-memory, abnormal termination, and native components are tested separately.
+- **Extensible computation.** A quantum module adds circuits, simulation, and hardware access through shared tooling. Support for a specific device is defined by its capabilities.
 
-- **Объектный и функциональный подходы.** Структуры, методы, интерфейсы и композиция организуют предметную область. Функции, неизменяемые значения и преобразования коллекций описывают вычисления. Изменяемое состояние обозначается явно.
+Unio is to ship as a single kit: compiler, standard library, dependency management, formatter, testing, editor support, and profiler.
 
-- **Две модели управления памятью.** Обычные объекты обслуживает GC. Большие тензоры и внешние ресурсы имеют управляемые области жизни, бюджеты и проверяемое владение. Освобождение GPU-памяти учитывает завершение вычислений устройства.
+**The first release is a small, reliable core for automation and CLI tools.** Server capabilities, AI computation, and the quantum extension follow. Performance, readability, and security are confirmed by measurement and verification; universal C-level speed, the absence of any vulnerability, and automatic quantum speedup are not promised.
 
-- **Разработка с помощью ИИ.** Компилятор предоставляет точные машиночитаемые ошибки и контекст отдельных символов. Единые инструменты форматирования, тестирования и анализа помогают создавать небольшие проверяемые изменения. Человек и ИИ работают с одним языком.
+## Documentation
 
-- **Разработка самого ИИ.** Вычислительное расширение предоставляет тензоры, автоматическое дифференцирование, CPU/GPU-backend, планирование буферов и профилирование RAM/VRAM. Экономия памяти достигается подходящими алгоритмами, форматами данных и управлением кешами; оценивается вместе со скоростью и качеством модели.
-
-- **Безопасность на нескольких уровнях.** Безопасное подмножество языка исключает распространённые ошибки памяти. Изоляция запуска, минимальные полномочия, проверка зависимостей и защищённый выпуск ограничивают последствия компрометации. Отдельно проверяются нехватка памяти, аварийное завершение и нативные компоненты.
-
-- **Расширяемость вычислений.** Квантовый модуль добавляет схемы, симуляцию и подключение оборудования через общие инструменты. Поддержка конкретного устройства определяется его возможностями.
-
-## Поставка
-
-Unio должен поставляться как единый комплект: компилятор, стандартная библиотека, управление зависимостями, форматтер, тестирование, поддержка редактора и профилировщик.
-
-## Дорожная карта
-
-**Первый выпуск — небольшое надёжное ядро для автоматизации и CLI.** Затем добавляются серверные возможности, вычисления для ИИ и квантовое расширение.
-
-Производительность, читаемость и безопасность подтверждаются измерениями и проверками; универсальная скорость C, отсутствие любых уязвимостей и автоматическое квантовое ускорение не обещаются.
-
-## Документация
-
-- [Доработанная концепция](docs/concept.md)
-- [Техническое задание на выпуск 0.1](docs/requirements.md)
-- [План работ](docs/plan.md)
-- [Пример программы](docs/examples/todo.unio)
+- [Refined concept](docs/concept.md)
+- [Requirements specification for release 0.1](docs/requirements.md)
+- [Work plan](docs/plan.md)
+- [Example program](docs/examples/todo.unio)
+- [Русская версия документации](docs/ru/README.md)

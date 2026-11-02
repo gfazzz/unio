@@ -1,75 +1,75 @@
-# Unio: доработанная концепция
+# Unio: refined concept
 
-Версия: 0.3. Этот документ уточняет исходную концепцию из README и фиксирует решения, без которых нельзя начинать реализацию. Открытых вопросов нет; обоснование последних решений — в разделе 11.
+Version: 0.3. This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
 
-## 1. Назначение и принцип
+## 1. Purpose and principle
 
-Unio — язык общего назначения, который:
+Unio is a general-purpose language that:
 
-- легко читает человек, в том числе не автор кода;
-- удобно генерирует ИИ, потому что словарь конструкций мал, стиль один, а ошибки компилятора точны и машиночитаемы;
-- можно строго проверить до выполнения: типы, ошибки, ресурсы и побочные эффекты видны в сигнатурах.
+- is easy for people to read, including people who did not write the code;
+- is convenient for AI to generate, because the vocabulary of constructs is small, there is one style, and compiler errors are precise and machine-readable;
+- can be strictly checked before it runs: types, errors, resources, and side effects are visible in signatures.
 
-Главный принцип: **понятный код, явное поведение, контролируемые ресурсы**.
+Guiding principle: **clear code, explicit behavior, controlled resources**.
 
-Следствия принципа, которыми проверяется каждое решение по языку:
+Consequences of the principle, against which every language decision is checked:
 
-1. Одна задача — один способ записи. Если есть два способа, один объявляется стандартным, форматтер приводит к нему.
-2. Ничего не происходит неявно: нет неявных преобразований типов, скрытого копирования больших данных, скрытых исключений.
-3. Сигнатура функции — полный контракт: вход, результат, ошибки, а позднее и эффекты.
-4. Всё, что может пойти не так, либо выражено типом (`Option`, `fails with`), либо является аварией (fault) с определённым поведением.
+1. One task, one way to write it. If there are two ways, one is declared standard and the formatter rewrites to it.
+2. Nothing happens implicitly: no implicit type conversions, no hidden copying of large data, no hidden exceptions.
+3. A function signature is a complete contract: input, result, errors, and later effects.
+4. Everything that can go wrong is either expressed in a type (`Option`, `fails with`) or is a fault with defined behavior.
 
-## 2. Синтаксис
+## 2. Syntax
 
-### 2.1 Общие правила
+### 2.1 General rules
 
-- Блоки задаются отступами в 4 пробела. Табуляция запрещена.
-- Заголовок блока заканчивается двоеточием.
-- Ключевые слова — английские слова целиком, без сокращений: `function`, `returns`, `fails with`, `struct`, `interface`, `enum`, `match`, `case`.
-- Идентификаторы: `snake_case` для функций, переменных, полей и модулей; `PascalCase` для типов. Форматтер и компилятор предупреждают об отклонениях.
-- Комментарии начинаются с `#`. Документирующие комментарии начинаются с `##` и стоят перед объявлением.
-- Исходные файлы в UTF-8, расширение `.unio`.
+- Blocks are defined by indentation of 4 spaces. Tabs are forbidden.
+- A block header ends with a colon.
+- Keywords are whole English words, no abbreviations: `function`, `returns`, `fails with`, `struct`, `interface`, `enum`, `match`, `case`.
+- Identifiers: `snake_case` for functions, variables, fields, and modules; `PascalCase` for types. The formatter and compiler warn about deviations.
+- Comments start with `#`. Documentation comments start with `##` and precede a declaration.
+- Source files are UTF-8 with the `.unio` extension.
 
-### 2.2 Объявления значений
+### 2.2 Value declarations
 
 ```unio
-let limit = 10            # неизменяемое значение, тип Int выведен
-var count = 0             # изменяемая переменная
+let limit = 10            # immutable value, type Int inferred
+var count = 0             # mutable variable
 count = count + 1
 
-let name as Text = read_line()   # явная аннотация допускается
+let name as Text = read_line()   # explicit annotation allowed
 ```
 
-Правило: `let` по умолчанию. `var` обязателен для всего, что переприсваивается. Поля структур неизменяемы, если не помечены `var`.
+Rule: `let` by default. `var` is required for anything that is reassigned. Struct fields are immutable unless marked `var`.
 
-### 2.3 Функции
+### 2.3 Functions
 
 ```unio
-## Возвращает приветствие для имени.
+## Returns a greeting for the name.
 function greet(name as Text) returns Text:
-    return "Привет, {name}!"
+    return "Hello, {name}!"
 
 function active_names(users as List[User]) returns List[Text]:
     return [user.name for user in users if user.active]
 
-function log(message as Text):        # без returns — ничего не возвращает
+function log(message as Text):        # no returns: returns nothing
     print(message)
 ```
 
-- Параметры всегда аннотированы типом. Тип результата всегда указан, если функция что-то возвращает. Выводятся только типы локальных значений.
-- Аргументы передаются позиционно или по имени: `connect(host, port = 8080)`. Значения по умолчанию допускаются только для параметров в конце списка.
-- Функции — значения первого класса. Тип функции: `Function[(Int, Text) -> Bool]`. Анонимная функция: `function (x as Int) returns Int: x * 2`, однострочная форма.
+- Parameters are always annotated with a type. The result type is always stated when a function returns something. Only local value types are inferred.
+- Arguments are passed positionally or by name: `connect(host, port = 8080)`. Default values are allowed only for trailing parameters.
+- Functions are first-class values. Function type: `Function[(Int, Text) -> Bool]`. Anonymous function: `function (x as Int) returns Int: x * 2`, single-line form.
 
-### 2.4 Текст и операторы
+### 2.4 Text and operators
 
-- Интерполяция `"{expression}"` — стандартный способ собрать текст. Внутри фигурных скобок — любое выражение, значение которого реализует `Display`.
-- Оператор `+` определён для чисел и для `Text + Text`. Смешивание типов (`Text + Int`) — ошибка компиляции с подсказкой использовать интерполяцию. Так привычная запись сохраняется, а неявных преобразований нет.
-- Арифметика: `+ - * / %` и `**`. `/` для `Int` даёт `Int` с усечением, для `Float` — `Float`. Переполнение `Int` — авария (см. 4.3), не тихое зацикливание.
-- Сравнения `== != < <= > >=`, логика `and or not`. Логические операторы — слова, чтобы код читался как текст.
-- Проверка членства: `item in collection`.
-- Операторы привязаны к стандартным интерфейсам: `+` к `Add`, `-` к `Subtract`, `*` к `Multiply`, `/` к `Divide`, `==` к `Equal`, `<` и остальные сравнения к `Order`. Встроенные числа и `Text` реализуют их. Пользовательский тип получает оператор только явным объявлением `extend Money with Add`; скрытых реализаций и неявных преобразований нет. Операторы нельзя переопределять для типов, которые уже их реализуют.
+- Interpolation `"{expression}"` is the standard way to build text. Any expression whose value implements `Display` may appear inside the braces.
+- The `+` operator is defined for numbers and for `Text + Text`. Mixing types (`Text + Int`) is a compile error with a hint to use interpolation. Familiar notation is preserved while implicit conversions are absent.
+- Arithmetic: `+ - * / %` and `**`. `/` on `Int` gives `Int` with truncation; on `Float` gives `Float`. `Int` overflow is a fault (see 3.3), not silent wraparound.
+- Comparisons `== != < <= > >=`; logic `and or not`. Logical operators are words so code reads as text.
+- Membership: `item in collection`.
+- Operators are bound to standard interfaces: `+` to `Add`, `-` to `Subtract`, `*` to `Multiply`, `/` to `Divide`, `==` to `Equal`, `<` and the other comparisons to `Order`. Built-in numbers and `Text` implement them. A user-defined type gets an operator only through an explicit declaration `extend Money with Add`; there are no hidden implementations and no implicit conversions. Operators cannot be redefined for types that already implement them.
 
-### 2.5 Управление потоком
+### 2.5 Control flow
 
 ```unio
 if count > limit:
@@ -97,9 +97,9 @@ match command:
         return
 ```
 
-`match` обязан быть полным: компилятор проверяет, что перечислены все варианты, либо есть `case _`.
+`match` must be exhaustive: the compiler checks that all variants are listed or that there is a `case _`.
 
-### 2.6 Типы данных
+### 2.6 Data types
 
 ```unio
 struct User:
@@ -120,29 +120,29 @@ extend User with Display:
         return "{self.name} (#{self.id})"
 ```
 
-- `struct` — запись с именованными полями, создаётся как `User(id = 1, name = "Анна")`. Значения-структуры сравниваются по содержимому.
-- `enum` — тип-сумма с вариантами, у вариантов могут быть поля. Используется для команд, состояний, результатов разбора.
-- `interface` — набор методов. Реализация объявляется явно через `extend ... with ...`. Наследования реализаций нет; переиспользование — через композицию и обобщённые функции.
-- Обобщения: `function first[T](items as List[T]) returns Option[T]`. Ограничения: `[T with Display]`.
+- `struct` is a record with named fields, constructed as `User(id = 1, name = "Anna")`. Struct values compare by content.
+- `enum` is a sum type with variants; variants may have fields. Used for commands, states, and parse results.
+- `interface` is a set of methods. Implementation is declared explicitly with `extend ... with ...`. There is no implementation inheritance; reuse goes through composition and generic functions.
+- Generics: `function first[T](items as List[T]) returns Option[T]`. Constraints: `[T with Display]`.
 
-Встроенные типы ядра: `Int` (64 бит со знаком), `Float` (64 бит), `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Tuple`, `Path`, `Function`.
+Built-in core types: `Int` (64-bit signed), `Float` (64-bit), `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Tuple`, `Path`, `Function`.
 
-Равенство:
+Equality:
 
-- `struct` и `enum` сравниваются по содержимому, если все поля реализуют `Equal`; реализация выводится автоматически и может быть заменена явной.
-- `Float` реализует `Equal` и `Order` по IEEE 754: `nan == nan` даёт `false`, сравнения с `nan` дают `false`. `Float` не реализует `Hash`, поэтому не может быть ключом `Map`, элементом `Set` и образцом в `match`. Для сортировки и ключей есть `float.total_order()`, для проверки `float.is_nan()`.
-- Ресурсы (раздел 4) не реализуют `Equal`: `==` для них — ошибка компиляции. Тождественность проверяется функцией `is_same(a, b)`. Так читатель не спутает сравнение содержимого файлов со сравнением дескрипторов.
-- `Decimal` (точная десятичная арифметика для денег) — не встроенный тип, а структура в `std.decimal`, реализующая `Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, `Hash`. Создаётся явно: `Decimal("19.99")`; литералов для него в ядре нет. Это сохраняет малый словарь ядра и привычную запись `price * quantity`.
+- `struct` and `enum` compare by content when all fields implement `Equal`; the implementation is derived automatically and may be replaced by an explicit one.
+- `Float` implements `Equal` and `Order` per IEEE 754: `nan == nan` is `false`, and comparisons with `nan` are `false`. `Float` does not implement `Hash`, so it cannot be a `Map` key, a `Set` element, or a `match` pattern. For sorting and keys there is `float.total_order()`; for checks, `float.is_nan()`.
+- Resources (section 4) do not implement `Equal`: `==` on them is a compile error. Identity is checked with the function `is_same(a, b)`. This keeps a reader from confusing comparison of file contents with comparison of handles.
+- `Decimal` (exact decimal arithmetic for money) is not a built-in type but a struct in `std.decimal` that implements `Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, and `Hash`. It is created explicitly: `Decimal("19.99")`; the core has no literal for it. This keeps the core vocabulary small while preserving the familiar notation `price * quantity`.
 
-### 2.7 Изменяемость и значения
+### 2.7 Mutability and values
 
-- Все встроенные коллекции имеют неизменяемый интерфейс по умолчанию. Методы, изменяющие коллекцию (`append`, `remove`, `sort`), доступны только у значений, объявленных через `var`, и помечены в документации.
-- Передача структуры в функцию — передача ссылки на неизменяемое значение. Функция не может изменить аргумент, если параметр не объявлен как `var name as List[Int]`; тогда вызывающая сторона обязана передать `var`-значение.
-- Копирование делается явно: `items.copy()`.
+- All built-in collections have an immutable interface by default. Mutating methods (`append`, `remove`, `sort`) are available only on values declared with `var` and are marked as such in documentation.
+- Passing a struct to a function passes a reference to an immutable value. A function cannot modify an argument unless the parameter is declared `var name as List[Int]`; the caller must then pass a `var` value.
+- Copying is explicit: `items.copy()`.
 
-Этого достаточно, чтобы читатель, видя `var` в сигнатуре, понимал, что функция меняет переданное состояние.
+This is enough for a reader who sees `var` in a signature to understand that the function modifies the state passed to it.
 
-## 3. Отсутствующие значения и ошибки
+## 3. Missing values and errors
 
 ### 3.1 Option
 
@@ -160,12 +160,12 @@ match find_user(7):
     case some(user):
         print(user.name)
     case none:
-        print("не найден")
+        print("not found")
 ```
 
-`Option[T]` — обычный `enum` с вариантами `some(value)` и `none`. Нет `null`. Оператор `or` на `Option` даёт значение по умолчанию; `?.` пробрасывает `none` по цепочке.
+`Option[T]` is an ordinary `enum` with variants `some(value)` and `none`. There is no `null`. The `or` operator on `Option` supplies a default; `?.` propagates `none` through a chain.
 
-### 3.2 Ошибки в сигнатуре
+### 3.2 Errors in the signature
 
 ```unio
 error IoError:
@@ -177,56 +177,56 @@ error ParseError:
     message as Text
 
 function read_config(path as Path) returns Config fails with IoError, ParseError:
-    let text = try read_text(path)                 # IoError пробрасывается
-    let parsed = try parse_toml(text)              # ParseError пробрасывается
+    let text = try read_text(path)                 # IoError propagates
+    let parsed = try parse_toml(text)              # ParseError propagates
     return Config.from(parsed)
 ```
 
-Правила:
+Rules:
 
-1. `error` объявляет тип ошибки, это структура с полями. Ошибки — значения, не исключения.
-2. Функция, которая может завершиться ошибкой, перечисляет их после `fails with`. Множество ошибок — часть типа функции.
-3. `fail IoError(path = path, reason = "нет доступа")` завершает функцию ошибкой.
-4. Вызов функции с `fails with` без обработки — ошибка компиляции. Есть два способа обработать:
-   - префикс `try` перед вызовом: ошибка пробрасывается вызывающему, который должен перечислить её в своём `fails with`;
-   - блок `try:` с обработчиками `on`.
+1. `error` declares an error type; it is a struct with fields. Errors are values, not exceptions.
+2. A function that can end in an error lists the errors after `fails with`. The error set is part of the function's type.
+3. `fail IoError(path = path, reason = "access denied")` ends the function with an error.
+4. Calling a function with `fails with` without handling is a compile error. There are two ways to handle:
+   - prefix `try` before the call: the error propagates to the caller, which must list it in its own `fails with`;
+   - a `try:` block with `on` handlers.
 
 ```unio
 try:
     let config = read_config(path)
     run(config)
 on IoError as e:
-    print("Не удалось прочитать {e.path}: {e.reason}")
+    print("Could not read {e.path}: {e.reason}")
 on ParseError as e:
-    print("Строка {e.line}: {e.message}")
+    print("Line {e.line}: {e.message}")
 ```
 
-5. Компилятор проверяет, что каждая ошибка из `fails with` вызываемой функции либо обработана в `on`, либо есть в `fails with` текущей функции. Обработчик `on Error as e` ловит любую ошибку; `Error` — общий интерфейс всех ошибок с методом `to_text`.
-6. Для скриптов и прототипов допустима сигнатура `fails with Error`: конкретный набор не фиксируется, но факт возможной ошибки всё равно виден.
-7. Для функций, где ошибка нужна как значение, есть тип `Result[T, E]` с вариантами `ok(value)` и `error(value)`; `try` работает и с ним. В стандартной библиотеке `Result` используется только там, где ошибки надо хранить или передавать дальше.
+5. The compiler checks that every error from the callee's `fails with` is either handled in `on` or listed in the current function's `fails with`. The handler `on Error as e` catches any error; `Error` is the common interface of all errors with the method `to_text`.
+6. For scripts and prototypes the signature `fails with Error` is allowed: the concrete set is not fixed, but the fact that an error is possible stays visible.
+7. For functions where an error is needed as a value there is the type `Result[T, E]` with variants `ok(value)` and `error(value)`; `try` works with it too. In the standard library `Result` is used only where errors must be stored or passed on.
 
-### 3.3 Аварии (faults)
+### 3.3 Faults
 
-Авария — нарушение контракта, которое нельзя обработать внутри программы: индекс вне диапазона при `items[i]`, деление на ноль, переполнение `Int`, исчерпание памяти, нарушение `assert`.
+A fault is a contract violation that cannot be handled inside the program: index out of range in `items[i]`, division by zero, `Int` overflow, out of memory, a failed `assert`.
 
-- Поведение определено: программа печатает диагностику с трассой стека в stderr и завершается с кодом 101. Открытые ресурсы в блоках `using` закрываются.
-- Аварию нельзя поймать через `on`. Её можно наблюдать только в тестах (`expect_fault`) и на границе процесса.
-- Для каждой аварийной операции есть безопасная форма с `Option` или ошибкой: `items.get(i)`, `a.checked_divide(b)`, `a.checked_add(b)`.
+- Behavior is defined: the program prints a diagnostic with a stack trace to stderr and exits with code 101. Open resources in `using` blocks are closed.
+- A fault cannot be caught with `on`. It can be observed only in tests (`expect_fault`) and at the process boundary.
+- Every faulting operation has a safe form returning `Option` or an error: `items.get(i)`, `a.checked_divide(b)`, `a.checked_add(b)`.
 
-Так ошибки предметной области и дефекты программы различаются синтаксически, и читатель видит, что именно может произойти.
+Domain errors and program defects are thus distinguished syntactically, and the reader sees exactly what can happen.
 
-## 4. Память и ресурсы
+## 4. Memory and resources
 
-### 4.1 Две модели
+### 4.1 Two models
 
-- **Управляемые значения.** Структуры, коллекции, текст, замыкания живут в куче под управлением GC. Программист не думает об их освобождении.
-- **Ресурсы.** Файлы, сокеты, процессы, дескрипторы устройств, а в вычислительном расширении — тензоры и буферы GPU. У них есть явная область жизни.
+- **Managed values.** Structs, collections, text, and closures live on the heap under the GC. The programmer does not think about freeing them.
+- **Resources.** Files, sockets, processes, device handles, and in the compute extension tensors and GPU buffers. They have an explicit lifetime.
 
-Граница между моделями: тип реализует интерфейс `Resource` (метод `release`) — значит это ресурс. Такое значение:
+The boundary between the models: a type implements the interface `Resource` (method `release`), therefore it is a resource. Such a value:
 
-- создаётся в блоке `using` или в поле другого ресурса;
-- освобождается при выходе из блока, в обратном порядке создания, в том числе при ошибке и аварии;
-- не может быть сохранено в обычную структуру или коллекцию, пережившую блок, — это ошибка компиляции. Если ресурс нужно хранить, владелец сам объявляется `Resource` и освобождает его в `release`.
+- is created in a `using` block or as a field of another resource;
+- is released on leaving the block, in reverse order of creation, including on error and on fault;
+- cannot be stored in an ordinary struct or collection that outlives the block; that is a compile error. If a resource must be stored, the owner itself is declared a `Resource` and releases it in `release`.
 
 ```unio
 function count_lines(path as Path) returns Int fails with IoError:
@@ -237,17 +237,17 @@ function count_lines(path as Path) returns Int fails with IoError:
         return count
 ```
 
-### 4.2 Что входит в первый выпуск
+### 4.2 What the first release includes
 
-Первый выпуск содержит GC и ресурсы с `using`. Бюджеты памяти, области жизни для тензоров и учёт завершения вычислений GPU относятся к вычислительному расширению и проектируются поверх того же интерфейса `Resource`: тензор — ресурс, область жизни — ресурс-владелец с бюджетом.
+The first release contains the GC and resources with `using`. Memory budgets, lifetimes for tensors, and accounting for GPU computation completion belong to the compute extension and are designed on top of the same `Resource` interface: a tensor is a resource; a lifetime scope is an owning resource with a budget.
 
-### 4.3 Сборщик мусора
+### 4.3 Garbage collector
 
-- Точный (precise), трассирующий, неперемещающий в первой версии. Простота отладки важнее пиковой пропускной способности.
-- Паузы ограничены для CLI-нагрузок; измеряется и публикуется.
-- `Resource` не зависит от GC: освобождение детерминировано и не ждёт сборки.
+- Precise, tracing, non-moving in the first version. Ease of debugging matters more than peak throughput.
+- Pauses are bounded for CLI workloads; measured and published.
+- `Resource` does not depend on the GC: release is deterministic and does not wait for a collection.
 
-## 5. Модули и пакеты
+## 5. Modules and packages
 
 ```unio
 import std.files
@@ -257,71 +257,71 @@ from std.text import split, join
 let data = json.parse(text)
 ```
 
-- Модуль — файл. Пакет — каталог с манифестом `unio.toml`. Имя модуля совпадает с путём файла.
-- Видимость: всё приватно по умолчанию; экспорт через `public` перед объявлением.
-- Зависимости фиксируются в `unio.lock` с хешами содержимого. Сборка без сети воспроизводима.
-- Один стандартный способ импорта и один порядок (форматтер сортирует).
+- A module is a file. A package is a directory with the manifest `unio.toml`. The module name matches the file path.
+- Visibility: everything is private by default; export with `public` before a declaration.
+- Dependencies are pinned in `unio.lock` with content hashes. Offline builds are reproducible.
+- One standard way to import and one order (the formatter sorts).
 
-## 6. Безопасность
+## 6. Security
 
-- Весь код первого выпуска написан в безопасном подмножестве: нет указателей, нет ручного управления памятью, проверки границ, инициализированные значения.
-- Небезопасные операции появляются только во внешних функциях (`external function`, FFI) и только в модулях, помеченных `unsafe module`. Такие модули перечисляются в манифесте и отображаются при установке зависимости.
-- Минимальные полномочия: манифест объявляет, что пакету нужно (`files`, `network`, `process`, `env`). Компилятор запрещает использовать модули стандартной библиотеки вне объявленных полномочий. Это даёт читателю ответ на вопрос «что эта программа может сделать» до запуска.
-- Эффекты отдельных функций в сигнатуре (`uses files`) в первом выпуске не объявляются. Компилятор выводит эффекты из графа вызовов и показывает их в `unio symbol` и в документации: читатель и ИИ видят, что функция обращается к файлам или процессам, без роста словаря языка. Слово `uses` зарезервировано для вычислительного расширения (`uses gpu`), где эффект влияет на планирование ресурсов, а не только на полномочия.
-- Зависимости: подпись реестра, проверка хешей, предупреждение о `unsafe module`, запрет сетевых действий во время сборки.
-- Выпуск: воспроизводимая сборка, подписанные артефакты, SBOM.
-- Отдельные тесты надёжности: поведение при нехватке памяти, при аварии внутри `using`, при ошибке во внешнем коде.
+- All first-release code is written in the safe subset: no pointers, no manual memory management, bounds checks, initialized values.
+- Unsafe operations appear only in external functions (`external function`, FFI) and only in modules marked `unsafe module`. Such modules are listed in the manifest and shown when a dependency is installed.
+- Least privilege: the manifest declares what the package needs (`files`, `network`, `process`, `env`). The compiler forbids using standard-library modules outside the declared permissions. This answers the reader's question "what can this program do" before it runs.
+- Per-function effects in the signature (`uses files`) are not declared in the first release. The compiler derives effects from the call graph and shows them in `unio symbol` and in documentation: the reader and the AI see that a function touches files or processes without growing the language vocabulary. The word `uses` is reserved for the compute extension (`uses gpu`), where an effect influences resource scheduling, not only permissions.
+- Dependencies: registry signatures, hash verification, warnings about `unsafe module`, no network actions during build.
+- Release: reproducible build, signed artifacts, SBOM.
+- Separate reliability tests: behavior under out-of-memory, under a fault inside `using`, under an error in external code.
 
-## 7. Работа с ИИ
+## 7. Working with AI
 
-Что получает ИИ-агент от инструментов:
+What an AI agent gets from the tooling:
 
-1. **Диагностика в JSON**: код ошибки, диапазон в файле, сообщение, объяснение, предлагаемые исправления в виде патчей, связанные символы. Та же информация, что видит человек, без разбора текста.
-2. **Контекст символа**: `unio symbol app.users.find_user` возвращает сигнатуру, документацию, места использования, тип результата и набор ошибок.
-3. **Проверка без сборки**: `unio check` за время, достаточно малое для цикла «сгенерировал — проверил — исправил».
-4. **Один стиль**: `unio fmt` делает сгенерированный код неотличимым от написанного человеком, поэтому ревью смотрит на смысл, а не на оформление.
-5. **Тесты рядом с кодом**: `test "описание":` блоки в том же файле, запуск `unio test --json`.
+1. **Diagnostics in JSON**: error code, span in the file, message, explanation, suggested fixes as patches, related symbols. The same information a person sees, without parsing text.
+2. **Symbol context**: `unio symbol app.users.find_user` returns the signature, documentation, usages, result type, and error set.
+3. **Check without build**: `unio check` fast enough for the loop "generate, check, fix".
+4. **One style**: `unio fmt` makes generated code indistinguishable from hand-written code, so review looks at meaning, not layout.
+5. **Tests next to code**: `test "description":` blocks in the same file, run with `unio test --json`.
 
-Что требуется от ИИ: описывать намерение в документирующих комментариях и тестах; код остаётся однозначным.
+What is required from the AI: describe intent in documentation comments and tests; the code stays unambiguous.
 
-## 8. Вычисления для ИИ и квантовое расширение
+## 8. AI computation and the quantum extension
 
-Не входят в первый выпуск. Ограничения на ядро, чтобы расширения были возможны:
+Not part of the first release. Constraints on the core so that the extensions remain possible:
 
-- тип `Resource` и `using` достаточны для тензоров и областей жизни;
-- обобщения и интерфейсы достаточны для операций над тензорами разных типов и устройств;
-- в сигнатуры можно будет добавить эффекты (`uses gpu`) без изменения существующего синтаксиса;
-- профилировщик проектируется с общим форматом событий, куда позднее добавятся RAM/VRAM.
+- the `Resource` type and `using` are sufficient for tensors and lifetime scopes;
+- generics and interfaces are sufficient for operations on tensors of different types and devices;
+- effects (`uses gpu`) can be added to signatures later without changing existing syntax;
+- the profiler is designed with a common event format to which RAM/VRAM will be added later.
 
-Квантовый модуль: схемы как значения, симулятор как backend, оборудование через тот же интерфейс backend с описанием возможностей. Ускорение не обещается; гарантируется проверяемость схемы до запуска.
+Quantum module: circuits as values, a simulator as a backend, hardware through the same backend interface with a capability description. Speedup is not promised; verifiability of a circuit before execution is guaranteed.
 
-## 9. Полный пример
+## 9. Complete example
 
-См. `docs/examples/todo.unio` — консольная утилита со списком задач, файлом хранения, разбором аргументов и обработкой ошибок. Пример показывает все конструкции ядра.
+See `docs/examples/todo.unio`: a command-line utility with a task list, a storage file, argument parsing, and error handling. The example shows every construct of the core.
 
-## 10. Решённые вопросы
+## 10. Settled questions
 
-| Вопрос | Решение |
+| Question | Decision |
 |---|---|
-| `+` для текста | Разрешён только `Text + Text`, стандарт — интерполяция |
-| Как связаны `Option`, `fails with`, `Result` | `Option` — отсутствие значения; `fails with` — ошибка функции; `Result` — ошибка как хранимое значение; `try` работает с двумя последними |
-| Что происходит при `items[i]` вне диапазона | Авария с кодом 101, непоймаемая; безопасная форма `get` |
-| Граница GC и ресурсов | Тип реализует `Resource` — значит ресурс, живёт в `using` |
-| Формат ошибок компилятора | JSON с кодом, диапазоном, объяснением и патчем; фиксируется в ТЗ до первого выпуска |
-| Параллельность в ядре | Нет. Ядро не содержит общего изменяемого состояния между потоками, чтобы модель параллельности добавлялась позднее без ломки |
-| `Decimal` в ядре | Нет. `std.decimal` как структура со стандартными операторными интерфейсами; создание явное `Decimal("19.99")` |
-| Операторы для пользовательских типов | Только через явное `extend T with Add` и другие стандартные интерфейсы; переопределение существующих реализаций запрещено |
-| Эффекты в сигнатуре | В 0.1 нет: полномочия на уровне пакета, эффекты функций выводятся компилятором и показываются в `unio symbol`. `uses` зарезервировано для 0.3 |
-| `==` для `Float` | IEEE 754; `Float` без `Hash`, не ключ и не образец `match`; `total_order()` и `is_nan()` |
-| `==` для ресурсов | Ошибка компиляции; тождественность через `is_same(a, b)` |
-| Язык реализации компилятора | Rust с генерацией кода через Cranelift в 0.1; самостоятельная реализация на Unio к 1.0, когда язык стабилен |
+| `+` for text | Only `Text + Text` is allowed; interpolation is the standard |
+| How `Option`, `fails with`, and `Result` relate | `Option` is absence of a value; `fails with` is a function error; `Result` is an error as a stored value; `try` works with the latter two |
+| What happens on `items[i]` out of range | Fault with exit code 101, uncatchable; safe form `get` |
+| Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
+| Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
+| Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
+| `Decimal` in the core | No. `std.decimal` as a struct with the standard operator interfaces; explicit construction `Decimal("19.99")` |
+| Operators for user-defined types | Only through explicit `extend T with Add` and the other standard interfaces; redefining existing implementations is forbidden |
+| Effects in signatures | Not in 0.1: package-level permissions; function effects are derived by the compiler and shown in `unio symbol`. `uses` is reserved for 0.3 |
+| `==` for `Float` | IEEE 754; `Float` without `Hash`, not a key and not a `match` pattern; `total_order()` and `is_nan()` |
+| `==` for resources | Compile error; identity via `is_same(a, b)` |
+| Compiler implementation language | Rust with code generation through Cranelift in 0.1; self-hosted implementation in Unio by 1.0, once the language is stable |
 
-## 11. Обоснование последних решений
+## 11. Rationale for the latest decisions
 
-Решения по вопросам, открытым в версии 0.1 концепции, выведены из принципа «понятный код, явное поведение, контролируемые ресурсы».
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources".
 
-1. **`Decimal` вне ядра.** Малый словарь конструкций важнее удобства одной предметной области. Привычная запись арифметики сохраняется, потому что операторы привязаны к интерфейсам, а не к встроенным типам. Явное `Decimal("19.99")` исключает скрытое округление при смешении с `Float`.
-2. **Эффекты без синтаксиса.** Полномочия пакета уже отвечают на вопрос «что программа может сделать». Эффекты функций полезны читателю и ИИ, но их можно вычислить, а не требовать записывать; так сигнатуры остаются короткими, а информация не теряется. Когда эффект начнёт влиять на выполнение (GPU), он станет частью сигнатуры через `uses`.
-3. **`Float` по IEEE 754.** Отклонение от стандарта сделало бы численный код неожиданным для всех, кто знает другие языки. Опасные места закрыты запретом `Hash` и образцов `match`, а не изменением семантики оператора.
-4. **Ресурсы без `==`.** У сравнения дескрипторов нет очевидного смысла для читателя: это содержимое или тождество? Ошибка компиляции с подсказкой `is_same` делает выбор явным.
-5. **Rust и Cranelift.** Безопасное подмножество Unio опирается на безопасный компилятор: Rust даёт это без ручной проверки памяти. Cranelift обеспечивает быструю и детерминированную сборку, что важнее пиковой оптимизации для утилит CLI и для цикла «сгенерировал — проверил». LLVM может стать вторым backend для `--release`, если бенчмарки выпуска 0.2 этого потребуют. Самостоятельная реализация переносится на 1.0: писать компилятор на языке, который ещё меняется, значит переписывать его дважды.
+1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
+2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
+3. **`Float` per IEEE 754.** Deviating from the standard would make numeric code surprising to everyone who knows other languages. The dangerous spots are closed by forbidding `Hash` and `match` patterns, not by changing the operator's semantics.
+4. **Resources without `==`.** Comparing handles has no obvious meaning for a reader: contents or identity? A compile error with the hint `is_same` makes the choice explicit.
+5. **Rust and Cranelift.** Unio's safe subset rests on a safe compiler; Rust provides that without manual memory checking. Cranelift gives fast, deterministic builds, which matters more than peak optimization for CLI utilities and for the "generate, check" loop. LLVM may become a second backend for `--release` if the 0.2 benchmarks require it. Self-hosting moves to 1.0: writing a compiler in a language that is still changing means writing it twice.

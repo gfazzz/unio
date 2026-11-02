@@ -1,198 +1,198 @@
-# План работ: Unio 0.1 «Ядро» и дальнейшие выпуски
+# Work plan: Unio 0.1 "Core" and later releases
 
-Версия: 0.1 (черновик). Основание: `docs/requirements.md`. Сроки указаны в неделях от начала работ и рассчитаны на команду из 3–4 инженеров. При другом составе сроки масштабируются, порядок этапов сохраняется.
+Version: 0.1 (draft). Basis: `docs/requirements.md`. Russian localization: `docs/ru/plan.md`. Durations are given in weeks from the start of work and assume a team of 3–4 engineers. With a different team the durations scale; the order of stages stays.
 
-## 1. Принципы ведения проекта
+## 1. Project principles
 
-- **Спецификация раньше кода.** Конструкция попадает в компилятор только после записи её синтаксиса и семантики в справочник.
-- **Вертикальные срезы.** Каждый этап заканчивается работающей цепочкой «исходник → проверка → запуск», пусть и для узкого подмножества языка.
-- **Эталонные утилиты как мерило.** Десять утилит из ТЗ (раздел 9.1) пишутся рано и расширяются по мере роста языка; этап считается завершённым, когда его утилиты работают.
-- **RFC для изменений языка.** Любое изменение синтаксиса или семантики после этапа 1 оформляется в `docs/rfcs/NNNN-название.md` с обоснованием, примерами и планом миграции.
-- **Измерения с первого этапа.** Производительность и размер диагностики отслеживаются в CI, регресс блокирует слияние.
+- **Specification before code.** A construct enters the compiler only after its syntax and semantics are written in the reference.
+- **Vertical slices.** Every stage ends with a working chain "source, check, run", even for a narrow subset of the language.
+- **Reference utilities as the yardstick.** The ten utilities from the specification (section 9.1) are written early and grow with the language; a stage is complete when its utilities work.
+- **RFCs for language changes.** Any change to syntax or semantics after stage 1 is written up in `docs/rfcs/NNNN-title.md` with rationale, examples, and a migration plan.
+- **Measurement from the first stage.** Performance and diagnostic size are tracked in CI; a regression blocks the merge.
 
-## 2. Структура репозитория
+## 2. Repository layout
 
 ```
 unio/
   README.md
-  docs/            концепция, ТЗ, план, RFC, справочник
-  spec/            грамматика (EBNF) и тестовые программы спецификации
+  docs/            concept, requirements, plan, RFCs, reference; docs/ru for Russian
+  spec/            grammar (EBNF) and specification test programs
   compiler/        Rust: lexer, parser, sema, ir, codegen, driver
-  runtime/         GC, ресурсы, аварии, запуск
-  stdlib/          стандартная библиотека на Unio и external-функции
+  runtime/         GC, resources, faults, startup
+  stdlib/          standard library in Unio plus external functions
   tools/           fmt, test, pkg, lsp, doc
-  examples/        эталонные утилиты
-  bench/           тесты производительности
-  editors/vscode/  расширение
+  examples/        reference utilities
+  bench/           performance tests
+  editors/vscode/  extension
 ```
 
-## 3. Этапы выпуска 0.1
+## 3. Stages of release 0.1
 
-### Этап 0. Спецификация и RFC (недели 1–4)
+### Stage 0. Specification and RFCs (weeks 1–4)
 
-Цель: закрыть все открытые вопросы концепции и получить справочник, по которому можно писать компилятор.
+Goal: close every question in the concept and produce a reference from which the compiler can be written.
 
-Работы:
-- Грамматика ядра в EBNF, тесты грамматики (корпус корректных и некорректных файлов).
-- Семантика типов, `Option`, `fails with`, `try`, аварий, `using`, модулей — в справочнике.
-- Описание операторных интерфейсов, вывода эффектов и `std.decimal` в справочнике (решения из концепции, раздел 10).
-- Схема JSON-диагностики (JSON Schema), список первых 50 кодов ошибок.
-- Все десять эталонных утилит написаны на бумаге и проверены на читаемость вручную.
+Work:
+- Core grammar in EBNF; grammar tests (a corpus of valid and invalid files).
+- Semantics of types, `Option`, `fails with`, `try`, faults, `using`, modules in the reference.
+- Operator interfaces, effect derivation, and `std.decimal` described in the reference (decisions from the concept, section 10).
+- JSON diagnostics schema (JSON Schema), list of the first 50 error codes.
+- All ten reference utilities written on paper and checked for readability by hand.
 
-Результат: `spec/` и `docs/reference/` версии 0.1-draft; принятые RFC.
+Result: `spec/` and `docs/reference/` at version 0.1-draft; accepted RFCs.
 
-Критерий выхода: три человека независимо реализуют разбор примера `todo.unio` по грамматике и получают одинаковое дерево.
+Exit criterion: three people independently parse `todo.unio` by the grammar and obtain the same tree.
 
-### Этап 1. Фронтенд и форматтер (недели 4–10)
+### Stage 1. Front end and formatter (weeks 4–10)
 
-Цель: любой файл ядра разбирается в AST, форматируется и возвращается без изменений.
+Goal: any core file parses to an AST, is formatted, and round-trips unchanged.
 
-Работы:
-- Лексер с учётом отступов, парсер с восстановлением после ошибок.
-- AST с полными диапазонами, вывод диагностик в текстовом и JSON виде (К-6…К-8).
-- `unio fmt` с тестом «AST до = AST после» и идемпотентностью.
+Work:
+- Indentation-aware lexer; parser with error recovery.
+- AST with full spans; diagnostics in text and JSON (C-6 to C-8).
+- `unio fmt` with the "AST before = AST after" test and idempotence.
 - `unio outline`.
-- Fuzzing парсера в CI.
+- Parser fuzzing in CI.
 
-Критерий выхода: корпус из `spec/` и десять утилит разбираются; `fmt` идемпотентен; парсер не падает на fuzzing за 8 часов.
+Exit criterion: the `spec/` corpus and the ten utilities parse; `fmt` is idempotent; the parser survives 8 hours of fuzzing.
 
-### Этап 2. Семантика (недели 8–18)
+### Stage 2. Semantics (weeks 8–18)
 
-Цель: `unio check` проверяет типы, ошибки и ресурсы.
+Goal: `unio check` verifies types, errors, and resources.
 
-Работы:
-- Разрешение имён, модули, видимость, циклы импортов.
-- Проверка типов и вывод для локальных значений; обобщения с ограничениями.
-- Проверка полноты `match`.
-- Анализ `fails with`: проброс через `try`, обработка через `on`, полнота.
-- Проверка ресурсов: `using`, запрет утечки ресурса в обычные структуры.
-- Проверка изменяемости (`let`/`var`, `var`-параметры).
-- `unio symbol` и объяснения `unio explain` для всех кодов этапа.
+Work:
+- Name resolution, modules, visibility, import cycles.
+- Type checking and inference for local values; generics with constraints.
+- `match` exhaustiveness.
+- `fails with` analysis: propagation through `try`, handling through `on`, completeness.
+- Resource checking: `using`, no escape of a resource into ordinary structs.
+- Mutability checking (`let`/`var`, `var` parameters).
+- `unio symbol` and `unio explain` for every code of the stage.
 
-Критерий выхода: корпус из 200 программ с ошибками (Н-10) даёт ожидаемые диагностики; десять утилит проходят `check`.
+Exit criterion: the corpus of 200 programs with errors (R-10) yields the expected diagnostics; the ten utilities pass `check`.
 
-### Этап 3. Интерпретатор и среда выполнения (недели 14–24)
+### Stage 3. Interpreter and runtime (weeks 14–24)
 
-Цель: программы ядра выполняются, пусть и медленно; семантика закреплена тестами до появления нативного кода.
+Goal: core programs run, even if slowly; semantics are locked by tests before native code exists.
 
-Работы:
-- Промежуточное представление (IR) с явными ошибками, ресурсами и аварийными точками.
-- Интерпретатор IR для быстрой проверки семантики и для `unio test` на ранних этапах.
-- Среда выполнения: точный GC, `Resource` и `using`, аварии с трассой и кодами выхода.
-- Минимальная стандартная библиотека: `text`, `collections`, `files`, `path`, `env`, `args`, `json`.
-- `unio test` с текстовым и JSON выводом, `expect_fault`.
+Work:
+- Intermediate representation (IR) with explicit errors, resources, and fault points.
+- IR interpreter for fast semantic validation and for `unio test` in the early stages.
+- Runtime: precise GC, `Resource` and `using`, faults with trace and exit codes.
+- Minimal standard library: `text`, `collections`, `files`, `path`, `env`, `args`, `json`.
+- `unio test` with text and JSON output, `expect_fault`.
 
-Критерий выхода: `todo`, `wc`, `grep-lite`, `json-query` работают в интерпретаторе, их тесты проходят; тесты надёжности аварий внутри `using` зелёные.
+Exit criterion: `todo`, `wc`, `grep-lite`, `json-query` run in the interpreter and their tests pass; reliability tests for faults inside `using` are green.
 
-### Этап 4. Нативная сборка (недели 20–32)
+### Stage 4. Native build (weeks 20–32)
 
-Цель: `unio build` даёт один исполняемый файл на четырёх платформах.
+Goal: `unio build` produces a single executable on four platforms.
 
-Работы:
-- Генерация кода из IR через Cranelift; компоновка со средой выполнения.
-- Карты стека для точного GC, трассы стека без внешних отладочных форматов.
-- Детерминированная сборка (К-4), проверка в CI сравнением хешей.
-- Кросс-компиляция под четыре целевые платформы, CI на всех.
-- Бенчмарки раздела 7.1 ТЗ в CI с порогами.
+Work:
+- Code generation from IR through Cranelift; linking with the runtime.
+- Stack maps for the precise GC; stack traces without external debug formats.
+- Deterministic build (C-4), verified in CI by hash comparison.
+- Cross-compilation to the four targets; CI on all of them.
+- Benchmarks of specification section 7.1 in CI with thresholds.
 
-Критерий выхода: все десять утилит собираются нативно на четырёх платформах; показатели 7.1 достигнуты или зафиксированы отклонения с планом устранения.
+Exit criterion: all ten utilities build natively on four platforms; the 7.1 metrics are met, or deviations are recorded with a remediation plan.
 
-### Этап 5. Стандартная библиотека и пакеты (недели 28–38)
+### Stage 5. Standard library and packages (weeks 28–38)
 
-Цель: полный набор модулей ТЗ и воспроизводимые зависимости.
+Goal: the full module set of the specification and reproducible dependencies.
 
-Работы:
-- Модули `process`, `time`, `random`, `log`, `math`, `test`; документация и примеры для каждой публичной функции.
-- Ревью и санитайзеры для всех `external function`.
-- `unio.toml`, `unio.lock`, полномочия, `unsafe module`.
-- Реестр: публикация с подписью, проверка, запрет удаления; `add`, `remove`, `update`.
-- Генерация документации `unio doc`.
+Work:
+- Modules `process`, `time`, `random`, `log`, `math`, `decimal`, `test`; documentation and examples for every public function.
+- Review and sanitizers for all `external function` code.
+- `unio.toml`, `unio.lock`, permissions, `unsafe module`.
+- Registry: signed publishing, verification, no deletion; `add`, `remove`, `update`.
+- Documentation generation with `unio doc`.
 
-Критерий выхода: все десять утилит используют только стандартную библиотеку и собираются без сети по lock-файлу; реестр принимает и отдаёт тестовый пакет.
+Exit criterion: all ten utilities use only the standard library and build offline from the lock file; the registry accepts and serves a test package.
 
-### Этап 6. Редактор и работа с ИИ (недели 34–42)
+### Stage 6. Editor and AI workflow (weeks 34–42)
 
-Цель: язык удобен в редакторе и в цикле ИИ-агента.
+Goal: the language is comfortable in an editor and in an AI agent's loop.
 
-Работы:
-- Языковой сервер: диагностика, переход, подсказки, автодополнение, переименование, форматирование.
-- Расширение VS Code.
-- Документ «Как Unio работает с ИИ», сценарии для агентов, испытание по Н-10 с публикацией методики и результатов.
-- Доработка сообщений диагностики по итогам испытания.
+Work:
+- Language server: diagnostics, go to definition, hints, completion, rename, formatting.
+- VS Code extension.
+- The document "How Unio works with AI", agent scenarios, the R-10 trial with published methodology and results.
+- Diagnostic message refinement from trial results.
 
-Критерий выхода: испытание Н-10 даёт не менее 80 %; LSP проходит набор тестов протокола.
+Exit criterion: the R-10 trial reaches at least 80%; the LSP passes the protocol test suite.
 
-### Этап 7. Стабилизация и выпуск 0.1 (недели 40–48)
+### Stage 7. Stabilization and release 0.1 (weeks 40–48)
 
-Работы:
-- Fuzzing компилятора 24 часа, устранение дефектов.
-- Испытание читаемости (1.4, п. 2) с внешними участниками.
-- Воспроизводимая сборка выпуска, подписи, SBOM, установщики для четырёх платформ.
-- Справочник, руководство, документация библиотеки на двух языках.
-- Приёмка по разделу 9.2 ТЗ.
+Work:
+- 24-hour compiler fuzzing; defect fixes.
+- Readability trial (1.4, item 2) with external participants.
+- Reproducible release build, signatures, SBOM, installers for four platforms.
+- Reference, guide, library documentation in both languages.
+- Acceptance per specification section 9.2.
 
-Результат: Unio 0.1, публичный репозиторий, реестр пакетов, сайт с документацией.
+Result: Unio 0.1, public repository, package registry, documentation site.
 
-## 4. Сводная таблица этапов
+## 4. Stage summary
 
-| Этап | Недели | Главный результат | Критерий выхода |
+| Stage | Weeks | Main result | Exit criterion |
 |---|---|---|---|
-| 0 | 1–4 | Справочник, грамматика, RFC, схема диагностики | Независимый разбор `todo.unio` совпадает |
-| 1 | 4–10 | Парсер, `fmt`, `outline`, JSON-диагностика | Корпус разбирается, `fmt` идемпотентен |
-| 2 | 8–18 | `check`: типы, ошибки, ресурсы, `symbol`, `explain` | 200 программ с ошибками дают ожидаемые диагностики |
-| 3 | 14–24 | IR, интерпретатор, GC, ресурсы, `test`, минимальная библиотека | Четыре утилиты работают, тесты аварий зелёные |
-| 4 | 20–32 | Нативная сборка на 4 платформах, бенчмарки | Десять утилит собираются, показатели 7.1 |
-| 5 | 28–38 | Полная библиотека, пакеты, реестр, `doc` | Сборка без сети, реестр работает |
-| 6 | 34–42 | LSP, VS Code, испытание с ИИ | Н-10 ≥ 80 % |
-| 7 | 40–48 | Выпуск 0.1 | Приёмка по 9.2 |
+| 0 | 1–4 | Reference, grammar, RFCs, diagnostics schema | Independent parses of `todo.unio` agree |
+| 1 | 4–10 | Parser, `fmt`, `outline`, JSON diagnostics | Corpus parses, `fmt` idempotent |
+| 2 | 8–18 | `check`: types, errors, resources, `symbol`, `explain` | 200 error programs yield expected diagnostics |
+| 3 | 14–24 | IR, interpreter, GC, resources, `test`, minimal library | Four utilities run, fault tests green |
+| 4 | 20–32 | Native build on 4 platforms, benchmarks | Ten utilities build, 7.1 metrics |
+| 5 | 28–38 | Full library, packages, registry, `doc` | Offline build, registry works |
+| 6 | 34–42 | LSP, VS Code, AI trial | R-10 ≥ 80% |
+| 7 | 40–48 | Release 0.1 | Acceptance per 9.2 |
 
-Этапы перекрываются: фронтенд и семантика ведутся параллельно со спецификацией следующих частей; библиотека начинается на интерпретаторе до нативной сборки.
+Stages overlap: the front end and semantics proceed in parallel with specification of later parts; the library starts on the interpreter before the native build.
 
-## 5. Роли
+## 5. Roles
 
-| Роль | Зона ответственности |
+| Role | Responsibility |
 |---|---|
-| Ведущий по языку | Спецификация, RFC, семантика, окончательные решения по синтаксису |
-| Инженер компилятора | Фронтенд, проверки, IR, генерация кода |
-| Инженер среды выполнения | GC, ресурсы, аварии, платформы, бенчмарки |
-| Инженер инструментов и библиотеки | `fmt`, `test`, пакеты, реестр, LSP, стандартная библиотека |
-| Технический писатель (с этапа 5) | Справочник, руководство, документ по ИИ |
+| Language lead | Specification, RFCs, semantics, final syntax decisions |
+| Compiler engineer | Front end, checks, IR, code generation |
+| Runtime engineer | GC, resources, faults, platforms, benchmarks |
+| Tools and library engineer | `fmt`, `test`, packages, registry, LSP, standard library |
+| Technical writer (from stage 5) | Reference, guide, AI document |
 
-## 6. Риски и меры
+## 6. Risks and mitigations
 
-| Риск | Вероятность | Последствие | Мера |
+| Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Проверка ресурсов (утечка из `using`) окажется слишком строгой или слишком слабой | средняя | переделка семантики после этапа 2 | Прототип анализа на этапе 0 на бумаге, корпус тестов ресурсов до реализации |
-| Точный GC с Cranelift потребует больше времени, чем заложено | высокая | сдвиг этапа 4 | Начать с консервативного сканирования стека как запасного варианта, перейти к картам стека при наличии времени |
-| Диагностика окажется неудобной для ИИ, цель 80 % не достигнута | средняя | дополнительный цикл доработки | Испытание Н-10 проводить с этапа 2 на частичном корпусе, не ждать этапа 6 |
-| Производительность текста и JSON ниже CPython | средняя | нарушение 7.1 | Бенчмарки в CI с этапа 3, оптимизация `Text` (представление UTF-8 с кешем длины) до этапа 4 |
-| Разрастание словаря языка под давлением запросов | высокая | потеря читаемости, главного свойства | Процесс RFC с обязательным разделом «почему нельзя выразить существующими средствами» |
-| Поддержка Windows отстаёт | средняя | нарушение Н-8 | CI на Windows с этапа 1, пути через `Path`, без предположений о разделителях |
+| Resource checking (escape from `using`) proves too strict or too weak | medium | semantics rework after stage 2 | Prototype the analysis on paper in stage 0; resource test corpus before implementation |
+| Precise GC with Cranelift takes longer than planned | high | stage 4 slips | Start with conservative stack scanning as a fallback; move to stack maps if time allows |
+| Diagnostics prove awkward for AI; the 80% goal is missed | medium | extra refinement cycle | Run the R-10 trial from stage 2 on a partial corpus instead of waiting for stage 6 |
+| Text and JSON performance below CPython | medium | 7.1 violated | Benchmarks in CI from stage 3; optimize `Text` (UTF-8 with cached length) before stage 4 |
+| Language vocabulary grows under feature pressure | high | loss of readability, the main property | RFC process with a mandatory section "why existing constructs cannot express this" |
+| Windows support lags | medium | R-8 violated | Windows CI from stage 1; paths through `Path`, no assumptions about separators |
 
-## 7. Метрики проекта
+## 7. Project metrics
 
-Отслеживаются в CI и публикуются на каждом выпуске:
+Tracked in CI and published with every release:
 
-- время `check` и `build` для эталонных утилит;
-- показатели раздела 7.1 ТЗ;
-- доля программ корпуса Н-10, исправленных агентом;
-- число кодов диагностики с объяснением и исправлением (`fixes`) — цель 100 % для ошибок;
-- размер словаря языка: число ключевых слов и конструкций (цель — не расти после 0.1 без RFC).
+- `check` and `build` times for the reference utilities;
+- the metrics of specification section 7.1;
+- share of R-10 corpus programs fixed by an agent;
+- number of diagnostic codes with explanation and `fixes`; target 100% for errors;
+- language vocabulary size: number of keywords and constructs (target: no growth after 0.1 without an RFC).
 
-## 8. После выпуска 0.1
+## 8. After release 0.1
 
-| Выпуск | Содержание | Зависимости от 0.1 |
+| Release | Contents | Dependencies on 0.1 |
 |---|---|---|
-| 0.2 «Сервер» | Параллельность на основе задач без разделяемого изменяемого состояния, `std.net`, HTTP-клиент и сервер, профилировщик CPU и RAM | Отсутствие общего изменяемого состояния в ядре; формат событий профилировщика |
-| 0.3 «Вычисления» | Тензоры как ресурсы, области жизни с бюджетом, автодифференцирование, CPU/GPU backend, планирование буферов, профилирование VRAM, учёт завершения вычислений устройства при освобождении | `Resource`, `using`, обобщения, эффекты в сигнатуре |
-| 0.4 «Квантовое расширение» | Схемы как значения, симулятор, интерфейс оборудования с описанием возможностей | Backend-интерфейс из 0.3 |
-| 1.0 | Стабилизация языка, гарантия совместимости, самостоятельная реализация компилятора на Unio | Все предыдущие |
+| 0.2 "Server" | Task-based concurrency without shared mutable state, `std.net`, HTTP client and server, CPU and RAM profiler | No shared mutable state in the core; profiler event format |
+| 0.3 "Compute" | Tensors as resources, lifetime scopes with budgets, autodiff, CPU/GPU backends, buffer planning, VRAM profiling, device-completion-aware release | `Resource`, `using`, generics, effects in signatures |
+| 0.4 "Quantum" | Circuits as values, simulator, hardware interface with capability description | Backend interface from 0.3 |
+| 1.0 | Language stabilization, compatibility guarantee, self-hosted compiler in Unio | All of the above |
 
-Каждый следующий выпуск начинается с собственного ТЗ по образцу `docs/requirements.md` и не меняет синтаксис ядра без RFC и автоматической миграции.
+Each later release starts with its own specification modeled on `docs/requirements.md` and does not change core syntax without an RFC and an automatic migration.
 
-## 9. Ближайшие действия
+## 9. Immediate actions
 
-1. Концепция 0.3 утверждена, открытых вопросов нет. Завести процесс RFC в `docs/rfcs/` для будущих изменений.
-2. Завести структуру репозитория из раздела 2 и CI с проверкой форматирования документов.
-3. Написать грамматику EBNF и корпус тестов спецификации.
-4. Записать на Unio оставшиеся девять эталонных утилит по образцу `docs/examples/todo.unio`.
+1. Concept 0.3 is approved and has no open questions. Set up the RFC process in `docs/rfcs/` for future changes.
+2. Create the repository layout of section 2 and CI with document formatting checks.
+3. Write the EBNF grammar and the specification test corpus.
+4. Write the remaining nine reference utilities in Unio following `docs/examples/todo.unio`.

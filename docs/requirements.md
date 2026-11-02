@@ -1,258 +1,258 @@
-# Техническое задание: Unio, выпуск 0.1 «Ядро»
+# Requirements specification: Unio release 0.1 "Core"
 
-Версия ТЗ: 0.2 (черновик). Основание: `README.md`, `docs/concept.md`. План работ: `docs/plan.md`.
+Specification version: 0.2 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
 
-Ключевые слова «должен», «обязан» обозначают обязательные требования; «следует» — желательные; «может» — допустимые.
+The words "must" and "shall" denote mandatory requirements; "should" denotes desirable ones; "may" denotes permitted ones.
 
-## 1. Общие сведения
+## 1. General
 
-### 1.1 Наименование
+### 1.1 Name
 
-Unio — язык программирования и комплект инструментов. Предмет ТЗ — первый выпуск, версия 0.1, кодовое имя «Ядро».
+Unio: a programming language and tool kit. The subject of this specification is the first release, version 0.1, code name "Core".
 
-### 1.2 Назначение выпуска
+### 1.2 Purpose of the release
 
-Выпуск 0.1 предназначен для написания утилит командной строки и скриптов автоматизации: обработка файлов и текста, вызов внешних программ, работа с JSON и переменными окружения. Выпуск служит основой для последующих серверных, вычислительных и квантовых расширений и не должен требовать их переделки.
+Release 0.1 is intended for writing command-line utilities and automation scripts: file and text processing, running external programs, working with JSON and environment variables. The release is the foundation for the later server, compute, and quantum extensions and must not require rework for them.
 
-### 1.3 Пользователи
+### 1.3 Users
 
-- Разработчик, пишущий утилиты вручную.
-- ИИ-агент, генерирующий и исправляющий код по заданию человека.
-- Рецензент, проверяющий сгенерированный код перед запуском.
+- A developer writing utilities by hand.
+- An AI agent generating and fixing code from a person's task statement.
+- A reviewer checking generated code before it runs.
 
-### 1.4 Критерии успеха выпуска
+### 1.4 Success criteria for the release
 
-1. Утилита из `docs/examples/todo.unio` компилируется, проходит тесты и работает на трёх платформах без изменений.
-2. Десять эталонных утилит (см. раздел 9) написаны на Unio, и внешний читатель без знания языка правильно описывает их поведение по исходному коду в контрольном испытании.
-3. ИИ-агент, получив только JSON-диагностику, исправляет не менее 80 % ошибок из контрольного набора без вмешательства человека.
-4. Все требования раздела 7 подтверждены измерениями и опубликованы.
+1. The utility in `docs/examples/todo.unio` compiles, passes its tests, and runs on four platforms without changes.
+2. Ten reference utilities (section 9) are written in Unio, and an external reader with no knowledge of the language correctly describes their behavior from source in a controlled trial.
+3. An AI agent given only the JSON diagnostics fixes at least 80% of the errors in the control set without human intervention.
+4. All requirements of section 7 are confirmed by measurements and published.
 
-## 2. Границы выпуска
+## 2. Scope
 
-### 2.1 Входит
+### 2.1 In scope
 
-- Язык: конструкции из `docs/concept.md`, разделы 2–5.
-- Компилятор с проверкой типов и ошибок, нативная сборка для Linux x86-64, Linux arm64, macOS arm64, Windows x86-64.
-- Среда выполнения: GC, ресурсы, аварии, запуск `main`.
-- Стандартная библиотека для CLI (раздел 5).
-- Инструменты: `unio build`, `run`, `check`, `fmt`, `test`, `add`, `remove`, `update`, `doc`, `symbol`, `explain`.
-- Менеджер пакетов с манифестом, lock-файлом и реестром.
-- Языковой сервер (LSP) и расширение для VS Code.
-- Документация: справочник языка, руководство, справочник стандартной библиотеки.
+- Language: the constructs of `docs/concept.md`, sections 2–5.
+- Compiler with type and error checking; native builds for Linux x86-64, Linux arm64, macOS arm64, Windows x86-64.
+- Runtime: GC, resources, faults, `main` startup.
+- Standard library for CLI (section 5).
+- Tools: `unio build`, `run`, `check`, `fmt`, `test`, `add`, `remove`, `update`, `doc`, `symbol`, `explain`.
+- Package manager with manifest, lock file, and registry.
+- Language server (LSP) and a VS Code extension.
+- Documentation: language reference, guide, standard library reference.
 
-### 2.2 Не входит
+### 2.2 Out of scope
 
-- Параллельность и асинхронность.
-- Сетевые клиенты и серверы, кроме загрузки пакетов.
-- Вычислительное расширение: тензоры, автодифференцирование, GPU.
-- Квантовый модуль.
-- FFI для пользовательского кода (`external function` используется только внутри стандартной библиотеки).
-- Самостоятельная реализация компилятора на Unio.
-- Профилировщик (поставляется в 0.2; в 0.1 только формат событий).
+- Concurrency and asynchrony.
+- Network clients and servers, other than package download.
+- Compute extension: tensors, autodiff, GPU.
+- Quantum module.
+- FFI for user code (`external function` is used only inside the standard library).
+- Self-hosted compiler written in Unio.
+- Profiler (ships in 0.2; 0.1 only defines the event format).
 
-## 3. Требования к языку
+## 3. Language requirements
 
-### 3.1 Лексика и структура
+### 3.1 Lexical structure
 
-- Я-1. Файл — UTF-8, расширение `.unio`, блоки по отступам в 4 пробела; табуляция и смешанные отступы — ошибка.
-- Я-2. Набор ключевых слов фиксирован и опубликован в справочнике; добавление ключевого слова после 0.1 требует RFC.
-- Я-3. Комментарии `#`, документирующие `##`. Документирующий комментарий привязан к следующему объявлению и доступен `unio doc` и `unio symbol`.
+- L-1. A file is UTF-8 with the `.unio` extension; blocks by 4-space indentation; tabs and mixed indentation are errors.
+- L-2. The keyword set is fixed and published in the reference; adding a keyword after 0.1 requires an RFC.
+- L-3. Comments `#`, documentation comments `##`. A documentation comment attaches to the next declaration and is available to `unio doc` and `unio symbol`.
 
-### 3.2 Типы
+### 3.2 Types
 
-- Я-4. Встроенные типы: `Int`, `Float`, `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Result[T, E]`, `Tuple`, `Path`, `Function`.
-- Я-5. Неявных преобразований между типами нет. Преобразование — явный вызов (`to_text`, `to_int`, `to_float`).
-- Я-6. Пользовательские типы: `struct`, `enum`, `interface`, `error`; реализация интерфейса через `extend ... with ...`.
-- Я-7. Обобщённые функции и типы с параметрами и ограничениями по интерфейсам.
-- Я-8. Вывод типов только для локальных `let`/`var`. Параметры, результаты, поля и экспортируемые константы аннотируются обязательно.
-- Я-9. Равенство структур и перечислений — по содержимому, реализация `Equal` выводится автоматически. `Float` сравнивается по IEEE 754 и не реализует `Hash`: не может быть ключом `Map`, элементом `Set` и образцом `match`. Ресурсы не реализуют `Equal`; `==` для них — ошибка компиляции с подсказкой `is_same`.
-- Я-9a. Операторы привязаны к стандартным интерфейсам (`Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, `Hash`). Пользовательский тип реализует их только явно через `extend`; переопределение существующих реализаций запрещено.
-- Я-9b. Эффекты функций в сигнатуре не объявляются. Компилятор выводит их из графа вызовов и показывает в `unio symbol` и `unio doc` (К-11). Слово `uses` зарезервировано.
+- L-4. Built-in types: `Int`, `Float`, `Bool`, `Text`, `Bytes`, `List[T]`, `Map[K, V]`, `Set[T]`, `Option[T]`, `Result[T, E]`, `Tuple`, `Path`, `Function`.
+- L-5. No implicit conversions between types. Conversion is an explicit call (`to_text`, `to_int`, `to_float`).
+- L-6. User-defined types: `struct`, `enum`, `interface`, `error`; interface implementation via `extend ... with ...`.
+- L-7. Generic functions and types with parameters and interface constraints.
+- L-8. Type inference only for local `let`/`var`. Parameters, results, fields, and exported constants must be annotated.
+- L-9. Equality of structs and enums is by content; the `Equal` implementation is derived automatically. `Float` compares per IEEE 754 and does not implement `Hash`: it cannot be a `Map` key, a `Set` element, or a `match` pattern. Resources do not implement `Equal`; `==` on them is a compile error with the hint `is_same`.
+- L-9a. Operators are bound to standard interfaces (`Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, `Hash`). A user-defined type implements them only explicitly through `extend`; redefining existing implementations is forbidden.
+- L-9b. Function effects are not declared in signatures. The compiler derives them from the call graph and shows them in `unio symbol` and `unio doc` (C-11). The word `uses` is reserved.
 
-### 3.3 Изменяемость
+### 3.3 Mutability
 
-- Я-10. `let` неизменяемо, `var` изменяемо. Повторное присваивание `let` — ошибка компиляции.
-- Я-11. Изменяющие методы коллекций доступны только на `var`. Функция изменяет аргумент только при параметре, объявленном `var`; вызывающий обязан передать `var`-значение.
+- L-10. `let` is immutable, `var` is mutable. Reassigning a `let` is a compile error.
+- L-11. Mutating collection methods are available only on `var`. A function modifies an argument only through a parameter declared `var`; the caller must pass a `var` value.
 
-### 3.4 Ошибки и отсутствие значений
+### 3.4 Errors and missing values
 
-- Я-12. `Option[T]` с `some`/`none`, операторы `or` и `?.`.
-- Я-13. `error` объявляет тип ошибки. `fails with` перечисляет ошибки функции и входит в её тип.
-- Я-14. Вызов функции с `fails with` без `try` — ошибка компиляции. `try` в форме префикса пробрасывает; `try:` с `on` обрабатывает; `try ... on E as e:` обрабатывает одну ошибку в строке.
-- Я-15. Компилятор проверяет полноту обработки: каждая ошибка либо обработана, либо указана в `fails with` текущей функции. `on Error` обрабатывает любую.
-- Я-16. `Result[T, E]` поддерживает `try` и `match`.
-- Я-17. Аварии: индекс вне диапазона, деление на ноль, переполнение `Int`, нарушение `assert`, нехватка памяти. Поведение: диагностика в stderr, код выхода 101, освобождение ресурсов в `using`. Аварию нельзя обработать через `on`.
-- Я-18. Для каждой аварийной операции в стандартной библиотеке есть безопасная форма с `Option` или ошибкой.
+- L-12. `Option[T]` with `some`/`none`, operators `or` and `?.`.
+- L-13. `error` declares an error type. `fails with` lists a function's errors and is part of its type.
+- L-14. Calling a function with `fails with` without `try` is a compile error. Prefix `try` propagates; `try:` with `on` handles; `try ... on E as e:` handles one error inline.
+- L-15. The compiler checks completeness of handling: every error is either handled or listed in the current function's `fails with`. `on Error` handles any error.
+- L-16. `Result[T, E]` supports `try` and `match`.
+- L-17. Faults: index out of range, division by zero, `Int` overflow, failed `assert`, out of memory. Behavior: diagnostic to stderr, exit code 101, release of resources in `using`. A fault cannot be handled with `on`.
+- L-18. Every faulting operation in the standard library has a safe form returning `Option` or an error.
 
-### 3.5 Память и ресурсы
+### 3.5 Memory and resources
 
-- Я-19. Управляемые значения живут под GC. Программа не может получить адрес значения.
-- Я-20. Интерфейс `Resource` с методом `release`. Значение-ресурс создаётся в `using` или как поле другого ресурса; сохранение ресурса в обычную структуру, переживающую блок, — ошибка компиляции.
-- Я-21. Освобождение в `using` происходит при нормальном выходе, при ошибке и при аварии, в обратном порядке.
+- L-19. Managed values live under the GC. A program cannot obtain the address of a value.
+- L-20. The `Resource` interface with the method `release`. A resource value is created in `using` or as a field of another resource; storing a resource in an ordinary struct that outlives the block is a compile error.
+- L-21. Release in `using` happens on normal exit, on error, and on fault, in reverse order.
 
-### 3.6 Модули и видимость
+### 3.6 Modules and visibility
 
-- Я-22. Модуль — файл; пакет — каталог с `unio.toml`. Импорт: `import a.b`, `import a.b as c`, `from a.b import x, y`.
-- Я-23. Всё приватно по умолчанию; `public` экспортирует.
-- Я-24. Циклические импорты — ошибка компиляции с указанием цикла.
+- L-22. A module is a file; a package is a directory with `unio.toml`. Import: `import a.b`, `import a.b as c`, `from a.b import x, y`.
+- L-23. Everything is private by default; `public` exports.
+- L-24. Cyclic imports are a compile error that names the cycle.
 
-### 3.7 Тесты в языке
+### 3.7 Tests in the language
 
-- Я-25. Блок `test "описание":` на верхнем уровне файла. Доступны `assert`, `assert_fail`, `expect_fault`. Тесты не попадают в сборку `build`.
+- L-25. A top-level `test "description":` block. `assert`, `assert_fail`, and `expect_fault` are available. Tests are excluded from `build` output.
 
-## 4. Требования к компилятору и среде выполнения
+## 4. Compiler and runtime requirements
 
-### 4.1 Компилятор
+### 4.1 Compiler
 
-- К-1. Этапы: лексер, парсер, разрешение имён, проверка типов и ошибок, проверка ресурсов, генерация кода. Каждый этап имеет отдельный набор тестов.
-- К-2. Компилятор восстанавливается после ошибки и сообщает все ошибки файла за один проход, не только первую.
-- К-3. `unio check` выполняет все проверки без генерации кода.
-- К-4. Сборка детерминирована: одинаковые исходники и lock-файл дают побайтно одинаковый артефакт на одной платформе.
-- К-5. Результат `unio build` — один исполняемый файл без внешних зависимостей, кроме системных библиотек.
+- C-1. Stages: lexer, parser, name resolution, type and error checking, resource checking, code generation. Each stage has its own test set.
+- C-2. The compiler recovers from errors and reports all errors in a file in one pass, not only the first.
+- C-3. `unio check` performs all checks without code generation.
+- C-4. Builds are deterministic: identical sources and lock file give a byte-identical artifact on one platform.
+- C-5. The result of `unio build` is a single executable with no external dependencies beyond system libraries.
 
-### 4.2 Диагностика
+### 4.2 Diagnostics
 
-- К-6. Каждая диагностика имеет уникальный код вида `E0001` (ошибка), `W0001` (предупреждение), `H0001` (подсказка стиля).
-- К-7. Текстовый формат: код, путь, строка и столбец, фрагмент с подчёркиванием, сообщение, подсказка.
-- К-8. Формат `--diagnostics=json`: массив объектов, каждый с полями `code`, `severity`, `message`, `explanation`, `spans` (файл, начало, конец, подпись), `fixes` (массив замен: файл, диапазон, новый текст, описание), `related` (символы и места). Схема публикуется как JSON Schema и версионируется.
-- К-9. `unio explain E0001` печатает развёрнутое объяснение с примером ошибки и исправления.
-- К-10. Сообщения на русском и английском языках; язык выбирается параметром и переменной окружения. Коды и схема JSON не зависят от языка.
+- C-6. Every diagnostic has a unique code of the form `E0001` (error), `W0001` (warning), `H0001` (style hint).
+- C-7. Text format: code, path, line and column, snippet with underline, message, hint.
+- C-8. `--diagnostics=json` format: an array of objects, each with fields `code`, `severity`, `message`, `explanation`, `spans` (file, start, end, label), `fixes` (array of replacements: file, range, new text, description), `related` (symbols and locations). The schema is published as JSON Schema and versioned.
+- C-9. `unio explain E0001` prints an extended explanation with an example of the error and its fix.
+- C-10. Messages in English and Russian; the language is selected by a flag and an environment variable. Codes and the JSON schema do not depend on the language.
 
-### 4.3 Контекст символов
+### 4.3 Symbol context
 
-- К-11. `unio symbol <полное имя>` возвращает (текст и JSON): сигнатуру, документацию, место объявления, список использований, для функций — набор ошибок, выведенные эффекты (`files`, `network`, `process`, `env`) и список вызываемых функций.
-- К-12. `unio outline <файл>` возвращает список объявлений файла с сигнатурами.
+- C-11. `unio symbol <full name>` returns (text and JSON): signature, documentation, declaration site, usage list, and for functions the error set, derived effects (`files`, `network`, `process`, `env`), and the list of called functions.
+- C-12. `unio outline <file>` returns the file's declarations with signatures.
 
-### 4.4 Среда выполнения
+### 4.4 Runtime
 
-- К-13. GC точный, трассирующий, неперемещающий. Паузы и пропускная способность измеряются в наборе тестов производительности.
-- К-14. Трасса стека при аварии содержит имена функций, файлы и строки без отладочных символов внешних форматов.
-- К-15. Код завершения: 0 успех, значение `main` иначе, 101 авария, 102 нехватка памяти.
+- C-13. The GC is precise, tracing, non-moving. Pauses and throughput are measured in the performance suite.
+- C-14. The stack trace on a fault contains function names, files, and lines without external debug formats.
+- C-15. Exit codes: 0 success, the value of `main` otherwise, 101 fault, 102 out of memory.
 
-## 5. Требования к стандартной библиотеке
+## 5. Standard library requirements
 
-- Б-1. Модули: `std.text`, `std.collections`, `std.math`, `std.decimal`, `std.files`, `std.path`, `std.env`, `std.args`, `std.process`, `std.json`, `std.time`, `std.random`, `std.log`, `std.test`.
-- Б-1a. `std.decimal.Decimal` — точная десятичная арифметика, реализует все операторные интерфейсы и `Hash`; создаётся из текста и `Int`, преобразование из `Float` только явное с указанием округления.
-- Б-2. Каждая функция, способная завершиться ошибкой, объявляет конкретные типы ошибок; `fails with Error` в стандартной библиотеке запрещён.
-- Б-3. Каждый модуль документирован; у каждой публичной функции есть пример.
-- Б-4. `std.args`: позиционные аргументы, флаги, значения по умолчанию, автоматическая справка.
-- Б-5. `std.json`: разбор в значение, кодирование и декодирование структур по их объявлению, без аннотаций.
-- Б-6. `std.process`: запуск программы с аргументами, захват вывода, код выхода, таймаут.
-- Б-7. Небезопасный код (`external function`) допускается только в стандартной библиотеке и проходит отдельную проверку надёжности (раздел 7.3).
+- S-1. Modules: `std.text`, `std.collections`, `std.math`, `std.decimal`, `std.files`, `std.path`, `std.env`, `std.args`, `std.process`, `std.json`, `std.time`, `std.random`, `std.log`, `std.test`.
+- S-1a. `std.decimal.Decimal` provides exact decimal arithmetic, implements all operator interfaces and `Hash`; constructed from text and `Int`; conversion from `Float` is explicit only, with a stated rounding mode.
+- S-2. Every function that can fail declares concrete error types; `fails with Error` is forbidden in the standard library.
+- S-3. Every module is documented; every public function has an example.
+- S-4. `std.args`: positional arguments, flags, defaults, automatic help.
+- S-5. `std.json`: parse to a value, encode and decode structs from their declaration, without annotations.
+- S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
+- S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
 
-## 6. Требования к инструментам
+## 6. Tooling requirements
 
-### 6.1 Команды
+### 6.1 Commands
 
-| Команда | Назначение | Обязательные параметры |
+| Command | Purpose | Required options |
 |---|---|---|
-| `unio new <имя>` | Создать пакет с манифестом и примером | `--lib`, `--bin` |
-| `unio build` | Собрать исполняемый файл | `--release`, `--target` |
-| `unio run` | Собрать и запустить | аргументы после `--` |
-| `unio check` | Проверить без сборки | `--diagnostics=json` |
-| `unio fmt` | Отформатировать | `--check` для CI |
-| `unio test` | Запустить тесты | `--json`, фильтр по имени |
-| `unio add/remove/update` | Управлять зависимостями | версия, `--unsafe-ok` |
-| `unio doc` | Собрать документацию пакета | `--open` |
-| `unio symbol`, `unio outline`, `unio explain` | Контекст для человека и ИИ | `--json` |
+| `unio new <name>` | Create a package with manifest and example | `--lib`, `--bin` |
+| `unio build` | Build an executable | `--release`, `--target` |
+| `unio run` | Build and run | arguments after `--` |
+| `unio check` | Check without building | `--diagnostics=json` |
+| `unio fmt` | Format | `--check` for CI |
+| `unio test` | Run tests | `--json`, name filter |
+| `unio add/remove/update` | Manage dependencies | version, `--unsafe-ok` |
+| `unio doc` | Build package documentation | `--open` |
+| `unio symbol`, `unio outline`, `unio explain` | Context for people and AI | `--json` |
 
-### 6.2 Форматтер
+### 6.2 Formatter
 
-- И-1. Один стиль без настроек. Результат форматирования идемпотентен.
-- И-2. Форматтер сохраняет комментарии и не меняет семантику; это проверяется тестом «AST до = AST после».
-- И-3. Время форматирования файла в 1000 строк — не более 50 мс.
+- T-1. One style, no settings. Formatting is idempotent.
+- T-2. The formatter preserves comments and does not change semantics; verified by an "AST before = AST after" test.
+- T-3. Formatting a 1,000-line file takes at most 50 ms.
 
-### 6.3 Тестирование
+### 6.3 Testing
 
-- И-4. Тесты из блоков `test` запускаются изолированно, результат в текстовом и JSON виде с именем, статусом, временем, выводом.
-- И-5. Тесты могут проверять аварии через `expect_fault`.
+- T-4. Tests from `test` blocks run in isolation; results in text and JSON with name, status, time, and output.
+- T-5. Tests can check faults with `expect_fault`.
 
-### 6.4 Пакеты
+### 6.4 Packages
 
-- И-6. Манифест `unio.toml`: имя, версия (семантическая), зависимости, полномочия (`files`, `network`, `process`, `env`), список `unsafe module`.
-- И-7. `unio.lock` содержит версии и хеши содержимого всех зависимостей. Сборка с lock-файлом не обращается к сети.
-- И-8. Реестр: публикация с подписью, проверка подписи при установке, запрет удаления опубликованных версий.
-- И-9. Установка зависимости с `unsafe module` или полномочиями шире, чем у пакета, требует явного подтверждения.
+- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions (`files`, `network`, `process`, `env`), list of `unsafe module`.
+- T-7. `unio.lock` contains versions and content hashes of all dependencies. A build with a lock file does not touch the network.
+- T-8. Registry: signed publishing, signature verification on install, no deletion of published versions.
+- T-9. Installing a dependency with `unsafe module` or with permissions wider than the package's own requires explicit confirmation.
 
-### 6.5 Редактор
+### 6.5 Editor
 
-- И-10. Языковой сервер по протоколу LSP: диагностика, переход к объявлению, подсказки типов, автодополнение, форматирование, переименование.
-- И-11. Расширение для VS Code с подсветкой и запуском тестов.
+- T-10. Language server over LSP: diagnostics, go to definition, type hints, completion, formatting, rename.
+- T-11. VS Code extension with highlighting and test running.
 
-## 7. Нефункциональные требования
+## 7. Non-functional requirements
 
-### 7.1 Производительность
+### 7.1 Performance
 
-Измеряется набором из эталонных утилит (раздел 9) на Linux x86-64; результаты публикуются с каждым выпуском.
+Measured with the reference utilities (section 9) on Linux x86-64; results are published with each release.
 
-| Показатель | Требование |
+| Metric | Requirement |
 |---|---|
-| `unio check` для пакета в 10 000 строк | не более 1 с |
-| Полная сборка пакета в 10 000 строк (`--release`) | не более 30 с |
-| Время запуска пустой программы | не более 5 мс |
-| Обработка текста и JSON | не медленнее CPython 3.13 более чем в 0,5 раза, цель — быстрее в 3 раза |
-| Пауза GC при куче 100 МБ | не более 10 мс (95-й перцентиль) |
+| `unio check` on a 10,000-line package | at most 1 s |
+| Full `--release` build of a 10,000-line package | at most 30 s |
+| Startup time of an empty program | at most 5 ms |
+| Text and JSON processing | no more than 0.5x slower than CPython 3.13; target 3x faster |
+| GC pause at a 100 MB heap | at most 10 ms (95th percentile) |
 
-Универсальная скорость C не обещается и не измеряется как требование.
+Universal C-level speed is not promised and is not measured as a requirement.
 
-### 7.2 Надёжность
+### 7.2 Reliability
 
-- Н-1. Компилятор не аварийно завершается ни на каком входе: проверяется fuzzing-тестами не менее 24 часов перед выпуском.
-- Н-2. Среда выполнения при нехватке памяти завершает программу с кодом 102 и диагностикой, не повреждая файлы, открытые через `using`.
-- Н-3. Авария внутри `using` освобождает все ресурсы; проверяется тестами на каждой платформе.
+- R-1. The compiler does not crash on any input; verified by fuzzing for at least 24 hours before release.
+- R-2. The runtime, on out-of-memory, exits with code 102 and a diagnostic without corrupting files opened through `using`.
+- R-3. A fault inside `using` releases all resources; verified by tests on every platform.
 
-### 7.3 Безопасность
+### 7.3 Security
 
-- Н-4. Пользовательский код не может обойти проверки границ, типов и ресурсов.
-- Н-5. Весь `external function` код стандартной библиотеки проходит ревью двух человек и тесты с санитайзерами памяти.
-- Н-6. Сборка выпуска воспроизводима, артефакты подписаны, публикуется SBOM.
-- Н-7. Компилятор и менеджер пакетов не выполняют код зависимостей во время сборки.
+- R-4. User code cannot bypass bounds, type, or resource checks.
+- R-5. All `external function` code in the standard library is reviewed by two people and tested with memory sanitizers.
+- R-6. The release build is reproducible, artifacts are signed, an SBOM is published.
+- R-7. The compiler and package manager do not execute dependency code during a build.
 
-### 7.4 Совместимость и платформы
+### 7.4 Compatibility and platforms
 
-- Н-8. Платформы: Linux x86-64, Linux arm64, macOS arm64, Windows x86-64. Все тесты проходят на всех платформах в CI.
-- Н-9. В пределах 0.x возможны несовместимые изменения языка; каждое сопровождается автоматической миграцией в `unio fmt --migrate` либо диагностикой с исправлением.
+- R-8. Platforms: Linux x86-64, Linux arm64, macOS arm64, Windows x86-64. All tests pass on all platforms in CI.
+- R-9. Within 0.x, incompatible language changes are possible; each ships with an automatic migration in `unio fmt --migrate` or a diagnostic with a fix.
 
-### 7.5 Удобство для ИИ
+### 7.5 Fitness for AI
 
-- Н-10. Контрольный набор из 200 программ с внесёнными ошибками (типы, ошибки, ресурсы, стиль). Критерий: агент, получающий только JSON-диагностику, исправляет не менее 80 % за не более чем три итерации.
-- Н-11. Средняя длина сообщения диагностики — не более 200 символов; объяснение — отдельно.
+- R-10. A control set of 200 programs with injected errors (types, errors, resources, style). Criterion: an agent receiving only the JSON diagnostics fixes at least 80% within at most three iterations.
+- R-11. The average diagnostic message is at most 200 characters; the explanation is separate.
 
-## 8. Требования к документации
+## 8. Documentation requirements
 
-- Д-1. Справочник языка: грамматика в EBNF, семантика каждой конструкции, список кодов диагностики.
-- Д-2. Руководство: от установки до публикации пакета, на примере `todo`.
-- Д-3. Справочник стандартной библиотеки, генерируемый из документирующих комментариев.
-- Д-4. Документ «Как Unio работает с ИИ»: форматы JSON, рекомендуемый цикл, примеры промптов.
-- Д-5. Документация на русском и английском языках.
+- D-1. Language reference: grammar in EBNF, semantics of every construct, list of diagnostic codes.
+- D-2. Guide: from installation to publishing a package, using `todo` as the example.
+- D-3. Standard library reference generated from documentation comments.
+- D-4. The document "How Unio works with AI": JSON formats, recommended loop, prompt examples.
+- D-5. Documentation in English (primary) and Russian (localization in `docs/ru`).
 
-## 9. Приёмка
+## 9. Acceptance
 
-### 9.1 Эталонные утилиты
+### 9.1 Reference utilities
 
-Десять программ, покрывающих ядро и стандартную библиотеку; хранятся в репозитории и служат тестами, бенчмарками и материалом для контрольного чтения:
+Ten programs covering the core and the standard library; stored in the repository and serving as tests, benchmarks, and material for the reading trial:
 
-1. `todo` — список задач (пример из концепции).
-2. `wc` — подсчёт строк, слов, байтов.
-3. `grep-lite` — поиск по шаблону в файлах.
-4. `json-query` — выборка из JSON по пути.
-5. `rename` — массовое переименование файлов.
-6. `env-check` — проверка окружения и версий программ.
-7. `csv-sum` — агрегация столбцов CSV.
-8. `backup` — копирование каталога с фильтрами.
-9. `log-tail` — чтение и фильтрация журналов.
-10. `release-notes` — генерация заметок к выпуску из истории git через `std.process`.
+1. `todo`: task list (the example from the concept).
+2. `wc`: count lines, words, bytes.
+3. `grep-lite`: pattern search in files.
+4. `json-query`: selection from JSON by path.
+5. `rename`: bulk file renaming.
+6. `env-check`: check environment and program versions.
+7. `csv-sum`: aggregate CSV columns.
+8. `backup`: copy a directory with filters.
+9. `log-tail`: read and filter logs.
+10. `release-notes`: generate release notes from git history via `std.process`.
 
-### 9.2 Порядок приёмки
+### 9.2 Acceptance procedure
 
-1. Все тесты компилятора, среды выполнения, библиотеки и инструментов проходят на четырёх платформах.
-2. Эталонные утилиты собираются, тесты проходят, результаты производительности соответствуют 7.1.
-3. Проведены испытания из 1.4 (читаемость, исправление ошибок ИИ) с опубликованной методикой.
-4. Fuzzing по Н-1 выполнен, найденные дефекты устранены.
-5. Документация по разделу 8 опубликована.
+1. All compiler, runtime, library, and tooling tests pass on four platforms.
+2. The reference utilities build, their tests pass, performance results meet 7.1.
+3. The trials of 1.4 (readability, AI error fixing) are conducted with a published methodology.
+4. Fuzzing per R-1 is complete and found defects are fixed.
+5. Documentation per section 8 is published.
 
-## 10. Ограничения и допущения
+## 10. Constraints and assumptions
 
-- Язык реализации компилятора 0.1 — Rust; генерация кода через Cranelift. Переход на LLVM или самостоятельную реализацию рассматривается после 0.1.
-- Решения по языку принимаются через RFC в `docs/rfcs/`; ТЗ обновляется при принятии RFC.
-- Вопросы, открытые в первой версии концепции, закрыты в `docs/concept.md`, разделы 10–11. Их пересмотр возможен только через RFC.
+- The implementation language of the 0.1 compiler is Rust; code generation through Cranelift. Moving to LLVM or a self-hosted implementation is considered after 0.1.
+- Language decisions are made through RFCs in `docs/rfcs/`; the specification is updated when an RFC is accepted.
+- The questions left open in the first version of the concept are settled in `docs/concept.md`, sections 10–11. Revisiting them is possible only through an RFC.
