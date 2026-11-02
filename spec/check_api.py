@@ -198,14 +198,45 @@ def check_program(path, grammar, api, problems):
             module = ".".join(names_in(mod_node[1])) if not isinstance(mod_node, cg.Token) else mod_node.value
             for name in names_in(kids[3:]):
                 imported[name] = module
+    # A module of the same package: a file next to the program (rule L-22).
+    modules = dict(modules)
+    lib_types = set(lib_types)
+    lib_variants = {k: set(v) for k, v in lib_variants.items()}
+    for module in set(aliases.values()) | set(imported.values()):
+        if module in modules:
+            continue
+        local = os.path.join(os.path.dirname(path), *module.split(".")) + ".unio"
+        if not os.path.exists(local):
+            continue
+        local_tree, local_err = cg.check_source(open(local, encoding="utf-8").read(), grammar, True)
+        if local_err:
+            problems.append(f"{local}: does not parse: line {local_err[1]}: {local_err[3]}")
+            continue
+        public = set()
+        for rule, kids in top_items(local_tree):
+            if rule == "declaration" and is_public(kids):
+                inner = kids[1]
+                if inner[0] in ("function_decl", "external_decl"):
+                    public.add(signature_name(inner))
+                else:
+                    _f, t, v = declarations(("x", [inner]))
+                    public |= t
+                    lib_types |= t
+                    for k, vs in v.items():
+                        lib_variants.setdefault(k, set()).update(vs)
+            elif rule == "extend_decl":
+                for k in kids:
+                    if not isinstance(k, cg.Token) and k[0] == "member":
+                        methods = methods | {signature_name(k)}
+        modules[module] = public
     for alias, module in aliases.items():
         if module not in modules:
-            problems.append(f"{path}: module {module} is not in stdlib/")
+            problems.append(f"{path}: module {module} is not in stdlib/ or in the package")
     for name, module in imported.items():
         if module not in modules:
-            problems.append(f"{path}: module {module} is not in stdlib/")
+            problems.append(f"{path}: module {module} is not in stdlib/ or in the package")
         elif name not in modules[module] and name not in lib_types:
-            problems.append(f"{path}: {module}.{name} is not in stdlib/")
+            problems.append(f"{path}: {module}.{name} is not declared public")
     all_variants = {}
     for src in (own_variants, lib_variants):
         for enum, vs in src.items():

@@ -1,0 +1,774 @@
+## The Unio core grammar as data: reading spec/grammar.ebnf, the lexer of its section L, and an
+## ordered-choice parser with memoization that interprets the EBNF rules directly.
+##
+## This module is the Unio version of spec/check_grammar.py. The EBNF file stays the single source
+## of the grammar; the keyword and punctuation lists are read from the comments of section L.
+
+import std.files
+from std.text import join
+
+## Token classes that the lexer produces instead of EBNF rules.
+public let TOKEN_CLASSES as List[Text] = ["NAME", "INT", "FLOAT", "TEXT", "NEWLINE", "INDENT", "DEDENT", "EOF"]
+
+## Lexical rules written in the EBNF for people; the lexer implements them, so they are not interpreted.
+let LEXICAL_RULES as List[Text] = ["letter", "digit", "decimal_int", "exponent", "hex_digit", "text_char", "escape", "interpolation", "NAME", "INT", "FLOAT", "TEXT", "NEWLINE", "INDENT", "DEDENT", "EOF"]
+
+let LETTERS as Text = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+let UPPER_LETTERS as Text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+let DECIMAL_DIGITS as Text = "0123456789"
+
+let HEX_DIGITS as Text = "0123456789abcdefABCDEF"
+
+let ESCAPES as List[Text] = ["n", "t", "r", "0", "\\", "\"", "\{", "\}"]
+
+let OPENING as List[Text] = ["(", "[", "\{"]
+
+let CLOSING as List[Text] = [")", "]", "\}"]
+
+
+# ---------------------------------------------------------------- data
+
+## A rule body. A group ( ... ) is represented by its content.
+public enum Node:
+    Terminal(text as Text)
+    Reference(name as Text)
+    Sequence(items as List[Node])
+    Choice(options as List[Node])
+    Optional(item as Node)
+    Repeat(item as Node)
+
+## The syntactic rules of the grammar and the word lists of section L.
+public struct Grammar:
+    rules as Map[Text, Node]
+    order as List[Text]
+    keywords as List[Text]
+    reserved as List[Text]
+    punctuation as List[Text]
+
+public error GrammarError:
+    message as Text
+
+## A token. kind is a class from TOKEN_CLASSES, a keyword, or a punctuation mark; parts holds the
+## tokens of each interpolation of a TEXT token.
+public struct Token:
+    kind as Text
+    value as Text
+    line as Int
+    column as Int
+    parts as List[List[Token]] = []
+
+## A parse tree: a token, or a rule with the trees of what it matched.
+public enum Tree:
+    Leaf(token as Token)
+    Branch(rule as Text, children as List[Tree])
+
+public error LexError:
+    code as Text
+    message as Text
+    line as Int
+    column as Int
+
+## The first error in a source: a lexical code such as "E0001", or "syntax".
+public struct Problem:
+    code as Text
+    line as Int
+    column as Int
+    message as Text
+
+public struct CheckResult:
+    tree as Option[Tree]
+    problem as Option[Problem]
+
+## The rule name of a branch; "" for a leaf.
+public function rule_of(tree as Tree) returns Text:
+    match tree:
+        case Tree.Branch(rule, _):
+            return rule
+        case Tree.Leaf(_):
+            return ""
+
+## The tree of a check, or an empty file tree when the source has an error.
+public function tree_of(result as CheckResult) returns Tree:
+    return result.tree or Tree.Branch(rule = "file", children = [])
+
+## The children of a branch; [] for a leaf.
+public function children_of(tree as Tree) returns List[Tree]:
+    match tree:
+        case Tree.Branch(_, children):
+            return children
+        case Tree.Leaf(_):
+            return []
+
+## The token of a leaf; none for a branch.
+public function token_of(tree as Tree) returns Option[Token]:
+    match tree:
+        case Tree.Leaf(token):
+            return some(token)
+        case Tree.Branch(_, _):
+            return none
+
+
+# ---------------------------------------------------------------- reading the EBNF
+
+struct EbnfToken:
+    kind as Text
+    value as Text
+
+struct BodyReader:
+    name as Text
+    tokens as List[EbnfToken]
+    var position as Int = 0
+
+## Reads the grammar from a file such as spec/grammar.ebnf. Permission: files.read.
+public function read_grammar(path as Path) returns Grammar fails with GrammarError:
+    let source = try files.read_text(path) on IoError as e:
+        fail GrammarError(message = "{path}: {e.reason}")
+    return try load_grammar(source) on GrammarError as e:
+        fail GrammarError(message = "{path}: {e.message}")
+
+## Reads the grammar from the text of spec/grammar.ebnf.
+public function load_grammar(source as Text) returns Grammar fails with GrammarError:
+    let keywords = try read_word_list(source, "requires an RFC):", "Reserved")
+    let reserved = try read_word_list(source, "(using them is E0032):", "Punctuation")
+    let punctuation = try read_word_list(source, "Punctuation and operators:", "*)")
+    let tokens = try tokenize_ebnf(strip_comments(source))
+    var rules as Map[Text, Node] = {}
+    var order as List[Text] = []
+    var index = 0
+    while index < tokens.length():
+        let head = tokens[index]
+        if head.kind != "N" or index + 1 >= tokens.length() or tokens[index + 1].kind != "=":
+            fail GrammarError(message = "expected a rule name and '=' at {head.value}")
+        let name = head.value
+        var end = index + 2
+        while end < tokens.length() and tokens[end].kind != ";":
+            end = end + 1
+        if end >= tokens.length():
+            fail GrammarError(message = "rule {name}: missing ';'")
+        if name in order:
+            fail GrammarError(message = "rule {name} defined twice")
+        order.append(name)
+        if name not in LEXICAL_RULES:
+            var reader = BodyReader(name = name, tokens = tokens.slice(index + 2, end))
+            let body = try parse_choice(reader)
+            if reader.position != reader.tokens.length():
+                fail GrammarError(message = "rule {name}: trailing tokens")
+            rules.put(name, body)
+        index = end + 1
+    return Grammar(rules = rules, order = order, keywords = keywords, reserved = reserved, punctuation = punctuation)
+
+## The words between two markers inside the comments of the grammar.
+function read_word_list(source as Text, start as Text, end as Text) returns List[Text] fails with GrammarError:
+    match source.index_of(start):
+        case some(first):
+            match source.index_of(end, start = first):
+                case some(last):
+                    return source.slice(first + start.length(), last).split_whitespace()
+                case none:
+                    fail GrammarError(message = "missing \"{end}\" after \"{start}\"")
+        case none:
+            fail GrammarError(message = "missing \"{start}\" in the grammar")
+
+## The text with every (* comment *) replaced by a space.
+function strip_comments(source as Text) returns Text:
+    var result = ""
+    var start = 0
+    while true:
+        match source.index_of("(*", start = start):
+            case some(open):
+                match source.index_of("*)", start = open + 2):
+                    case some(close):
+                        result = result + source.slice(start, open) + " "
+                        start = close + 2
+                    case none:
+                        return result + source.slice(start, source.length())
+            case none:
+                return result + source.slice(start, source.length())
+
+function tokenize_ebnf(source as Text) returns List[EbnfToken] fails with GrammarError:
+    let characters = source.chars()
+    var tokens as List[EbnfToken] = []
+    var position = 0
+    while position < characters.length():
+        let character = characters[position]
+        if character.trim().is_empty():
+            position = position + 1
+        else if character == "\"" or character == "'":
+            var end = position + 1
+            while end < characters.length() and characters[end] != character:
+                end = end + 1
+            if end >= characters.length():
+                fail GrammarError(message = "unterminated terminal in EBNF")
+            tokens.append(EbnfToken(kind = "T", value = source.slice(position + 1, end)))
+            position = end + 1
+        else if is_letter(character) or character == "_":
+            var end = position
+            while end < characters.length() and is_name_character(characters[end]):
+                end = end + 1
+            tokens.append(EbnfToken(kind = "N", value = source.slice(position, end)))
+            position = end
+        else if source.slice(position, min(position + 3, characters.length())) == "...":
+            tokens.append(EbnfToken(kind = "...", value = "..."))
+            position = position + 3
+        else if character in ["|", "[", "]", "\{", "\}", "(", ")", "=", ";"]:
+            tokens.append(EbnfToken(kind = character, value = character))
+            position = position + 1
+        else:
+            fail GrammarError(message = "unexpected character '{character}' in EBNF")
+    return tokens
+
+function parse_choice(var reader as BodyReader) returns Node fails with GrammarError:
+    var options as List[Node] = [try parse_sequence(reader)]
+    while reader.position < reader.tokens.length() and reader.tokens[reader.position].kind == "|":
+        reader.position = reader.position + 1
+        options.append(try parse_sequence(reader))
+    if options.length() == 1:
+        return options[0]
+    return Node.Choice(options = options)
+
+function parse_sequence(var reader as BodyReader) returns Node fails with GrammarError:
+    var items as List[Node] = []
+    while reader.position < reader.tokens.length() and reader.tokens[reader.position].kind not in ["|", "]", "\}", ")"]:
+        let token = reader.tokens[reader.position]
+        reader.position = reader.position + 1
+        if token.kind == "T":
+            items.append(Node.Terminal(text = token.value))
+        else if token.kind == "N":
+            items.append(Node.Reference(name = token.value))
+        else if token.kind in ["[", "\{", "("]:
+            let inner = try parse_choice(reader)
+            let close = closing_of(token.kind)
+            if reader.position >= reader.tokens.length() or reader.tokens[reader.position].kind != close:
+                fail GrammarError(message = "rule {reader.name}: missing {close}")
+            reader.position = reader.position + 1
+            if token.kind == "[":
+                items.append(Node.Optional(item = inner))
+            else if token.kind == "\{":
+                items.append(Node.Repeat(item = inner))
+            else:
+                items.append(inner)
+        else:
+            fail GrammarError(message = "rule {reader.name}: unexpected {token.value}")
+    if items.length() == 1:
+        return items[0]
+    return Node.Sequence(items = items)
+
+function closing_of(open as Text) returns Text:
+    match OPENING.find_index(function (candidate as Text) returns Bool: candidate == open):
+        case some(index):
+            return CLOSING[index]
+        case none:
+            return ""
+
+
+# ---------------------------------------------------------------- consistency of the grammar
+
+## Problems of the grammar itself: undefined or unreachable rules, and terminals that do not match
+## the keyword and punctuation lists. An empty list means the grammar is consistent.
+public function self_check(language as Grammar) returns List[Text]:
+    var problems as List[Text] = []
+    var used_rules as List[Text] = []
+    var terms as List[Text] = []
+    for _, node in language.rules.entries():
+        collect(node, used_rules, terms)
+    for name in used_rules.sorted():
+        if name not in language.rules and name not in TOKEN_CLASSES:
+            problems.append("rule {name} is used but not defined")
+    let reachable = reachable_rules(language)
+    for name in language.order:
+        if name in language.rules and name not in reachable:
+            problems.append("rule {name} is not reachable from file")
+    let words = [term for term in terms if is_word(term, false)]
+    for word in words.sorted():
+        if word not in language.keywords:
+            problems.append("terminal '{word}' is not in the keyword list")
+    for keyword in language.keywords.sorted():
+        if keyword not in words:
+            problems.append("keyword '{keyword}' is not used by any rule")
+    let symbols = [term for term in terms if not is_word(term, true)]
+    for symbol in symbols.sorted():
+        if symbol not in language.punctuation:
+            problems.append("terminal '{symbol}' is not in the punctuation list")
+    for mark in language.punctuation.sorted():
+        if mark not in symbols:
+            problems.append("punctuation '{mark}' is not used by any rule")
+    for keyword in language.keywords:
+        if keyword in language.reserved:
+            problems.append("a word is both a keyword and reserved")
+            break
+    return problems
+
+## Adds the rule names and terminals used by the node, each once.
+function collect(node as Node, var used_rules as List[Text], var terms as List[Text]):
+    match node:
+        case Node.Terminal(text):
+            if text not in terms:
+                terms.append(text)
+        case Node.Reference(name):
+            if name not in used_rules:
+                used_rules.append(name)
+        case Node.Sequence(items):
+            for item in items:
+                collect(item, used_rules, terms)
+        case Node.Choice(options):
+            for option in options:
+                collect(option, used_rules, terms)
+        case Node.Optional(item):
+            collect(item, used_rules, terms)
+        case Node.Repeat(item):
+            collect(item, used_rules, terms)
+
+function reachable_rules(language as Grammar) returns List[Text]:
+    var reachable as List[Text] = []
+    var pending = ["file"]
+    while not pending.is_empty():
+        let name = pending.remove_last() or ""
+        if name in reachable or name not in language.rules:
+            continue
+        reachable.append(name)
+        var used as List[Text] = []
+        var ignored as List[Text] = []
+        collect(language.rules.get(name) or Node.Sequence(items = []), used, ignored)
+        pending.append_all(used)
+    return reachable
+
+## Whether the text consists only of ASCII letters (and "_" when underscore is true).
+function is_word(text as Text, underscore as Bool) returns Bool:
+    if text.is_empty():
+        return false
+    for character in text.chars():
+        if not is_letter(character) and not (underscore and character == "_"):
+            return false
+    return true
+
+
+# ---------------------------------------------------------------- lexer
+
+struct Bracket:
+    text as Text
+    line as Int
+    column as Int
+
+struct Lexer:
+    characters as List[Text]
+    keywords as List[Text]
+    reserved as List[Text]
+    punctuation as List[Text]
+    var position as Int = 0
+    var line as Int = 1
+    var column as Int = 1
+
+## The tokens of a whole source file, with NEWLINE, INDENT and DEDENT.
+public function tokenize(source as Text, language as Grammar) returns List[Token] fails with LexError:
+    var lexer = Lexer(characters = source.chars(), keywords = language.keywords, reserved = language.reserved, punctuation = longest_first(language.punctuation))
+    return try lexer.tokens()
+
+## The marks ordered by decreasing length, keeping the order of marks of equal length.
+function longest_first(marks as List[Text]) returns List[Text]:
+    var longest = 0
+    for mark in marks:
+        if mark.length() > longest:
+            longest = mark.length()
+    var ordered as List[Text] = []
+    for offset in range(0, longest):
+        ordered.append_all(marks.filter(function (mark as Text) returns Bool: mark.length() == longest - offset))
+    return ordered
+
+extend Lexer:
+    function peek(self, offset as Int = 0) returns Text:
+        return self.characters.get(self.position + offset) or ""
+
+    function advance(var self, count as Int = 1):
+        for _ in range(0, count):
+            if self.peek() == "\n":
+                self.line = self.line + 1
+                self.column = 1
+            else:
+                self.column = self.column + 1
+            self.position = self.position + 1
+
+    function starts_with_here(self, text as Text) returns Bool:
+        for index, character in text.chars().enumerate():
+            if self.peek(index) != character:
+                return false
+        return true
+
+    function tokens(var self) returns List[Token] fails with LexError:
+        var out as List[Token] = []
+        var levels = [0]
+        while self.position < self.characters.length():
+            let start_line = self.line
+            var width = 0
+            while self.peek() in [" ", "\t"]:
+                if self.peek() == "\t":
+                    fail LexError(code = "E0001", message = "tab in indentation", line = self.line, column = self.column)
+                width = width + 1
+                self.advance()
+            if self.peek() in ["\n", "\r", "#", ""]:
+                self.skip_rest_of_line()
+                continue
+            if width % 4 != 0:
+                fail LexError(code = "E0002", message = "indentation is not a multiple of 4 spaces", line = start_line, column = 1)
+            let current = levels[levels.length() - 1]
+            if width > current:
+                if width != current + 4:
+                    fail LexError(code = "E0003", message = "indentation grows by more than one level", line = start_line, column = 1)
+                if out.length() < 2 or out[out.length() - 2].kind != ":":
+                    fail LexError(code = "E0003", message = "unexpected indentation: the previous line does not end with ':'", line = start_line, column = 1)
+                levels.append(width)
+                out.append(Token(kind = "INDENT", value = "", line = self.line, column = 1))
+            else:
+                while width < levels[levels.length() - 1]:
+                    levels.remove_last()
+                    out.append(Token(kind = "DEDENT", value = "", line = self.line, column = 1))
+            try self.logical_line(out)
+        while levels.length() > 1:
+            levels.remove_last()
+            out.append(Token(kind = "DEDENT", value = "", line = self.line, column = 1))
+        out.append(Token(kind = "EOF", value = "", line = self.line, column = self.column))
+        return out
+
+    function skip_rest_of_line(var self):
+        while self.peek() not in ["\n", ""]:
+            self.advance()
+        if self.peek() == "\n":
+            self.advance()
+
+    function logical_line(var self, var out as List[Token]) fails with LexError:
+        var depth as List[Bracket] = []
+        while true:
+            let character = self.peek()
+            if character == "":
+                match depth.last():
+                    case some(open):
+                        fail LexError(code = "E0009", message = "unclosed '{open.text}'", line = open.line, column = open.column)
+                    case none:
+                        break
+            if character in [" ", "\t"]:
+                self.advance()
+                continue
+            if character == "\r" and self.peek(1) == "\n":
+                self.advance()
+                continue
+            if character == "#":
+                while self.peek() not in ["\n", ""]:
+                    self.advance()
+                continue
+            if character == "\n":
+                self.advance()
+                if not depth.is_empty():
+                    continue
+                break
+            out.append(try self.token(depth))
+        out.append(Token(kind = "NEWLINE", value = "", line = self.line, column = self.column))
+
+    function token(var self, var depth as List[Bracket]) returns Token fails with LexError:
+        let line = self.line
+        let column = self.column
+        let character = self.peek()
+        if is_letter(character) or character == "_":
+            var word = ""
+            while is_name_character(self.peek()):
+                word = word + self.peek()
+                self.advance()
+            if word in self.reserved:
+                fail LexError(code = "E0032", message = "'{word}' is reserved for a later release", line = line, column = column)
+            let kind = word if word in self.keywords else "NAME"
+            return Token(kind = kind, value = word, line = line, column = column)
+        if is_digit(character):
+            return try self.number(line, column)
+        if character == "\"":
+            return try self.text_literal(line, column)
+        for mark in self.punctuation:
+            if self.starts_with_here(mark):
+                self.advance(mark.length())
+                if mark in OPENING:
+                    depth.append(Bracket(text = mark, line = line, column = column))
+                else if mark in CLOSING:
+                    match depth.last():
+                        case some(open):
+                            if closing_of(open.text) != mark:
+                                fail LexError(code = "E0010", message = "'{mark}' does not match '{open.text}'", line = line, column = column)
+                            depth.remove_last()
+                        case none:
+                            fail LexError(code = "E0010", message = "unmatched '{mark}'", line = line, column = column)
+                return Token(kind = mark, value = mark, line = line, column = column)
+        let code = character.code_points().first() or 0
+        if code > 127 or code < 32 or code == 127:
+            fail LexError(code = "E0007", message = "invalid character '{character}'", line = line, column = column)
+        fail LexError(code = "E0007", message = "unexpected character '{character}'", line = line, column = column)
+
+    function number(var self, line as Int, column as Int) returns Token fails with LexError:
+        let start = self.position
+        var end = start
+        var kind = "INT"
+        if self.peek() == "0" and self.peek(1) == "x" and is_in(self.peek(2), HEX_DIGITS):
+            end = self.scan(start + 2, HEX_DIGITS + "_")
+        else if self.peek() == "0" and self.peek(1) == "b" and self.peek(2) in ["0", "1"]:
+            end = self.scan(start + 2, "01_")
+        else:
+            end = self.scan(start, DECIMAL_DIGITS + "_")
+            if self.at(end) == "." and is_digit(self.at(end + 1)):
+                kind = "FLOAT"
+                end = self.scan(end + 1, DECIMAL_DIGITS + "_")
+                end = self.exponent_end(end)
+            else if self.exponent_end(end) > end:
+                kind = "FLOAT"
+                end = self.exponent_end(end)
+        let word = join(self.characters.slice(start, end), "")
+        let after = self.at(end)
+        if is_name_character(after):
+            fail LexError(code = "E0008", message = "invalid number literal starting with '{word}'", line = line, column = column)
+        self.advance(end - start)
+        return Token(kind = kind, value = word, line = line, column = column)
+
+    ## The character at an absolute position, or "" past the end.
+    function at(self, position as Int) returns Text:
+        return self.characters.get(position) or ""
+
+    ## The first position at or after start whose character is not in allowed.
+    function scan(self, start as Int, allowed as Text) returns Int:
+        var end = start
+        while is_in(self.at(end), allowed):
+            end = end + 1
+        return end
+
+    ## The end of an exponent such as e+10 that starts at position, or position if there is none.
+    function exponent_end(self, position as Int) returns Int:
+        if self.at(position) not in ["e", "E"]:
+            return position
+        var next = position + 1
+        if self.at(next) in ["+", "-"]:
+            next = next + 1
+        if not is_digit(self.at(next)):
+            return position
+        return self.scan(next, DECIMAL_DIGITS + "_")
+
+    function text_literal(var self, line as Int, column as Int) returns Token fails with LexError:
+        self.advance()
+        var parts as List[List[Token]] = []
+        while true:
+            let character = self.peek()
+            if character in ["", "\n"]:
+                fail LexError(code = "E0005", message = "unterminated text literal", line = line, column = column)
+            if character == "\"":
+                self.advance()
+                return Token(kind = "TEXT", value = "", line = line, column = column, parts = parts)
+            if character == "\\":
+                let next = self.peek(1)
+                if next == "u" and self.peek(2) == "\{":
+                    let digits = self.scan(self.position + 3, HEX_DIGITS) - (self.position + 3)
+                    if digits < 1 or digits > 6 or self.peek(3 + digits) != "\}":
+                        fail LexError(code = "E0006", message = "invalid \\u\{...\} escape", line = self.line, column = self.column)
+                    self.advance(4 + digits)
+                    continue
+                if next not in ESCAPES:
+                    fail LexError(code = "E0006", message = "invalid escape sequence '\\{next}'", line = self.line, column = self.column)
+                self.advance(2)
+                continue
+            if character == "\}":
+                fail LexError(code = "E0011", message = "'\}' in text must be written as '\\\}'", line = self.line, column = self.column)
+            if character == "\{":
+                parts.append(try self.interpolation())
+                continue
+            self.advance()
+
+    ## The tokens of one interpolation; the lexer stands on its "{".
+    function interpolation(var self) returns List[Token] fails with LexError:
+        let line = self.line
+        let column = self.column
+        self.advance()
+        var tokens as List[Token] = []
+        var depth = [Bracket(text = "\{", line = line, column = column)]
+        while true:
+            while self.peek() == " ":
+                self.advance()
+            let character = self.peek()
+            if character in ["", "\n"]:
+                fail LexError(code = "E0011", message = "unterminated interpolation", line = line, column = column)
+            if character == "\}" and depth.length() == 1:
+                self.advance()
+                break
+            tokens.append(try self.token(depth))
+        if tokens.is_empty():
+            fail LexError(code = "E0011", message = "empty interpolation", line = line, column = column)
+        return tokens
+
+function is_letter(character as Text) returns Bool:
+    return character.length() == 1 and LETTERS.contains(character)
+
+function is_digit(character as Text) returns Bool:
+    return character.length() == 1 and DECIMAL_DIGITS.contains(character)
+
+function is_name_character(character as Text) returns Bool:
+    return is_letter(character) or is_digit(character) or character == "_"
+
+## Whether the text is one character that occurs in allowed.
+function is_in(character as Text, allowed as Text) returns Bool:
+    return character.length() == 1 and allowed.contains(character)
+
+function min(a as Int, b as Int) returns Int:
+    return a if a < b else b
+
+
+# ---------------------------------------------------------------- parser
+
+struct Match:
+    end as Int
+    children as List[Tree]
+
+struct InterpolationError:
+    line as Int
+    column as Int
+    expected as List[Text]
+
+## Ordered choice over the EBNF rules, memoized per rule and position.
+struct Parser:
+    rules as Map[Text, Node]
+    tokens as List[Token]
+    build_tree as Bool
+    var results as Map[Text, Match] = {}
+    var failed as Map[Text, Bool] = {}
+    var farthest as Int = 0
+    var expected as List[Text] = []
+    var interpolation_errors as List[InterpolationError] = []
+
+extend Parser:
+    function note(var self, position as Int, what as Text):
+        if position > self.farthest:
+            self.farthest = position
+            self.expected = [what]
+        else if position == self.farthest and what not in self.expected:
+            self.expected.append(what)
+
+    ## The tree of the whole token list as the start rule; none if it does not match all of it.
+    function parse(var self, start as Text) returns Option[Tree]:
+        match self.rule(start, 0):
+            case some(found):
+                if found.end != self.tokens.length():
+                    self.note(found.end, "end of input")
+                    return none
+                return some(found.children.first() or Tree.Branch(rule = start, children = []))
+            case none:
+                return none
+
+    function rule(var self, name as Text, position as Int) returns Option[Match]:
+        let key = "{name}@{position}"
+        if key in self.failed:
+            return none
+        if key in self.results:
+            return self.results.get(key)
+        self.failed.put(key, true)
+        let node = self.rules.get(name) or Node.Sequence(items = [])
+        match self.match_node(node, position):
+            case some(found):
+                if name == "generic_call" and not self.generic_allowed(position):
+                    return none
+                let children = [Tree.Branch(rule = name, children = found.children)] if self.build_tree else []
+                let result = Match(end = found.end, children = children)
+                self.failed.remove(key)
+                self.results.put(key, result)
+                return some(result)
+            case none:
+                return none
+
+    ## Prose rule of generic_call: "[" starts generic arguments only before a NAME with an upper-case first letter.
+    function generic_allowed(self, position as Int) returns Bool:
+        match self.tokens.get(position + 1):
+            case some(next):
+                return next.kind == "NAME" and is_in(next.value.slice(0, 1), UPPER_LETTERS)
+            case none:
+                return false
+
+    function leaf(self, token as Token, position as Int) returns Match:
+        return Match(end = position + 1, children = [Tree.Leaf(token = token)] if self.build_tree else [])
+
+    function match_node(var self, node as Node, position as Int) returns Option[Match]:
+        match node:
+            case Node.Terminal(text):
+                match self.tokens.get(position):
+                    case some(token) if token.kind == text or (text == "_" and token.kind == "NAME" and token.value == "_"):
+                        return some(self.leaf(token, position))
+                    case _:
+                        self.note(position, "'{text}'")
+                        return none
+            case Node.Reference(name):
+                if name not in TOKEN_CLASSES:
+                    return self.rule(name, position)
+                match self.tokens.get(position):
+                    case some(token) if token.kind == name:
+                        if name == "TEXT" and not self.check_text(token):
+                            return none
+                        return some(self.leaf(token, position))
+                    case _:
+                        self.note(position, name)
+                        return none
+            case Node.Sequence(items):
+                var end = position
+                var children as List[Tree] = []
+                for item in items:
+                    match self.match_node(item, end):
+                        case some(found):
+                            end = found.end
+                            children.append_all(found.children)
+                        case none:
+                            return none
+                return some(Match(end = end, children = children))
+            case Node.Choice(options):
+                for option in options:
+                    match self.match_node(option, position):
+                        case some(found):
+                            return some(found)
+                        case none:
+                            continue
+                return none
+            case Node.Optional(item):
+                return some(self.match_node(item, position) or Match(end = position, children = []))
+            case Node.Repeat(item):
+                var end = position
+                var children as List[Tree] = []
+                while true:
+                    match self.match_node(item, end):
+                        case some(found) if found.end != end:
+                            end = found.end
+                            children.append_all(found.children)
+                        case _:
+                            return some(Match(end = end, children = children))
+
+    ## Each interpolation of a TEXT token must be a complete expression.
+    function check_text(var self, token as Token) returns Bool:
+        for part in token.parts:
+            var inner = Parser(rules = self.rules, tokens = part, build_tree = self.build_tree)
+            match inner.parse("expression"):
+                case some(_):
+                    continue
+                case none:
+                    let bad = part[min(inner.farthest, part.length() - 1)]
+                    self.interpolation_errors.append(InterpolationError(line = bad.line, column = bad.column, expected = inner.expected.sorted()))
+                    return false
+        return true
+
+
+# ---------------------------------------------------------------- checking a source
+
+## The parse tree of a source, or its first error. build_tree = false checks only.
+public function check_source(source as Text, language as Grammar, build_tree as Bool = false) returns CheckResult:
+    let text = source.slice(1, source.length()) if source.starts_with("\u{FEFF}") else source
+    let tokens = try tokenize(text, language) on LexError as e:
+        return CheckResult(tree = none, problem = some(Problem(code = e.code, line = e.line, column = e.column, message = e.message)))
+    var parser = Parser(rules = language.rules, tokens = tokens, build_tree = build_tree)
+    match parser.parse("file"):
+        case some(tree):
+            return CheckResult(tree = some(tree), problem = none)
+        case none:
+            let token = tokens[min(parser.farthest, tokens.length() - 1)]
+            match parser.interpolation_errors.last():
+                case some(inner) if token.kind == "TEXT":
+                    let message = "in interpolation: expected " + join(inner.expected, ", ")
+                    return CheckResult(tree = none, problem = some(Problem(code = "syntax", line = inner.line, column = inner.column, message = message)))
+                case _:
+                    let found = token.kind if token.kind in TOKEN_CLASSES else "'{token.value}'"
+                    let message = "expected {join(parser.expected.sorted(), ", ")}; found {found}"
+                    return CheckResult(tree = none, problem = some(Problem(code = "syntax", line = token.line, column = token.column, message = message)))

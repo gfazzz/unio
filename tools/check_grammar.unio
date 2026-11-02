@@ -1,0 +1,201 @@
+## Checks Unio programs against the core grammar in spec/grammar.ebnf.
+##
+## Usage (from the root of the repository):
+##     check_grammar FILE...          check files, report the first error of each
+##     check_grammar --corpus [DIR]   check spec/tests: valid/ must parse, invalid/ must fail
+##                                    where the first line "# expect-error: LINE [CODE]" says
+##     check_grammar --self-check     check the grammar file for consistency
+##
+## Exit code: 0 if everything passed, 1 if a check failed, 2 if the grammar cannot be read.
+## This is the Unio version of spec/check_grammar.py, which it replaces once the interpreter runs.
+
+import std.args
+import std.files
+import grammar
+
+let GRAMMAR_PATH as Text = "spec/grammar.ebnf"
+
+let DEFAULT_CORPUS as Text = "spec/tests"
+
+let USAGE as Text = "Usage: check_grammar FILE... | --corpus [DIR] | --self-check"
+
+## The expected first error of a file in the invalid corpus. code is "" when only the line is given.
+struct Expectation:
+    line as Int
+    code as Text
+
+error SetupError:
+    message as Text
+
+public function main() returns Int:
+    let arguments = args.list()
+    if arguments.is_empty() or arguments[0] in ["-h", "--help"]:
+        print(USAGE)
+        return 0
+    let language = try load() on SetupError as e:
+        print_error(e.message)
+        return 2
+    if arguments[0] == "--self-check":
+        let problems = grammar.self_check(language)
+        for problem in problems:
+            print("grammar: {problem}")
+        if problems.is_empty():
+            print("grammar is consistent")
+            return 0
+        print("{problems.length()} problem(s)")
+        return 1
+    if arguments[0] == "--corpus":
+        let problems = grammar.self_check(language)
+        for problem in problems:
+            print("grammar: {problem}")
+        let root = Path(arguments[1]) if arguments.length() > 1 else Path(DEFAULT_CORPUS)
+        let passed = run_corpus(root, language)
+        return 0 if passed and problems.is_empty() else 1
+    var status = 0
+    for name in arguments:
+        let source = try files.read_text(Path(name)) on IoError as e:
+            print("{name}: {e.reason}")
+            status = 1
+            continue
+        match grammar.check_source(source, language).problem:
+            case some(problem):
+                status = 1
+                print("{name}:{problem.line}:{problem.column}: {problem.code}: {problem.message}")
+            case none:
+                print("{name}: ok")
+    return status
+
+function load() returns grammar.Grammar fails with SetupError:
+    return try grammar.read_grammar(Path(GRAMMAR_PATH)) on grammar.GrammarError as e:
+        fail SetupError(message = e.message)
+
+## Checks valid/ and invalid/ under the root and prints one line per file; true if all passed.
+function run_corpus(root as Path, language as grammar.Grammar) returns Bool:
+    var count = 0
+    var failures = 0
+    for kind in ["valid", "invalid"]:
+        for path in unio_files(root.join(kind)):
+            let name = relative(path, root)
+            count = count + 1
+            let source = try files.read_text(path) on IoError as e:
+                failures = failures + 1
+                print("FAIL {name}: {e.reason}")
+                continue
+            let outcome = grammar.check_source(source, language).problem
+            let verdict = judge(kind, name, source, outcome)
+            if verdict.starts_with("FAIL"):
+                failures = failures + 1
+            print(verdict)
+    print("{count - failures}/{count} passed")
+    return failures == 0
+
+## The report line for one corpus file.
+function judge(kind as Text, name as Text, source as Text, outcome as Option[grammar.Problem]) returns Text:
+    if kind == "valid":
+        match outcome:
+            case some(problem):
+                return "FAIL {name}: {problem.line}:{problem.column}: {problem.code}: {problem.message}"
+            case none:
+                return "ok   {name}"
+    match read_expectation(source):
+        case none:
+            return "FAIL {name}: missing '# expect-error: LINE [CODE]'"
+        case some(expected):
+            match outcome:
+                case none:
+                    return "FAIL {name}: parsed, but an error was expected on line {expected.line}"
+                case some(problem):
+                    if problem.line != expected.line or (not expected.code.is_empty() and problem.code != expected.code):
+                        let wanted = "line {expected.line}" + (" {expected.code}" if not expected.code.is_empty() else "")
+                        return "FAIL {name}: expected {wanted}, got line {problem.line} {problem.code}: {problem.message}"
+                    return "ok   {name} ({problem.code} on line {problem.line})"
+
+## The first line of the form "# expect-error: LINE" or "# expect-error: LINE CODE".
+function read_expectation(source as Text) returns Option[Expectation]:
+    for line in source.lines():
+        if not line.starts_with("# expect-error:"):
+            continue
+        let words = line.slice("# expect-error:".length(), line.length()).split_whitespace()
+        if words.is_empty() or words.length() > 2:
+            continue
+        match words[0].to_int():
+            case some(number):
+                if words.length() == 1:
+                    return some(Expectation(line = number, code = ""))
+                if is_error_code(words[1]):
+                    return some(Expectation(line = number, code = words[1]))
+            case none:
+                continue
+    return none
+
+## E followed by four digits, such as E0001.
+function is_error_code(word as Text) returns Bool:
+    if word.length() != 5 or not word.starts_with("E"):
+        return false
+    return word.slice(1, 5).chars().filter(function (character as Text) returns Bool: "0123456789".contains(character)).length() == 4
+
+## The .unio files below the directory, sorted; none if it does not exist.
+function unio_files(directory as Path) returns List[Path]:
+    let found = try files.list_tree(directory) on IoError as e:
+        return []
+    return found.filter(function (path as Path) returns Bool: path.extension() == "unio")
+
+## The path relative to the root when it lies below it.
+function relative(path as Path, root as Path) returns Text:
+    let text = path.to_text()
+    let prefix = root.to_text()
+    if not text.starts_with(prefix):
+        return text
+    var rest = text.slice(prefix.length(), text.length())
+    while rest.starts_with("/") or rest.starts_with("\\"):
+        rest = rest.slice(1, rest.length())
+    return rest
+
+
+let SMALL_GRAMMAR as Text = "(* Keywords (fixed; adding one requires an RFC): let\n   Reserved (using them is E0032): uses\n   Punctuation and operators: = *)\nfile = \{ statement \} EOF ;\nstatement = \"let\" NAME \"=\" INT NEWLINE ;\n"
+
+function small() returns grammar.Grammar:
+    return try grammar.load_grammar(SMALL_GRAMMAR) on grammar.GrammarError as e:
+        assert_fail(e.message)
+
+test "a program of the small grammar parses":
+    assert grammar.check_source("let x = 1\nlet y = 2\n", small()).problem == none
+
+test "a tab in indentation is E0001":
+    match grammar.check_source("let x = 1\n\tlet y = 2\n", small()).problem:
+        case some(problem):
+            assert problem.code == "E0001"
+            assert problem.line == 2
+        case none:
+            assert_fail("expected E0001")
+
+test "a missing name is a syntax error on its line":
+    match grammar.check_source("let x = 1\nlet = 2\n", small()).problem:
+        case some(problem):
+            assert problem.code == "syntax"
+            assert problem.line == 2
+            assert problem.message == "expected NAME; found '='"
+        case none:
+            assert_fail("expected a syntax error")
+
+test "a reserved word is E0032":
+    match grammar.check_source("let uses = 1\n", small()).problem:
+        case some(problem):
+            assert problem.code == "E0032"
+        case none:
+            assert_fail("expected E0032")
+
+test "the small grammar is consistent":
+    assert grammar.self_check(small()) == []
+
+test "an undefined rule is reported":
+    let broken = try grammar.load_grammar(SMALL_GRAMMAR + "extra = missing ;\n") on grammar.GrammarError as e:
+        assert_fail(e.message)
+    let problems = grammar.self_check(broken)
+    assert "rule missing is used but not defined" in problems
+    assert "rule extra is not reachable from file" in problems
+
+test "expectations are read from the first matching line":
+    assert read_expectation("# expect-error: 3 E0001\nlet x = 1\n") == some(Expectation(line = 3, code = "E0001"))
+    assert read_expectation("# expect-error: 4\n") == some(Expectation(line = 4, code = ""))
+    assert read_expectation("let x = 1\n") == none

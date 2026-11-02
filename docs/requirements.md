@@ -100,7 +100,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 3.6 Modules and visibility
 
-- L-22. A module is a file; a package is a directory with `unio.toml`. Import: `import a.b`, `import a.b as c`, `from a.b import x, y`.
+- L-22. A module is a file; a package is a directory with `unio.toml`. Import: `import a.b`, `import a.b as c`, `from a.b import x, y`. A name that starts with `std.` refers to the standard library; any other name refers to a module of the same package, `a.b` to the file `a/b.unio` relative to the package root.
 - L-23. Everything is private by default; `public` exports.
 - L-24. Cyclic imports are a compile error that names the cycle.
 

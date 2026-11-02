@@ -1,0 +1,9 @@
+# Repository tools written in Unio: grammar, API and documentation checks.
+# Run from the root of the repository; the tools only read files below it.
+
+[package]
+name = "unio-tools"
+version = "0.1.0"
+
+[permissions]
+files.read = ["$CWD/**"]

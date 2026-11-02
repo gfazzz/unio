@@ -1,0 +1,459 @@
+## Checks that programs use only the standard library and their own declarations.
+##
+## Reads the standard library from its Unio sources in stdlib/: every file must parse, and
+## external functions may appear only in an unsafe module. Then every call in the programs, and in
+## the standard library itself, must resolve to:
+##   - a function, type, or enum variant declared in the program;
+##   - a public function of an imported module: a standard-library module, or a module of the same
+##     package, which is a file next to the program (import grammar reads grammar.unio);
+##   - a prelude function, a built-in constructor, or a prelude variant;
+##   - a parameter or a local name of the program (a function value);
+##   - a method of the standard library or one declared in the program;
+##   - a variant of an enum given with its name (Value.Text).
+## A variant whose name is also a type must be written with its enum name (rule L-6a).
+##
+## Usage (from the root of the repository):
+##     check_api [PROGRAM...]     default: stdlib/, docs/examples/, docs/ru/examples/, examples/, tools/
+##
+## Exit code: 0 if there are no problems, 1 otherwise. The Unio version of spec/check_api.py.
+
+import std.args
+import std.files
+from std.text import join, split
+import grammar
+
+let GRAMMAR_PATH as Text = "spec/grammar.ebnf"
+
+let STDLIB as Text = "stdlib"
+
+let PROGRAM_DIRECTORIES as List[Text] = ["docs/examples", "docs/ru/examples", "examples", "tools"]
+
+let PRELUDE_VARIANTS as List[Text] = ["some", "none", "ok", "error"]
+
+let BUILTIN_TYPES as List[Text] = ["Int", "Float", "Bool", "Text", "Bytes", "List", "Map", "Set", "Option", "Result", "Tuple", "Path", "Function", "Never", "Self"]
+
+## What a file declares.
+struct Declarations:
+    functions as List[Text]
+    types as List[Text]
+    variants as Map[Text, List[Text]]
+
+## The public API of the standard library.
+struct Api:
+    modules as Map[Text, List[Text]]
+    prelude as List[Text]
+    methods as List[Text]
+    types as List[Text]
+    variants as Map[Text, List[Text]]
+
+public function main() returns Int:
+    var problems as List[Text] = []
+    let language = try grammar.read_grammar(Path(GRAMMAR_PATH)) on grammar.GrammarError as e:
+        print_error(e.message)
+        return 2
+    let api = load_api(language, problems)
+    var programs = args.list()
+    if programs.is_empty():
+        programs = default_programs()
+    for name in programs:
+        check_program(Path(name), language, api, problems)
+    for problem in problems:
+        print(problem)
+    if problems.is_empty():
+        print("{programs.length()} file(s) use only the standard library API")
+        return 0
+    print("{problems.length()} problem(s)")
+    return 1
+
+function default_programs() returns List[Text]:
+    var names as List[Text] = []
+    for path in unio_files_below(Path(STDLIB)):
+        names.append(path.to_text())
+    for directory in PROGRAM_DIRECTORIES:
+        for path in unio_files_in(Path(directory)):
+            names.append(path.to_text())
+    return names.sorted()
+
+
+# ---------------------------------------------------------------- the standard library
+
+function load_api(language as grammar.Grammar, var problems as List[Text]) returns Api:
+    var modules as Map[Text, List[Text]] = {}
+    var prelude as List[Text] = []
+    var methods as List[Text] = []
+    var types as List[Text] = []
+    var variants as Map[Text, List[Text]] = {}
+    let sources = unio_files_below(Path(STDLIB))
+    if sources.is_empty():
+        problems.append("stdlib/: no sources found")
+    for path in sources:
+        let name = relative(path, Path(STDLIB))
+        let source = try files.read_text(path) on IoError as e:
+            problems.append("stdlib/{name}: {e.reason}")
+            continue
+        let result = grammar.check_source(source, language, build_tree = true)
+        let tree = grammar.tree_of(result)
+        match result.problem:
+            case some(problem):
+                problems.append("stdlib/{name}: does not parse: line {problem.line}: {problem.message}")
+                continue
+            case none:
+                let is_unsafe = grammar.children_of(tree).find(function (child as grammar.Tree) returns Bool: grammar.rule_of(child) == "module_header") != none
+                if not is_unsafe and has_rule(tree, "external_decl"):
+                    problems.append("stdlib/{name}: external function outside an unsafe module")
+        var public_functions as List[Text] = []
+        for item in top_items(tree):
+            let rule = grammar.rule_of(item)
+            let children = grammar.children_of(item)
+            if rule == "declaration":
+                let inner = children[1] if is_public(children) else children[0]
+                let inner_rule = grammar.rule_of(inner)
+                if inner_rule == "interface_decl":
+                    for signature in signatures(inner):
+                        add_unique(methods, signature)
+                if is_public(children):
+                    if inner_rule in ["function_decl", "external_decl"]:
+                        add_unique(public_functions, signature_name(inner))
+                    else:
+                        let declared = declarations(inner)
+                        for type_name in declared.types:
+                            add_unique(types, type_name)
+                        for enum_name, names in declared.variants.entries():
+                            variants.put(enum_name, merge_unique(variants.get(enum_name) or [], names))
+            else if rule == "extend_decl":
+                let with_interface = has_token(children, "with")
+                for child in children:
+                    if grammar.rule_of(child) == "member" and (with_interface or is_public(grammar.children_of(child))):
+                        add_unique(methods, signature_name(child))
+        let module_name = module_of(name)
+        if module_name == "prelude":
+            prelude = merge_unique(prelude, public_functions)
+        else:
+            modules.put(module_name, merge_unique(modules.get(module_name) or [], public_functions))
+    return Api(modules = modules, prelude = prelude, methods = methods, types = types, variants = variants)
+
+## "std.files" for std/files.unio; "prelude" for the prelude and the built-in types.
+function module_of(name as Text) returns Text:
+    let parts = split(name.replace("\\", "/"), "/")
+    let file = parts[parts.length() - 1]
+    var segments = parts.slice(0, parts.length() - 1)
+    segments.append(file.slice(0, file.length() - ".unio".length()) if file.ends_with(".unio") else file)
+    if segments == ["std", "prelude"] or (segments.length() >= 2 and segments.slice(0, 2) == ["std", "builtin"]):
+        return "prelude"
+    return join(segments, ".")
+
+
+# ---------------------------------------------------------------- one program
+
+function check_program(path as Path, language as grammar.Grammar, api as Api, var problems as List[Text]):
+    let name = path.to_text()
+    let source = try files.read_text(path) on IoError as e:
+        problems.append("{name}: {e.reason}")
+        return
+    let result = grammar.check_source(source, language, build_tree = true)
+    let tree = grammar.tree_of(result)
+    match result.problem:
+        case some(problem):
+            problems.append("{name}: does not parse: line {problem.line}: {problem.message}")
+            return
+        case none:
+            check_variant_names(name, tree, problems)
+    let own = declarations(tree)
+    var locals as List[Text] = []
+    for rule, children in walk(tree):
+        if rule in ["param", "let_statement"]:
+            match names_in(children).first():
+                case some(local):
+                    add_unique(locals, local)
+                case none:
+                    continue
+    var known_modules = api.modules
+    var local_types as List[Text] = []
+    var local_variants as Map[Text, List[Text]] = {}
+    var aliases as Map[Text, Text] = {}
+    var imported as Map[Text, Text] = {}
+    for rule, children in walk(tree):
+        if rule != "import":
+            continue
+        let module_name = join(names_in(module_path_of(children)), ".")
+        if module_name not in known_modules and not module_name.contains("."):
+            match package_module(path, module_name, language):
+                case some(declared):
+                    known_modules.put(module_name, declared.functions)
+                    local_types = merge_unique(local_types, declared.types)
+                    for enum_name, names in declared.variants.entries():
+                        local_variants.put(enum_name, names)
+                case none:
+                    problems.append("{name}: module {module_name} is not in stdlib/")
+        else if module_name not in known_modules:
+            problems.append("{name}: module {module_name} is not in stdlib/")
+        if first_kind(children) == "import":
+            let alias = (names_in(children).last() or module_name) if has_token(children, "as") else (names_in(module_path_of(children)).last() or module_name)
+            aliases.put(alias, module_name)
+        else:
+            for imported_name in names_in(children):
+                imported.put(imported_name, module_name)
+                if module_name in known_modules and imported_name not in (known_modules.get(module_name) or []) and imported_name not in api.types and imported_name not in local_types:
+                    problems.append("{name}: {module_name}.{imported_name} is not in stdlib/")
+    var all_variants = api.variants
+    for enum_name, names in local_variants.entries():
+        all_variants.put(enum_name, names)
+    var plain_variants as List[Text] = []
+    for enum_name, names in own.variants.entries():
+        all_variants.put(enum_name, merge_unique(all_variants.get(enum_name) or [], names))
+        plain_variants = merge_unique(plain_variants, names)
+    let lexed = try grammar.tokenize(source, language) on grammar.LexError as e:
+        problems.append("{name}: {e.message}")
+        return
+    var tokens as List[grammar.Token] = []
+    flatten(lexed, tokens)
+    for index, token in tokens.enumerate():
+        if token.kind != "NAME":
+            continue
+        let previous = kind_at(tokens, index - 1)
+        let next = kind_at(tokens, index + 1)
+        if next == "." and kind_at(tokens, index + 2) == "NAME":
+            let member = tokens[index + 2].value
+            if previous in [".", "?."]:
+                continue
+            if token.value in aliases:
+                let module_name = aliases.get(token.value) or ""
+                let public_names = known_modules.get(module_name) or []
+                if module_name in known_modules and member not in public_names and member not in api.types and member not in local_types:
+                    problems.append("{name}:{token.line}: {module_name}.{member} is not in stdlib/")
+                continue
+            if token.value in all_variants:
+                if member not in (all_variants.get(token.value) or []):
+                    problems.append("{name}:{token.line}: {token.value} has no variant {member}")
+                continue
+        if next != "(":
+            continue
+        if previous in [".", "?."]:
+            let before = value_at(tokens, index - 2)
+            if kind_at(tokens, index - 2) == "NAME" and (before in aliases or before in all_variants):
+                continue
+            if token.value not in api.methods and token.value not in own.functions:
+                problems.append("{name}:{token.line}: method {token.value} is not in stdlib/")
+            continue
+        if previous == "function":
+            continue
+        let known = token.value in own.functions or token.value in own.types or token.value in plain_variants or token.value in api.prelude or token.value in PRELUDE_VARIANTS or token.value in imported or token.value in locals
+        if not known:
+            problems.append("{name}:{token.line}: {token.value} is neither declared nor in stdlib/")
+
+## Rule L-6a: a variant whose name is also a visible type is written Enum.Variant.
+function check_variant_names(name as Text, tree as grammar.Tree, var problems as List[Text]):
+    let own = declarations(tree)
+    for rule, children in walk(tree):
+        if rule not in ["primary", "primary_pattern", "pattern_name"] or children.length() != 1:
+            continue
+        match grammar.token_of(children[0]):
+            case some(token):
+                for enum_name, names in own.variants.entries():
+                    if token.value in names and (token.value in BUILTIN_TYPES or token.value in own.types):
+                        problems.append("{name}:{token.line}: variant {token.value} has the name of a type; write {enum_name}.{token.value} (L-6a)")
+            case none:
+                continue
+
+## The public functions and types of a module of the same package: a file next to the program.
+function package_module(program as Path, module_name as Text, language as grammar.Grammar) returns Option[Declarations]:
+    let directory = program.parent() or Path(".")
+    let source = try files.read_text(directory.join(module_name + ".unio")) on IoError as e:
+        return none
+    let tree = grammar.tree_of(grammar.check_source(source, language, build_tree = true))
+    var functions as List[Text] = []
+    var types as List[Text] = []
+    var variants as Map[Text, List[Text]] = {}
+    for item in top_items(tree):
+        let children = grammar.children_of(item)
+        if grammar.rule_of(item) == "declaration" and is_public(children):
+            let inner = children[1]
+            if grammar.rule_of(inner) in ["function_decl", "external_decl"]:
+                add_unique(functions, signature_name(inner))
+            else:
+                let declared = declarations(inner)
+                types = merge_unique(types, declared.types)
+                for enum_name, names in declared.variants.entries():
+                    variants.put(enum_name, names)
+    return some(Declarations(functions = functions, types = types, variants = variants))
+
+
+# ---------------------------------------------------------------- parse trees
+
+## Every branch of the tree with its children, the tree itself first.
+function walk(tree as grammar.Tree) returns List[Tuple[Text, List[grammar.Tree]]]:
+    var found as List[Tuple[Text, List[grammar.Tree]]] = []
+    collect_branches(tree, found)
+    return found
+
+function collect_branches(tree as grammar.Tree, var found as List[Tuple[Text, List[grammar.Tree]]]):
+    let rule = grammar.rule_of(tree)
+    if rule.is_empty():
+        return
+    let children = grammar.children_of(tree)
+    found.append((rule, children))
+    for child in children:
+        collect_branches(child, found)
+
+function has_rule(tree as grammar.Tree, rule as Text) returns Bool:
+    for found, _ in walk(tree):
+        if found == rule:
+            return true
+    return false
+
+## The values of the NAME tokens among the children themselves, not inside them.
+function names_in(children as List[grammar.Tree]) returns List[Text]:
+    var names as List[Text] = []
+    for child in children:
+        match grammar.token_of(child):
+            case some(token) if token.kind == "NAME":
+                names.append(token.value)
+            case _:
+                continue
+    return names
+
+function has_token(children as List[grammar.Tree], kind as Text) returns Bool:
+    for child in children:
+        match grammar.token_of(child):
+            case some(token) if token.kind == kind:
+                return true
+            case _:
+                continue
+    return false
+
+function first_kind(children as List[grammar.Tree]) returns Text:
+    match children.first():
+        case some(child):
+            match grammar.token_of(child):
+                case some(token):
+                    return token.kind
+                case none:
+                    return ""
+        case none:
+            return ""
+
+## The children of the module_path among the children of an import.
+function module_path_of(children as List[grammar.Tree]) returns List[grammar.Tree]:
+    for child in children:
+        if grammar.rule_of(child) == "module_path":
+            return grammar.children_of(child)
+    return []
+
+function top_items(tree as grammar.Tree) returns List[grammar.Tree]:
+    var items as List[grammar.Tree] = []
+    for child in grammar.children_of(tree):
+        if grammar.rule_of(child) == "top_item":
+            match grammar.children_of(child).first():
+                case some(item):
+                    items.append(item)
+                case none:
+                    continue
+    return items
+
+function is_public(children as List[grammar.Tree]) returns Bool:
+    return first_kind(children) == "public"
+
+function signatures(tree as grammar.Tree) returns List[Text]:
+    return [names_in(children).first() or "" for rule, children in walk(tree) if rule == "function_sig"]
+
+function signature_name(tree as grammar.Tree) returns Text:
+    return signatures(tree).first() or ""
+
+function declarations(tree as grammar.Tree) returns Declarations:
+    var functions as List[Text] = []
+    var types as List[Text] = []
+    var variants as Map[Text, List[Text]] = {}
+    for rule, children in walk(tree):
+        if rule == "function_sig":
+            add_unique(functions, names_in(children).first() or "")
+        else if rule in ["struct_decl", "error_decl", "interface_decl"]:
+            add_unique(types, names_in(children).first() or "")
+        else if rule == "enum_decl":
+            let enum_name = names_in(children).first() or ""
+            add_unique(types, enum_name)
+            var names as List[Text] = []
+            for child in children:
+                for inner_rule, inner_children in walk(child):
+                    if inner_rule == "variant":
+                        match inner_children.first():
+                            case some(first):
+                                match grammar.token_of(first):
+                                    case some(token):
+                                        add_unique(names, token.value)
+                                    case none:
+                                        continue
+                            case none:
+                                continue
+            variants.put(enum_name, merge_unique(variants.get(enum_name) or [], names))
+    return Declarations(functions = functions, types = types, variants = variants)
+
+
+# ---------------------------------------------------------------- tokens and helpers
+
+## The tokens with the tokens of every interpolation after their TEXT token, each closed by a NEWLINE.
+function flatten(tokens as List[grammar.Token], var out as List[grammar.Token]):
+    for token in tokens:
+        out.append(token)
+        for part in token.parts:
+            flatten(part, out)
+            out.append(grammar.Token(kind = "NEWLINE", value = "", line = token.line, column = token.column))
+
+function kind_at(tokens as List[grammar.Token], index as Int) returns Text:
+    if index < 0:
+        return ""
+    match tokens.get(index):
+        case some(token):
+            return token.kind
+        case none:
+            return ""
+
+function value_at(tokens as List[grammar.Token], index as Int) returns Text:
+    if index < 0:
+        return ""
+    match tokens.get(index):
+        case some(token):
+            return token.value
+        case none:
+            return ""
+
+function add_unique(var items as List[Text], item as Text):
+    if item not in items:
+        items.append(item)
+
+function merge_unique(items as List[Text], more as List[Text]) returns List[Text]:
+    var merged = items
+    for item in more:
+        add_unique(merged, item)
+    return merged
+
+## The .unio files directly in the directory, sorted; none if it does not exist.
+function unio_files_in(directory as Path) returns List[Path]:
+    let entries = try files.list_directory(directory) on IoError as e:
+        return []
+    return entries.filter(function (entry as Path) returns Bool: entry.extension() == "unio" and not files.is_directory(entry))
+
+## The .unio files anywhere below the directory, sorted; none if it does not exist.
+function unio_files_below(directory as Path) returns List[Path]:
+    let entries = try files.list_tree(directory) on IoError as e:
+        return []
+    return entries.filter(function (entry as Path) returns Bool: entry.extension() == "unio")
+
+## The path relative to the root when it lies below it, with "/" between components.
+function relative(path as Path, root as Path) returns Text:
+    let parts = path.components()
+    let prefix = root.components()
+    if parts.length() < prefix.length() or parts.slice(0, prefix.length()) != prefix:
+        return join(parts, "/")
+    return join(parts.slice(prefix.length(), parts.length()), "/")
+
+
+test "module names follow the file path":
+    assert module_of("std/files.unio") == "std.files"
+    assert module_of("std/prelude.unio") == "prelude"
+    assert module_of("std/builtin/text.unio") == "prelude"
+
+test "relative paths drop the root":
+    assert relative(Path("stdlib/std/json.unio"), Path("stdlib")) == "std/json.unio"
+
+test "merging keeps the first occurrence":
+    assert merge_unique(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
