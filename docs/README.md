@@ -11,5 +11,6 @@
 | [../examples](../examples) | Reference utilities checked against the grammar |
 | [../tools](../tools) | Project tools written in Unio |
 | [rfcs/README.md](rfcs/README.md) | RFC process for language changes |
+| [influences.md](influences.md) | What Unio takes from Zig, Odin, Gleam, Mojo, and Unison, and what it declines |
 | [os.md](os.md) | UnioS: a site about Unio, in Unio, on an operating system written in Unio; architecture, stages, risks |
 | [ru/](ru/README.md) | Russian localization |

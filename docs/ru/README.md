@@ -47,4 +47,5 @@ Unio должен поставляться как единый комплект:
 | [../../examples](../../examples) | Эталонные утилиты, проверяемые по грамматике |
 | [../../tools](../../tools) | Инструменты проекта на Unio |
 | [rfcs/README.md](rfcs/README.md) | Процесс RFC для изменений языка |
+| [influences.md](influences.md) | Что Unio берёт из Zig, Odin, Gleam, Mojo и Unison, а что отклоняет |
 | [os.md](os.md) | UnioS: сайт про Unio, на Unio, на ОС, написанной на Unio; архитектура, этапы, риски |

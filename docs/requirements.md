@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.8 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.9 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.8: content hashes of symbols (C-11a) and the diagnostic message standard (R-12), from `docs/influences.md`.
 
 Changes from 0.7: interface values with dispatch at run time and default methods (L-6b, L-6c); a guide chapter on classes (D-2).
 
@@ -150,6 +152,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 4.3 Symbol context
 
 - C-11. `unio symbol <full name>` returns (text and JSON): signature, documentation, declaration site, usage list, and for functions the error set, derived effects (`files`, `network`, `process`, `env`, `allocates`), the lowest library layer the function needs, and the list of called functions.
+- C-11a. `unio symbol --json` reports for every function and type a content hash: the hash of the normalized declaration and body together with the content hashes of everything it references, independent of formatting and comments. The incremental build and test cache is keyed by this hash, and `unio test --json` reports it for every test. Source code and the language do not use hashes.
 - C-12. `unio outline <file>` returns the file's declarations with signatures.
 
 ### 4.4 Runtime
@@ -296,6 +299,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 
 - R-10. A control set of 200 programs with injected errors (types, errors, resources, style). Criterion: an agent receiving only the JSON diagnostics fixes at least 80% within at most three iterations.
 - R-11. The average diagnostic message is at most 200 characters; the explanation is separate.
+- R-12. Every error message follows one template: what is wrong, where, and how to fix it, with the fix as a patch in `fixes` where one exists. A message does not name compiler internals (pass names, internal types, node kinds). A new diagnostic code is merged only after review against the template and a run on the R-10 corpus; the review checklist is part of the repository.
 
 ## 8. Documentation requirements
 

@@ -1,5 +1,7 @@
 # Unio: refined concept
 
+Version: 0.10. Changes from 0.9: decisions on borrowings from other languages (`docs/influences.md`): explicit allocators in the `system` profile, the progressive path down the layers, content hashes of symbols, and the refusal of `comptime` and an implicit context (sections 7, 8, 8.1, 10, rationale 18).
+
 Version: 0.9. Changes from 0.8: interface values and default methods; why there are no classes (section 2.6, rationale 17).
 
 Changes from 0.7: visibility of fields and methods, functions of a type (sections 2.6, 5).
@@ -388,6 +390,7 @@ What an AI agent gets from the tooling:
 3. **Check without build**: `unio check` fast enough for the loop "generate, check, fix".
 4. **One style**: `unio fmt` makes generated code indistinguishable from hand-written code, so review looks at meaning, not layout.
 5. **Tests next to code, written first**: `test "description":` blocks in the same file, run with `unio test --json`. A test that does not compile yet is reported as a failing test, so an agent can write the test before the function (section 1.2).
+6. **Content hashes**: `unio symbol` reports for every function and type a hash of its normalized declaration and body together with the hashes of everything it references. An agent can name the exact version of a function it read or changed, and the build and test cache uses the same key. Source code keeps ordinary names; the language does not depend on hashes.
 
 What is required from the AI: describe intent in documentation comments, express it as tests before writing the code, and change the code until the tests pass; the code stays unambiguous, and the tests show the reviewer what was intended.
 
@@ -398,7 +401,8 @@ Not part of the first release. Constraints on the core so that the extensions re
 - the `Resource` type and `using` are sufficient for tensors and lifetime scopes;
 - generics and interfaces are sufficient for operations on tensors of different types and devices;
 - effects (`uses gpu`) can be added to signatures later without changing existing syntax;
-- the profiler is designed with a common event format to which RAM/VRAM will be added later.
+- the profiler is designed with a common event format to which RAM/VRAM will be added later;
+- the tensor API is designed for the ordinary user first; control of buffers, placement, and backends is an explicit lower layer of the same API, not a separate one.
 
 Quantum module: circuits as values, a simulator as a backend, hardware through the same backend interface with a capability description. Speedup is not promised; verifiability of a circuit before execution is guaranteed.
 
@@ -415,6 +419,10 @@ A web server and the services and applications of an operating system are ordina
 Module names do not contain the layer (`std.json` lives in `alloc`), so applications are not affected; the layer is a property of where a module lives and is checked.
 
 **Build profiles.** A profile chooses which layers are available. The `application` profile has all three, the GC, and the sandbox of the operating system. The `system` profile always has `core`, has `alloc` only with an allocator that the program provides, and has neither a GC nor `std`. The syntax, the types, and error handling are the same in every profile; a profile only removes capabilities and never changes what a construct means. If a function needs a layer that the profile lacks, the compiler reports the chain of calls that leads to it. Release 0.1 implements the `application` profile and the check `unio check --profile=core`, which verifies that a package depends on nothing but `core`.
+
+**Allocators.** In the `application` profile the GC heap is the only allocator and no function takes one: application code does not pay in readability for a need it does not have. In the `system` profile every function of the `alloc` layer takes an `Allocator` as its first parameter, and an allocator is a `Resource` whose lifetime is a `using` block, so the reader sees where memory comes from and when it is returned. The same `alloc` sources serve both profiles: the compiler supplies the GC heap in `application`.
+
+**The path down.** The layers give one documented way to trade simplicity for control: write in `application`; move a hot or memory-sensitive part to code that passes `unio check --profile=core`; later, build that part in the `system` profile with an explicit allocator. Each step removes capabilities and adds nothing to the syntax, and the guide shows the path on one example with what each step costs and gains.
 
 **What the system extension adds.** These capabilities are designed through RFCs for a later release and are available only in the `system` profile and in `unsafe module` files where noted:
 
@@ -462,6 +470,11 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Words such as `error` and `test` as names | Contextual keywords: special only where a declaration starts |
 | A branch that does nothing | `pass`; an empty block stays an error |
 | Compiler implementation language | Rust with code generation through Cranelift in 0.1; self-hosted implementation in Unio by 1.0, once the language is stable |
+| Compile-time evaluation (`comptime`) | No. Generic parameters and `let` constants of literal expressions only; the compiler never runs user code (SB-14). A limited, sandboxed form needs an RFC |
+| Explicit allocators | Only in the `system` profile, as the first parameter of `alloc` functions and as a `Resource`; none in `application` |
+| Implicit context parameter | No. The allocator, permissions, and logging are passed or derived visibly |
+| Content-addressed code | As a tool feature: `unio symbol` reports content hashes used by the cache and by agents; no hashes in source or semantics |
+| Ownership and borrowing | No. GC plus `Resource`; the only ownership analysis is the `using` escape check |
 
 ## 11. Rationale for the latest decisions
 
@@ -484,3 +497,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 15. **Tests first.** Generated code is reviewed briefly, so the reviewer needs a statement of intent that can be executed; a test written before the code is that statement, and it cannot be bent to fit an implementation that already exists. For the language, a failing check before every change keeps the specification, the corpus, and the implementation from drifting apart, which is how the grammar defects of version 0.4 were found.
 16. **Visibility inside types.** A type that keeps an invariant, such as an atomic file that must not be committed twice, needs fields that only its own module can touch; that is the default. Errors and variants are the opposite case: their fields exist to be read by whoever handles them, so requiring `public` on each would only add noise. Functions of a type give named constructors without a separate constructor syntax.
 17. **No classes.** Inheritance of implementation spreads the behavior of a type over a chain of parents and overrides, which is exactly what a reader of unfamiliar code cannot follow; it also assumes shared mutable objects, which the value model of section 2.7 excludes. What classes are used for is kept: methods through `extend`, encapsulation through private fields and functions of a type, open polymorphism through interface values, closed polymorphism through `enum`, and shared code through default methods. Object graphs with identity, such as observers or caches shared by several parts of a program, are represented by identifiers and maps in 0.1; an explicit shared mutable type belongs with the concurrency model of release 0.2, where sharing has to be designed anyway.
+18. **Borrow what strengthens the principle, decline the rest.** Zig's errors and Gleam's diagnostics are already the direction of the language; explicit allocators and content hashes add visibility without syntax; `comptime`, an implicit context, macros, and borrowing each add a second way to write or read code, so they are declined even where they are powerful. `docs/influences.md` keeps the reasoning.
