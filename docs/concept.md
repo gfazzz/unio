@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.10. Changes from 0.9: decisions on borrowings from other languages (`docs/influences.md`): explicit allocators in the `system` profile, the progressive path down the layers, content hashes of symbols, and the refusal of `comptime` and an implicit context (sections 7, 8, 8.1, 10, rationale 18).
+Version: 0.11. Changes from 0.10: allocator lifetimes in the `system` profile (section 8.1).
+
+Changes from 0.9: decisions on borrowings from other languages (`docs/influences.md`): explicit allocators in the `system` profile, the progressive path down the layers, content hashes of symbols, and the refusal of `comptime` and an implicit context (sections 7, 8, 8.1, 10, rationale 18).
 
 Version: 0.9. Changes from 0.8: interface values and default methods; why there are no classes (section 2.6, rationale 17).
 
@@ -421,6 +423,8 @@ Module names do not contain the layer (`std.json` lives in `alloc`), so applicat
 **Build profiles.** A profile chooses which layers are available. The `application` profile has all three, the GC, and the sandbox of the operating system. The `system` profile always has `core`, has `alloc` only with an allocator that the program provides, and has neither a GC nor `std`. The syntax, the types, and error handling are the same in every profile; a profile only removes capabilities and never changes what a construct means. If a function needs a layer that the profile lacks, the compiler reports the chain of calls that leads to it. Release 0.1 implements the `application` profile and the check `unio check --profile=core`, which verifies that a package depends on nothing but `core`.
 
 **Allocators.** In the `application` profile the GC heap is the only allocator and no function takes one: application code does not pay in readability for a need it does not have. In the `system` profile every function of the `alloc` layer takes an `Allocator` as its first parameter, and an allocator is a `Resource` whose lifetime is a `using` block, so the reader sees where memory comes from and when it is returned. The same `alloc` sources serve both profiles: the compiler supplies the GC heap in `application`.
+
+Because an allocator is a `Resource`, the rule of section 4.1 applies to it unchanged: it cannot be stored in an ordinary struct or collection that outlives its `using` block. The same rule extends to what it allocates: in the `system` profile a value allocated from an allocator is tied to that allocator's block, and the compiler rejects storing it anywhere that outlives the block, with the same diagnostic as a resource escape. A value that must live longer is allocated from a longer-lived allocator, named explicitly at the call. This is the only lifetime analysis the profile adds, and it is a design constraint of the 0.5 RFC, not a new mechanism in the language.
 
 **The path down.** The layers give one documented way to trade simplicity for control: write in `application`; move a hot or memory-sensitive part to code that passes `unio check --profile=core`; later, build that part in the `system` profile with an explicit allocator. Each step removes capabilities and adds nothing to the syntax, and the guide shows the path on one example with what each step costs and gains.
 

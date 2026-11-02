@@ -1,6 +1,6 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.9 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.10 (draft). Changes from 0.9: stability of content hashes (C-11a) and a catalog check for diagnostic messages (R-12). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
 
 Changes from 0.8: content hashes of symbols (C-11a) and the diagnostic message standard (R-12), from `docs/influences.md`.
 
@@ -152,7 +152,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 4.3 Symbol context
 
 - C-11. `unio symbol <full name>` returns (text and JSON): signature, documentation, declaration site, usage list, and for functions the error set, derived effects (`files`, `network`, `process`, `env`, `allocates`), the lowest library layer the function needs, and the list of called functions.
-- C-11a. `unio symbol --json` reports for every function and type a content hash: the hash of the normalized declaration and body together with the content hashes of everything it references, independent of formatting and comments. The incremental build and test cache is keyed by this hash, and `unio test --json` reports it for every test. Source code and the language do not use hashes.
+- C-11a. `unio symbol --json` reports for every function and type a content hash. The hash is computed over the canonical AST of the declaration after `unio fmt` normalization, with comments removed, together with the content hashes of every declaration it references. Formatting, comments, and the order of declarations in a module do not change it; names of the declaration, its parameters, fields, and local variables are part of it, so a rename changes the hash. The hash carries a version of the hashing scheme, so a change to normalization is detectable and never silently invalidates a cache. The incremental build and test cache is keyed by this hash, and `unio test --json` reports it for every test. Source code and the language do not use hashes.
 - C-12. `unio outline <file>` returns the file's declarations with signatures.
 
 ### 4.4 Runtime
@@ -299,7 +299,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 
 - R-10. A control set of 200 programs with injected errors (types, errors, resources, style). Criterion: an agent receiving only the JSON diagnostics fixes at least 80% within at most three iterations.
 - R-11. The average diagnostic message is at most 200 characters; the explanation is separate.
-- R-12. Every error message follows one template: what is wrong, where, and how to fix it, with the fix as a patch in `fixes` where one exists. A message does not name compiler internals (pass names, internal types, node kinds). A new diagnostic code is merged only after review against the template and a run on the R-10 corpus; the review checklist is part of the repository.
+- R-12. Every error message follows one template: what is wrong, where, and how to fix it, with the fix as a patch in `fixes` where one exists. A message does not name compiler internals (pass names, internal types, IR and AST node kinds, internal identifiers). All messages live in one catalog, and a CI test checks the catalog against a maintained list of internal names and against the template, so that internals cannot leak into messages over time. A new diagnostic code is merged only after review against the template and a run on the R-10 corpus; the review checklist is part of the repository.
 
 ## 8. Documentation requirements
 

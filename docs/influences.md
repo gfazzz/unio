@@ -1,6 +1,6 @@
 # What Unio takes from other languages, and what it declines
 
-Version: 0.1. Status: decisions recorded in `docs/concept.md` 0.10 and `docs/requirements.md` 0.9. This document keeps the reasoning in one place so that the same proposals are not re-argued.
+Version: 0.1. Status: decisions recorded in `docs/concept.md` 0.11 and `docs/requirements.md` 0.10. This document keeps the reasoning in one place so that the same proposals are not re-argued.
 
 The test for every borrowing is the principle of the concept: clear code, explicit behavior, controlled resources. A feature is taken only if it strengthens readability, explicitness, verifiability before execution, or fitness for AI. A feature that is powerful but gives a second way to write the same thing is declined.
 
