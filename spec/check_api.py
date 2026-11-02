@@ -67,8 +67,10 @@ def declarations(tree):
     for rule, kids in walk(tree):
         if rule == "function_sig":
             functions.add(names_in(kids)[0])
-        elif rule in ("struct_decl", "error_decl", "interface_decl"):
+        elif rule in ("struct_decl", "interface_decl"):
             types.add(names_in(kids)[0])
+        elif rule == "error_decl":
+            types.add(names_in(kids)[1])     # kids[0] is the contextual keyword error
         elif rule == "enum_decl":
             enum = names_in(kids)[0]
             types.add(enum)

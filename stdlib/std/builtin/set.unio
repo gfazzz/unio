@@ -1,0 +1,52 @@
+## Set[T]: distinct values in the order they were first inserted. Elements implement Hash and Equal,
+## so Float cannot be an element.
+unsafe module
+
+## An empty set: Set[Text]().
+public external function Set[T with Hash and Equal]() returns Set[T]
+
+extend[T with Hash and Equal] Set[T]:
+    public external function length(self) returns Int
+
+    ## Used by "item in set".
+    public external function contains(self, item as T) returns Bool
+
+    ## Adds the item; an item already present keeps its position.
+    public external function insert(var self, item as T)
+
+    ## Removes the item and tells whether it was present.
+    public external function remove(var self, item as T) returns Bool
+
+    ## The elements in insertion order.
+    public external function items(self) returns List[T]
+
+    public function is_empty(self) returns Bool:
+        return self.length() == 0
+
+    public function union(self, other as Set[T]) returns Set[T]:
+        var result = self
+        for item in other.items():
+            result.insert(item)
+        return result
+
+    public function intersection(self, other as Set[T]) returns Set[T]:
+        var result = Set[T]()
+        for item in self.items():
+            if item in other:
+                result.insert(item)
+        return result
+
+    public function difference(self, other as Set[T]) returns Set[T]:
+        var result = Set[T]()
+        for item in self.items():
+            if item not in other:
+                result.insert(item)
+        return result
+
+extend[T with Hash and Equal] List[T]:
+    ## The distinct items of the list, in the order of their first occurrence.
+    public function to_set(self) returns Set[T]:
+        var result = Set[T]()
+        for item in self:
+            result.insert(item)
+        return result

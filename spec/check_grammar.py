@@ -25,6 +25,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 GRAMMAR = os.path.join(HERE, "grammar.ebnf")
 
+# Contextual keywords, read from section L of the grammar: lexed as NAME.
+CONTEXTUAL = set()
 # Token classes supplied by the lexer instead of EBNF rules.
 TOKEN_CLASSES = {"NAME", "INT", "FLOAT", "TEXT", "NEWLINE", "INDENT", "DEDENT", "EOF"}
 # Lexical rules described in the EBNF for people; the lexer implements them.
@@ -53,7 +55,9 @@ def read_word_list(text, start, end):
 
 def load_grammar(path=GRAMMAR):
     raw = open(path, encoding="utf-8").read()
-    keywords = set(read_word_list(raw, "requires an RFC):", "Reserved"))
+    keywords = set(read_word_list(raw, "requires an RFC):", "Contextual keywords"))
+    CONTEXTUAL.clear()
+    CONTEXTUAL.update(read_word_list(raw, "where a rule uses them):", "A contextual keyword"))
     reserved = set(read_word_list(raw, "(using them is E0032):", "Punctuation"))
     punct = read_word_list(raw, "Punctuation and operators:", "*)")
     text = strip_comments(raw)
@@ -180,10 +184,12 @@ def self_check(rules, order, keywords, reserved, punct):
         if r in rules and r not in reachable:
             problems.append(f"rule {r} is not reachable from file")
     words = {t for t in used_terms if re.fullmatch(r"[A-Za-z]+", t)}
-    for w in sorted(words - keywords):
+    for w in sorted(words - keywords - CONTEXTUAL):
         problems.append(f"terminal {w!r} is not in the keyword list")
-    for w in sorted(keywords - words):
+    for w in sorted((keywords | CONTEXTUAL) - words):
         problems.append(f"keyword {w!r} is not used by any rule")
+    if keywords & CONTEXTUAL:
+        problems.append("a word is both a keyword and a contextual keyword")
     symbols = {t for t in used_terms if not re.fullmatch(r"[A-Za-z_]+", t)}
     for s in sorted(symbols - set(punct)):
         problems.append(f"terminal {s!r} is not in the punctuation list")
@@ -467,8 +473,8 @@ class Parser:
         if kind == "t":
             tok = self.toks[pos] if pos < len(self.toks) else None
             want = node[1]
-            ok = tok is not None and (tok.kind == want or (want == "_" and tok.kind == "NAME"
-                                                           and tok.value == "_"))
+            ok = tok is not None and (tok.kind == want or (tok.kind == "NAME" and tok.value == want
+                                                           and (want == "_" or want in CONTEXTUAL)))
             if not ok:
                 self.note(pos, repr(want))
                 return None

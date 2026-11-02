@@ -10,9 +10,11 @@ The library contains what the reference programs and the project tools use. `spe
 
 | File | Contents | Written in Unio | External primitives |
 |---|---|---|---|
-| [prelude.unio](../stdlib/std/prelude.unio) | `Display`, `Error`, `Equal`, `Order`, `Hash`, operator interfaces, `Resource`, `Option`, `Result`, `print`, `print_error`, `range` | interfaces, enums, `print`, `range` | standard output, `assert_fail`, `expect_fault`, `is_same` |
-| [builtin/text.unio](../stdlib/std/builtin/text.unio) | Methods of `Text` | searching, splitting, trimming, `to_int`, `replace`, `lines` | length, characters, slices, `index_of`, case, `to_float` |
-| [builtin/list.unio](../stdlib/std/builtin/list.unio) | Methods of `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted` (merge sort) | length, `get`, `append`, `remove_last` |
+| [prelude.unio](../stdlib/std/prelude.unio) | `Display`, `Error`, `Equal`, `Order`, `Hash`, operator interfaces, `Resource`, `Option`, `Result`, `print`, `print_error`, `range`, `min`, `max` | interfaces, enums, `print`, `range`, `min`, `max` | standard output, `assert_fail`, `expect_fault`, `is_same` |
+| [builtin/text.unio](../stdlib/std/builtin/text.unio) | Methods of `Text` | searching, splitting, trimming, `char_at`, `to_int`, `replace`, `lines` | length, characters, slices, `index_of`, case, `to_float` |
+| [builtin/list.unio](../stdlib/std/builtin/list.unio) | Methods of `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted`, `sorted_by`, `sorted_with` (merge sort) | length, `get`, `append`, `remove_last` |
+| [builtin/option.unio](../stdlib/std/builtin/option.unio) | Methods of `Option[T]` | `is_some`, `is_none` | — |
+| [builtin/set.unio](../stdlib/std/builtin/set.unio) | `Set[T]` and `List.to_set` | `union`, `intersection`, `difference`, `to_set` | storage of elements |
 | [builtin/map.unio](../stdlib/std/builtin/map.unio) | Methods of `Map[K, V]` | `contains`, `keys`, `values` | storage of entries |
 | [builtin/path.unio](../stdlib/std/builtin/path.unio) | `Path` | components, `name`, `extension`, `parent`, `join`, `normalize` | construction, text form, separator of the platform |
 | [builtin/int.unio](../stdlib/std/builtin/int.unio), [float.unio](../stdlib/std/builtin/float.unio), [bool.unio](../stdlib/std/builtin/bool.unio) | Numbers and `Bool` | `checked_divide`, `Bool.to_text` | checked arithmetic, conversions |

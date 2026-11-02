@@ -57,10 +57,18 @@ interpolation   = "{" expression "}" ;     (* may contain nested TEXT *)
 
 (* Keywords (fixed for 0.1; adding one requires an RFC):
 
-     and as assert break case continue else enum error extend external
-     fail fails false for from function if import in interface let match
-     module not on or public return returns self struct test true try
-     unsafe using var while with
+     and as assert break case continue else enum extend fail fails false
+     for from function if import in interface let match not on or pass
+     public return returns self struct true try using var while with
+
+   Contextual keywords (ordinary names except where a rule uses them):
+
+     error external module test unsafe
+
+   A contextual keyword is lexed as NAME; a terminal such as "test" in a
+   rule matches a NAME with that spelling. All their positions are at the
+   top level or start a declaration, where no expression can stand, so
+   they stay usable as names of fields, variables and parameters.
 
    Reserved for later releases (using them is E0032): uses
 
@@ -104,8 +112,7 @@ field           = [ "var" ] NAME "as" type [ "=" expression ] NEWLINE ;
 
 enum_decl       = "enum" NAME [ generic_params ] ":"
                   NEWLINE INDENT variant { variant } DEDENT ;
-variant         = ( NAME | "error" ) [ "(" variant_field { "," variant_field } ")" ] NEWLINE ;
-                  (* "error" is declared only by the prelude, in Result *)
+variant         = NAME [ "(" variant_field { "," variant_field } ")" ] NEWLINE ;
 variant_field   = NAME "as" type ;
 
 interface_decl  = "interface" NAME [ generic_params ] ":"
@@ -141,6 +148,7 @@ simple_statement = let_statement
                  | assert_statement
                  | "break"
                  | "continue"
+                 | "pass"                     (* does nothing; a block may not be empty *)
                  | expression ;
 
 (* A simple statement whose last element is an inline handler
@@ -211,7 +219,6 @@ safe_access     = "?." NAME ;
 
 primary         = INT | FLOAT | TEXT | "true" | "false" | "self"
                 | NAME
-                | "error"                       (* the Result variant error(...) *)
                 | "(" expression ")"
                 | tuple
                 | list
@@ -236,7 +243,7 @@ primary_pattern = "_"
                 | tuple_pattern ;
 literal_pattern = [ "-" ] INT | TEXT | "true" | "false" ;
 constructor_pattern = pattern_name "(" [ pattern_arg { "," pattern_arg } ] ")" ;
-pattern_name    = ( NAME | "error" ) { "." NAME } ;
+pattern_name    = NAME { "." NAME } ;
 pattern_arg     = [ NAME "=" ] pattern ;
 list_pattern    = "[" [ list_element { "," list_element } ] "]" ;
 list_element    = NAME "..." | pattern ;       (* at most one rest, last: E0034 *)

@@ -1,0 +1,3 @@
+# expect-error: 3
+function f() returns Int:
+    pass return 1

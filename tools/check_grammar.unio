@@ -125,7 +125,7 @@ function read_expectation(source as Text) returns Option[Expectation]:
                 if is_error_code(words[1]):
                     return some(Expectation(line = number, code = words[1]))
             case none:
-                continue
+                pass
     return none
 
 ## E followed by four digits, such as E0001.
@@ -159,7 +159,7 @@ function small() returns grammar.Grammar:
         assert_fail(e.message)
 
 test "a program of the small grammar parses":
-    assert grammar.check_source("let x = 1\nlet y = 2\n", small()).problem == none
+    assert grammar.check_source("let x = 1\nlet y = 2\n", small()).problem.is_none()
 
 test "a tab in indentation is E0001":
     match grammar.check_source("let x = 1\n\tlet y = 2\n", small()).problem:

@@ -58,7 +58,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 3.1 Lexical structure
 
 - L-1. A file is UTF-8 with the `.unio` extension; blocks by 4-space indentation; tabs and mixed indentation are errors.
-- L-2. The keyword set is fixed and published in the reference; adding a keyword after 0.1 requires an RFC.
+- L-2. The keyword set is fixed and published in the grammar (`spec/grammar.ebnf`, section L); adding a keyword after 0.1 requires an RFC. The words `error`, `external`, `module`, `test`, and `unsafe` are contextual keywords: they have their meaning only at the start of a top-level item or a declaration and are ordinary names everywhere else.
+- L-2a. `pass` is the statement that does nothing; it is the only way to write a block with no effect, because an empty block is a syntax error.
 - L-3. Comments `#`, documentation comments `##`. A documentation comment attaches to the next declaration and is available to `unio doc` and `unio symbol`.
 
 ### 3.2 Types

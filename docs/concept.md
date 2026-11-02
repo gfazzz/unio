@@ -25,7 +25,7 @@ Consequences of the principle, against which every language decision is checked:
 
 - Blocks are defined by indentation of 4 spaces. Tabs are forbidden.
 - A block header ends with a colon.
-- Keywords are whole English words, no abbreviations: `function`, `returns`, `fails with`, `struct`, `interface`, `enum`, `match`, `case`.
+- Keywords are whole English words, no abbreviations: `function`, `returns`, `fails with`, `struct`, `interface`, `enum`, `match`, `case`. The words `error`, `external`, `module`, `test`, and `unsafe` are keywords only where a declaration starts; elsewhere they are ordinary names, so a field can be called `error`.
 - Identifiers: `snake_case` for functions, variables, fields, and modules; `PascalCase` for types. The formatter and compiler warn about deviations.
 - Comments start with `#`. Documentation comments start with `##` and precede a declaration.
 - Source files are UTF-8 with the `.unio` extension.
@@ -97,7 +97,7 @@ match command:
         return
 ```
 
-`match` must be exhaustive: the compiler checks that all variants are listed or that there is a `case _`.
+`match` must be exhaustive: the compiler checks that all variants are listed or that there is a `case _`. A branch that deliberately does nothing says so with `pass`; an empty block is an error.
 
 ### 2.6 Data types
 
@@ -157,6 +157,8 @@ match tasks.find_index(function (task as Task) returns Bool: task.id == id):
 - Resources are not values: they have identity and are never copied (section 4).
 
 Values are shared until changed; changing a shared value copies only the level that changes, and changing an unshared value happens in place. No copy can change the behavior of a program, and the cost of copies is measured. A reader who sees `var` in a signature knows that the function modifies the state passed to it, and a reader who sees `let` knows that the value cannot change at all.
+
+State that several functions change together is modeled as a struct with `var self` methods: `reader.advance()` changes the reader, and every place that changes it is visible at the call. Passing the same state through `var` parameters works too but is longer.
 
 ## 3. Missing values and errors
 
@@ -350,11 +352,13 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | `==` for resources | Compile error; identity via `is_same(a, b)` |
 | Changing a value found in a collection | Values, not shared references: change through the collection, `tasks[index].done = true`; names from patterns and loops are immutable |
 | Variant with the name of a type | Short form only when the name is unambiguous; otherwise `Enum.Variant` |
+| Words such as `error` and `test` as names | Contextual keywords: special only where a declaration starts |
+| A branch that does nothing | `pass`; an empty block stays an error |
 | Compiler implementation language | Rust with code generation through Cranelift in 0.1; self-hosted implementation in Unio by 1.0, once the language is stable |
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–9 were added in version 0.4 after review.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–12 were added in version 0.4 after review and after writing the standard library in Unio.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -365,3 +369,6 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 7. **Honest guarantees on termination.** Running `release` needs memory and a working runtime, which are exactly what is missing after memory exhaustion or a kill signal. Promising more would be untestable; atomic replacement of files gives a guarantee that does not depend on how the program ends.
 8. **Values instead of shared references.** If a name from `case some(task)` could change an element of the list, the reader would have to track every alias to know what a line changes. With values, a change is visible only through the place where it is written, which is the property a reviewer of generated code needs most. Sharing until change keeps the cost of this low.
 9. **Qualified variants when names collide.** `return List` reads as a type, not as a command. The short form is kept where it is unambiguous because it makes `match` readable; the compiler adds the enum name where it is not.
+10. **Contextual keywords.** A reader never sees `error` or `test` in a position where both meanings fit: as keywords they start a top-level declaration, where no expression can stand. Making them contextual keeps natural names for fields and variables, which matters more than a uniform rule for the lexer.
+11. **`pass` instead of empty blocks.** An empty block looks like unfinished code; `pass` states that doing nothing is intended. The word is familiar from Python and adds no new idea.
+12. **Shared state through `var self` methods.** Values make every change visible where it is written. The cost is that changed state must be named at every call; a struct with `var self` methods keeps that explicit without repeating parameters.

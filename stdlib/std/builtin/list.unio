@@ -60,6 +60,20 @@ extend[T] List[T]:
     public function reversed(self) returns List[T]:
         return [self[self.length() - 1 - index] for index in range(0, self.length())]
 
+    ## A sorted list where comes_before(a, b) means that a goes before b; equal items keep their order.
+    ## Merge sort, O(n log n).
+    public function sorted_with(self, comes_before as Function[(T, T) -> Bool]) returns List[T]:
+        if self.length() <= 1:
+            return self
+        let middle = self.length() / 2
+        let left = self.slice(0, middle).sorted_with(comes_before)
+        let right = self.slice(middle, self.length()).sorted_with(comes_before)
+        return merge(left, right, comes_before)
+
+    ## A list sorted by a key of each item, for example names.sorted_by(function (name as Text) returns Int: name.length()).
+    public function sorted_by[K with Order](self, key as Function[(T) -> K]) returns List[T]:
+        return self.sorted_with(function (a as T, b as T) returns Bool: key(a) < key(b))
+
 extend[T with Equal] List[T]:
     ## Used by "item in list".
     public function contains(self, item as T) returns Bool:
@@ -78,19 +92,16 @@ extend[T with Order] List[T]:
                 best = item
         return some(best)
 
-    ## A sorted list; equal items keep their order. Merge sort, O(n log n).
+    ## A sorted list; equal items keep their order.
     public function sorted(self) returns List[T]:
-        if self.length() <= 1:
-            return self
-        let middle = self.length() / 2
-        return merge(self.slice(0, middle).sorted(), self.slice(middle, self.length()).sorted())
+        return self.sorted_with(function (a as T, b as T) returns Bool: a < b)
 
-function merge[T with Order](left as List[T], right as List[T]) returns List[T]:
+function merge[T](left as List[T], right as List[T], comes_before as Function[(T, T) -> Bool]) returns List[T]:
     var result as List[T] = []
     var left_index = 0
     var right_index = 0
     while left_index < left.length() and right_index < right.length():
-        if right[right_index] < left[left_index]:
+        if comes_before(right[right_index], left[left_index]):
             result.append(right[right_index])
             right_index = right_index + 1
         else:

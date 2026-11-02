@@ -70,7 +70,7 @@ function link_targets(text as Text) returns List[Text]:
                     case some(target):
                         targets.append(target)
                     case none:
-                        continue
+                        pass
             case none:
                 return targets
 
@@ -123,7 +123,7 @@ function file_problems(root as Path, relative as Text) returns List[Text]:
             if not files.exists(root.join(target)):
                 problems.append("{relative}: missing Russian localization {target}")
         case none:
-            return problems
+            pass
     return problems
 
 public function main() returns Int:

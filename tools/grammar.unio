@@ -44,6 +44,7 @@ public struct Grammar:
     rules as Map[Text, Node]
     order as List[Text]
     keywords as List[Text]
+    contextual as List[Text]
     reserved as List[Text]
     punctuation as List[Text]
 
@@ -130,7 +131,8 @@ public function read_grammar(path as Path) returns Grammar fails with GrammarErr
 
 ## Reads the grammar from the text of spec/grammar.ebnf.
 public function load_grammar(source as Text) returns Grammar fails with GrammarError:
-    let keywords = try read_word_list(source, "requires an RFC):", "Reserved")
+    let keywords = try read_word_list(source, "requires an RFC):", "Contextual keywords")
+    let contextual = try read_word_list(source, "where a rule uses them):", "A contextual keyword")
     let reserved = try read_word_list(source, "(using them is E0032):", "Punctuation")
     let punctuation = try read_word_list(source, "Punctuation and operators:", "*)")
     let tokens = try tokenize_ebnf(strip_comments(source))
@@ -157,7 +159,7 @@ public function load_grammar(source as Text) returns Grammar fails with GrammarE
                 fail GrammarError(message = "rule {name}: trailing tokens")
             rules.put(name, body)
         index = end + 1
-    return Grammar(rules = rules, order = order, keywords = keywords, reserved = reserved, punctuation = punctuation)
+    return Grammar(rules = rules, order = order, keywords = keywords, contextual = contextual, reserved = reserved, punctuation = punctuation)
 
 ## The words between two markers inside the comments of the grammar.
 function read_word_list(source as Text, start as Text, end as Text) returns List[Text] fails with GrammarError:
@@ -282,11 +284,13 @@ public function self_check(language as Grammar) returns List[Text]:
             problems.append("rule {name} is not reachable from file")
     let words = [term for term in terms if is_word(term, false)]
     for word in words.sorted():
-        if word not in language.keywords:
+        if word not in language.keywords and word not in language.contextual:
             problems.append("terminal '{word}' is not in the keyword list")
-    for keyword in language.keywords.sorted():
+    for keyword in (language.keywords + language.contextual).sorted():
         if keyword not in words:
             problems.append("keyword '{keyword}' is not used by any rule")
+    if language.keywords.find(function (keyword as Text) returns Bool: keyword in language.contextual).is_some():
+        problems.append("a word is both a keyword and a contextual keyword")
     let symbols = [term for term in terms if not is_word(term, true)]
     for symbol in symbols.sorted():
         if symbol not in language.punctuation:
@@ -367,14 +371,7 @@ public function tokenize(source as Text, language as Grammar) returns List[Token
 
 ## The marks ordered by decreasing length, keeping the order of marks of equal length.
 function longest_first(marks as List[Text]) returns List[Text]:
-    var longest = 0
-    for mark in marks:
-        if mark.length() > longest:
-            longest = mark.length()
-    var ordered as List[Text] = []
-    for offset in range(0, longest):
-        ordered.append_all(marks.filter(function (mark as Text) returns Bool: mark.length() == longest - offset))
-    return ordered
+    return marks.sorted_by(function (mark as Text) returns Int: -mark.length())
 
 extend Lexer:
     function peek(self, offset as Int = 0) returns Text:
@@ -609,10 +606,6 @@ function is_name_character(character as Text) returns Bool:
 function is_in(character as Text, allowed as Text) returns Bool:
     return character.length() == 1 and allowed.contains(character)
 
-function min(a as Int, b as Int) returns Int:
-    return a if a < b else b
-
-
 # ---------------------------------------------------------------- parser
 
 struct Match:
@@ -627,6 +620,7 @@ struct InterpolationError:
 ## Ordered choice over the EBNF rules, memoized per rule and position.
 struct Parser:
     rules as Map[Text, Node]
+    contextual as List[Text]
     tokens as List[Token]
     build_tree as Bool
     var results as Map[Text, Match] = {}
@@ -689,7 +683,7 @@ extend Parser:
         match node:
             case Node.Terminal(text):
                 match self.tokens.get(position):
-                    case some(token) if token.kind == text or (text == "_" and token.kind == "NAME" and token.value == "_"):
+                    case some(token) if token.kind == text or (token.kind == "NAME" and token.value == text and (text == "_" or text in self.contextual)):
                         return some(self.leaf(token, position))
                     case _:
                         self.note(position, "'{text}'")
@@ -722,7 +716,7 @@ extend Parser:
                         case some(found):
                             return some(found)
                         case none:
-                            continue
+                            pass
                 return none
             case Node.Optional(item):
                 return some(self.match_node(item, position) or Match(end = position, children = []))
@@ -740,7 +734,7 @@ extend Parser:
     ## Each interpolation of a TEXT token must be a complete expression.
     function check_text(var self, token as Token) returns Bool:
         for part in token.parts:
-            var inner = Parser(rules = self.rules, tokens = part, build_tree = self.build_tree)
+            var inner = Parser(rules = self.rules, contextual = self.contextual, tokens = part, build_tree = self.build_tree)
             match inner.parse("expression"):
                 case some(_):
                     continue
@@ -758,7 +752,7 @@ public function check_source(source as Text, language as Grammar, build_tree as 
     let text = source.slice(1, source.length()) if source.starts_with("\u{FEFF}") else source
     let tokens = try tokenize(text, language) on LexError as e:
         return CheckResult(tree = none, problem = some(Problem(code = e.code, line = e.line, column = e.column, message = e.message)))
-    var parser = Parser(rules = language.rules, tokens = tokens, build_tree = build_tree)
+    var parser = Parser(rules = language.rules, contextual = language.contextual, tokens = tokens, build_tree = build_tree)
     match parser.parse("file"):
         case some(tree):
             return CheckResult(tree = some(tree), problem = none)

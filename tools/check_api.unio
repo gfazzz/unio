@@ -98,7 +98,7 @@ function load_api(language as grammar.Grammar, var problems as List[Text]) retur
                 problems.append("stdlib/{name}: does not parse: line {problem.line}: {problem.message}")
                 continue
             case none:
-                let is_unsafe = grammar.children_of(tree).find(function (child as grammar.Tree) returns Bool: grammar.rule_of(child) == "module_header") != none
+                let is_unsafe = grammar.children_of(tree).find(function (child as grammar.Tree) returns Bool: grammar.rule_of(child) == "module_header").is_some()
                 if not is_unsafe and has_rule(tree, "external_decl"):
                     problems.append("stdlib/{name}: external function outside an unsafe module")
         var public_functions as List[Text] = []
@@ -166,7 +166,7 @@ function check_program(path as Path, language as grammar.Grammar, api as Api, va
                 case some(local):
                     add_unique(locals, local)
                 case none:
-                    continue
+                    pass
     var known_modules = api.modules
     var local_types as List[Text] = []
     var local_variants as Map[Text, List[Text]] = {}
@@ -253,7 +253,7 @@ function check_variant_names(name as Text, tree as grammar.Tree, var problems as
                     if token.value in names and (token.value in BUILTIN_TYPES or token.value in own.types):
                         problems.append("{name}:{token.line}: variant {token.value} has the name of a type; write {enum_name}.{token.value} (L-6a)")
             case none:
-                continue
+                pass
 
 ## The public functions and types of a module of the same package: a file next to the program.
 function package_module(program as Path, module_name as Text, language as grammar.Grammar) returns Option[Declarations]:
@@ -347,7 +347,7 @@ function top_items(tree as grammar.Tree) returns List[grammar.Tree]:
                 case some(item):
                     items.append(item)
                 case none:
-                    continue
+                    pass
     return items
 
 function is_public(children as List[grammar.Tree]) returns Bool:
@@ -366,8 +366,10 @@ function declarations(tree as grammar.Tree) returns Declarations:
     for rule, children in walk(tree):
         if rule == "function_sig":
             add_unique(functions, names_in(children).first() or "")
-        else if rule in ["struct_decl", "error_decl", "interface_decl"]:
+        else if rule in ["struct_decl", "interface_decl"]:
             add_unique(types, names_in(children).first() or "")
+        else if rule == "error_decl":
+            add_unique(types, names_in(children).get(1) or "")    # the first name is the contextual keyword error
         else if rule == "enum_decl":
             let enum_name = names_in(children).first() or ""
             add_unique(types, enum_name)
@@ -381,9 +383,9 @@ function declarations(tree as grammar.Tree) returns Declarations:
                                     case some(token):
                                         add_unique(names, token.value)
                                     case none:
-                                        continue
+                                        pass
                             case none:
-                                continue
+                                pass
             variants.put(enum_name, merge_unique(variants.get(enum_name) or [], names))
     return Declarations(functions = functions, types = types, variants = variants)
 

@@ -22,7 +22,7 @@ extend Text:
     ## The Unicode code points of the characters.
     public external function code_points(self) returns List[Int]
 
-    ## Characters from start up to, but not including, end; a fault outside 0..length().
+    ## Characters from start up to, but not including, end; a fault outside 0..length(). Constant time.
     public external function slice(self, start as Int, end as Int) returns Text
 
     ## Position of the first occurrence of part at or after start. An empty part is found at start.
@@ -36,6 +36,11 @@ extend Text:
 
     ## The number written in decimal or scientific notation; none for anything else.
     public external function to_float(self) returns Option[Float]
+
+    ## The character at the position as a Text of length 1; a fault outside 0..length().
+    ## Text keeps an index of character positions, so this takes constant time.
+    public function char_at(self, index as Int) returns Text:
+        return self.slice(index, index + 1)
 
     public function is_empty(self) returns Bool:
         return self.length() == 0

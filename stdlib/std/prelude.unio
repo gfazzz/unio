@@ -77,6 +77,14 @@ public function range(start as Int, end as Int) returns List[Int]:
         current = current + 1
     return numbers
 
+## The smaller of two values; a when they are equal.
+public function min[T with Order](a as T, b as T) returns T:
+    return b if b < a else a
+
+## The larger of two values; a when they are equal.
+public function max[T with Order](a as T, b as T) returns T:
+    return b if b > a else a
+
 external function write_output(text as Text)
 
 external function write_error(text as Text)

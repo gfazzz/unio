@@ -1,0 +1,12 @@
+## Methods of Option[T]. The operator or gives a default value; ?. passes none along a chain.
+
+extend[T] Option[T]:
+    public function is_some(self) returns Bool:
+        match self:
+            case some(_):
+                return true
+            case none:
+                return false
+
+    public function is_none(self) returns Bool:
+        return not self.is_some()

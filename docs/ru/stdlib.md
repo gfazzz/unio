@@ -10,9 +10,11 @@
 
 | Файл | Содержание | На Unio | Внешние примитивы |
 |---|---|---|---|
-| [prelude.unio](../../stdlib/std/prelude.unio) | `Display`, `Error`, `Equal`, `Order`, `Hash`, интерфейсы операторов, `Resource`, `Option`, `Result`, `print`, `print_error`, `range` | интерфейсы, перечисления, `print`, `range` | стандартный вывод, `assert_fail`, `expect_fault`, `is_same` |
-| [builtin/text.unio](../../stdlib/std/builtin/text.unio) | Методы `Text` | поиск, разбиение, обрезка, `to_int`, `replace`, `lines` | длина, символы, срезы, `index_of`, регистр, `to_float` |
-| [builtin/list.unio](../../stdlib/std/builtin/list.unio) | Методы `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted` (сортировка слиянием) | длина, `get`, `append`, `remove_last` |
+| [prelude.unio](../../stdlib/std/prelude.unio) | `Display`, `Error`, `Equal`, `Order`, `Hash`, интерфейсы операторов, `Resource`, `Option`, `Result`, `print`, `print_error`, `range`, `min`, `max` | интерфейсы, перечисления, `print`, `range`, `min`, `max` | стандартный вывод, `assert_fail`, `expect_fault`, `is_same` |
+| [builtin/text.unio](../../stdlib/std/builtin/text.unio) | Методы `Text` | поиск, разбиение, обрезка, `char_at`, `to_int`, `replace`, `lines` | длина, символы, срезы, `index_of`, регистр, `to_float` |
+| [builtin/list.unio](../../stdlib/std/builtin/list.unio) | Методы `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted`, `sorted_by`, `sorted_with` (сортировка слиянием) | длина, `get`, `append`, `remove_last` |
+| [builtin/option.unio](../../stdlib/std/builtin/option.unio) | Методы `Option[T]` | `is_some`, `is_none` | — |
+| [builtin/set.unio](../../stdlib/std/builtin/set.unio) | `Set[T]` и `List.to_set` | `union`, `intersection`, `difference`, `to_set` | хранение элементов |
 | [builtin/map.unio](../../stdlib/std/builtin/map.unio) | Методы `Map[K, V]` | `contains`, `keys`, `values` | хранение записей |
 | [builtin/path.unio](../../stdlib/std/builtin/path.unio) | `Path` | компоненты, `name`, `extension`, `parent`, `join`, `normalize` | создание, текстовая форма, разделитель платформы |
 | [builtin/int.unio](../../stdlib/std/builtin/int.unio), [float.unio](../../stdlib/std/builtin/float.unio), [bool.unio](../../stdlib/std/builtin/bool.unio) | Числа и `Bool` | `checked_divide`, `Bool.to_text` | арифметика с проверкой, преобразования |
