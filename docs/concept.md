@@ -1,6 +1,6 @@
 # Unio: refined concept
 
-Version: 0.4. Changes from 0.3: the sandbox is mandatory (section 6), the rule for calling a function with `fails with` is the same in every position (section 3.2), and the guarantees on termination are split by kind (sections 3.3, 4.1), values are never shared between names (section 2.7), and variants with a colliding name are written in full (section 2.6). This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
+Version: 0.4. Changes from 0.3: the language is built in the language (section 1.1); the sandbox is mandatory (section 6), the rule for calling a function with `fails with` is the same in every position (section 3.2), and the guarantees on termination are split by kind (sections 3.3, 4.1), values are never shared between names (section 2.7), and variants with a colliding name are written in full (section 2.6). This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
 
 ## 1. Purpose and principle
 
@@ -18,6 +18,14 @@ Consequences of the principle, against which every language decision is checked:
 2. Nothing happens implicitly: no implicit type conversions, no state shared between names behind the reader's back, no hidden exceptions.
 3. A function signature is a complete contract: input, result, errors, and later effects.
 4. Everything that can go wrong is either expressed in a type (`Option`, `fails with`) or is a fault with defined behavior.
+
+### 1.1 The language is built in the language
+
+Unio is developed in Unio wherever that is possible: the standard library, the project tools, the reference utilities, and, by 1.0, the compiler. Every gap found while doing this is closed in the language or in the library, and the improved language is then used to write the next part. The language thus improves recursively, and every decision is tested on real code before it is fixed.
+
+Where Unio cannot be used yet, a temporary implementation in another language does the work and is removed as soon as Unio can replace it: the compiler and the runtime are in Rust until self-hosting, the checkers in `spec/` are in Python until the interpreter of stage 3 runs their Unio versions in `tools/`. A part written in another language needs a stated reason and a stated end.
+
+This has already paid off: writing the standard library and the checkers in Unio exposed the explicit commit of atomic files, contextual keywords, `pass`, package modules, and missing library functions, all settled in version 0.4.
 
 ## 2. Syntax
 
@@ -342,6 +350,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Calling a function with `fails with` without `try` | Compile error in any position, including the `match` subject; no implicit `Result` |
 | Out of memory | Not a fault: exit code 102, no user code runs; files are protected only by atomic writes |
 | Enforcement of permissions | Mandatory OS sandbox, narrowed by an external policy; fails closed |
+| What the language and its tools are written in | In Unio wherever possible (section 1.1); another language only temporarily, with a reason and an end |
 | Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
@@ -358,7 +367,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–12 were added in version 0.4 after review and after writing the standard library in Unio.
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6–13 were added in version 0.4 after review and after writing the standard library in Unio.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
@@ -372,3 +381,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 10. **Contextual keywords.** A reader never sees `error` or `test` in a position where both meanings fit: as keywords they start a top-level declaration, where no expression can stand. Making them contextual keeps natural names for fields and variables, which matters more than a uniform rule for the lexer.
 11. **`pass` instead of empty blocks.** An empty block looks like unfinished code; `pass` states that doing nothing is intended. The word is familiar from Python and adds no new idea.
 12. **Shared state through `var self` methods.** Values make every change visible where it is written. The cost is that changed state must be named at every call; a struct with `var self` methods keeps that explicit without repeating parameters.
+13. **The language built in the language.** A design checked only on examples misses what a large program needs; a library and tools written in Unio are such programs, and they are needed anyway. Writing them first in Unio turns every awkward spot into a concrete finding, while the cost of a temporary second implementation is limited to the time until the interpreter runs.

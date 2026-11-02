@@ -25,6 +25,7 @@ The concept rests on the following decisions:
 - **Development of AI itself.** The compute extension provides tensors, automatic differentiation, CPU/GPU backends, buffer planning, and RAM/VRAM profiling. Memory savings come from suitable algorithms, data formats, and cache management, and are evaluated together with speed and model quality.
 - **Security on several levels.** A safe subset of the language rules out common memory errors. Execution isolation, least privilege, dependency verification, and a protected release process limit the consequences of compromise. Out-of-memory, abnormal termination, and native components are tested separately.
 - **Extensible computation.** A quantum module adds circuits, simulation, and hardware access through shared tooling. Support for a specific device is defined by its capabilities.
+- **Built in itself.** Unio is developed in Unio wherever possible: the standard library and the project tools are already written in it, and the compiler follows by 1.0. Every gap found this way is closed in the language, so the language improves recursively.
 
 Unio is to ship as a single kit: compiler, standard library, dependency management, formatter, testing, editor support, and profiler.
 
