@@ -1,0 +1,7 @@
+## External functions are allowed only in an unsafe module of the standard library.
+unsafe module
+
+external function os_read(descriptor as Int, size as Int) returns Bytes fails with IoError
+
+public function read_chunk(descriptor as Int) returns Bytes fails with IoError:
+    return try os_read(descriptor, 4096)

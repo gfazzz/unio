@@ -1,0 +1,4 @@
+# expect-error: 4
+function f():
+
+let x = 1

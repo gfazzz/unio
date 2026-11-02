@@ -1,0 +1,2 @@
+# expect-error: 2
+print("top-level code is not allowed")

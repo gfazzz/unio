@@ -114,11 +114,11 @@ test "parse_command распознаёт add":
     assert command == Add(title = "купить хлеб")
 
 test "parse_command отклоняет нечисловой номер":
-    match parse_command(["done", "abc"]):
-        case ok(_):
-            assert_fail("ожидалась ошибка")
-        case error(UsageError as e):
-            assert e.message.contains("должен быть числом")
+    try:
+        parse_command(["done", "abc"])
+        assert_fail("ожидалась ошибка")
+    on UsageError as e:
+        assert e.message.contains("должен быть числом")
 
 test "next_id для пустого списка":
     assert next_id([]) == 1

@@ -1,6 +1,6 @@
 # Unio: refined concept
 
-Version: 0.3. This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
+Version: 0.4. Changes from 0.3: the sandbox is mandatory (section 6), the rule for calling a function with `fails with` is the same in every position (section 3.2), and the guarantees on termination are split by kind (sections 3.3, 4.1). This document refines the original concept from the README and fixes the decisions without which implementation cannot start. There are no open questions; the rationale for the latest decisions is in section 11.
 
 ## 1. Purpose and principle
 
@@ -191,6 +191,8 @@ Rules:
    - prefix `try` before the call: the error propagates to the caller, which must list it in its own `fails with`;
    - a `try:` block with `on` handlers.
 
+   The rule is the same in every position: a statement, an initializer, an argument, the subject of `match`. A call to a function with `fails with` never turns into a `Result` by itself.
+
 ```unio
 try:
     let config = read_config(path)
@@ -203,13 +205,25 @@ on ParseError as e:
 
 5. The compiler checks that every error from the callee's `fails with` is either handled in `on` or listed in the current function's `fails with`. The handler `on Error as e` catches any error; `Error` is the common interface of all errors with the method `to_text`.
 6. For scripts and prototypes the signature `fails with Error` is allowed: the concrete set is not fixed, but the fact that an error is possible stays visible.
-7. For functions where an error is needed as a value there is the type `Result[T, E]` with variants `ok(value)` and `error(value)`; `try` works with it too. In the standard library `Result` is used only where errors must be stored or passed on.
+7. For functions where an error is needed as a value there is the type `Result[T, E]` with variants `ok(value)` and `error(value)`; `try` works with it too. A `Result` exists only where a function declares it as its result or the value is built explicitly. In the standard library `Result` is used only where errors must be stored or passed on. The conversion from `fails with` to `Result` is written explicitly:
+
+```unio
+function parse_safely(arguments as List[Text]) returns Result[Command, UsageError]:
+    try:
+        return ok(parse_command(arguments))
+    on UsageError as e:
+        return error(e)
+```
+
+8. The block of an inline handler `try ... on E as e:` does not complete normally: it ends with `return`, `fail`, `break`, `continue`, or a call that never returns (`assert_fail`). The value of the expression is therefore always the successful result.
 
 ### 3.3 Faults
 
-A fault is a contract violation that cannot be handled inside the program: index out of range in `items[i]`, division by zero, `Int` overflow, out of memory, a failed `assert`.
+A fault is a contract violation that cannot be handled inside the program: index out of range in `items[i]`, division by zero, `Int` overflow, a failed `assert`.
 
-- Behavior is defined: the program prints a diagnostic with a stack trace to stderr and exits with code 101. Open resources in `using` blocks are closed.
+- Behavior is defined: the program prints a diagnostic with a stack trace to stderr, the runtime unwinds the stack and calls `release` for open `using` blocks in reverse order, and the program exits with code 101.
+- Exhaustion of memory (heap or stack) is not a fault. The runtime cannot promise to run user code when there is no memory, so it writes a preallocated diagnostic and exits with code 102 without calling `release`. The same holds for anything outside the runtime's control: a kill signal, power loss, a crash in external code.
+- What survives every kind of termination is stated separately: a file written by `files.write_text` or through `files.open_atomic` holds either the old or the new complete content, because the write goes to a temporary file that replaces the target by rename.
 - A fault cannot be caught with `on`. It can be observed only in tests (`expect_fault`) and at the process boundary.
 - Every faulting operation has a safe form returning `Option` or an error: `items.get(i)`, `a.checked_divide(b)`, `a.checked_add(b)`.
 
@@ -225,7 +239,7 @@ Domain errors and program defects are thus distinguished syntactically, and the 
 The boundary between the models: a type implements the interface `Resource` (method `release`), therefore it is a resource. Such a value:
 
 - is created in a `using` block or as a field of another resource;
-- is released on leaving the block, in reverse order of creation, including on error and on fault;
+- is released on leaving the block, in reverse order of creation, including on error and on fault (but not on memory exhaustion or abnormal termination, see 3.3);
 - cannot be stored in an ordinary struct or collection that outlives the block; that is a compile error. If a resource must be stored, the owner itself is declared a `Resource` and releases it in `release`.
 
 ```unio
@@ -266,7 +280,8 @@ let data = json.parse(text)
 
 - All first-release code is written in the safe subset: no pointers, no manual memory management, bounds checks, initialized values.
 - Unsafe operations appear only in external functions (`external function`, FFI) and only in modules marked `unsafe module`. Such modules are listed in the manifest and shown when a dependency is installed.
-- Least privilege: the manifest declares what the package needs (`files`, `network`, `process`, `env`). The compiler forbids using standard-library modules outside the declared permissions. This answers the reader's question "what can this program do" before it runs.
+- Least privilege: the manifest declares what the package needs (`files` with read and write paths, `env` with variable names, `process` with program names, `network`). The compiler forbids using standard-library modules outside the declared permissions. This answers the reader's question "what can this program do" before it runs.
+- Mandatory sandbox: the same permissions are enforced at run time by the operating system (Landlock and seccomp on Linux, Seatbelt on macOS, AppContainer on Windows). The operator can narrow them further with an external policy (`--policy` or `UNIO_POLICY`) and set limits on memory, time, and processes; the program cannot widen them. If the required mechanism is missing, the program does not start unless the operator explicitly allows a weaker sandbox. The compile-time check tells the reader what the program intends to do; the sandbox limits what it can do even if the check, the compiler, or the standard library is wrong. This matters most for running AI-generated code.
 - Per-function effects in the signature (`uses files`) are not declared in the first release. The compiler derives effects from the call graph and shows them in `unio symbol` and in documentation: the reader and the AI see that a function touches files or processes without growing the language vocabulary. The word `uses` is reserved for the compute extension (`uses gpu`), where an effect influences resource scheduling, not only permissions.
 - Dependencies: registry signatures, hash verification, warnings about `unsafe module`, no network actions during build.
 - Release: reproducible build, signed artifacts, SBOM.
@@ -306,6 +321,9 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | `+` for text | Only `Text + Text` is allowed; interpolation is the standard |
 | How `Option`, `fails with`, and `Result` relate | `Option` is absence of a value; `fails with` is a function error; `Result` is an error as a stored value; `try` works with the latter two |
 | What happens on `items[i]` out of range | Fault with exit code 101, uncatchable; safe form `get` |
+| Calling a function with `fails with` without `try` | Compile error in any position, including the `match` subject; no implicit `Result` |
+| Out of memory | Not a fault: exit code 102, no user code runs; files are protected only by atomic writes |
+| Enforcement of permissions | Mandatory OS sandbox, narrowed by an external policy; fails closed |
 | Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
@@ -318,10 +336,12 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 
 ## 11. Rationale for the latest decisions
 
-The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources".
+The decisions on questions left open in version 0.1 of the concept follow from the principle "clear code, explicit behavior, controlled resources". Items 6 and 7 were added in version 0.4 after review.
 
 1. **`Decimal` outside the core.** A small vocabulary of constructs matters more than convenience for one domain. Familiar arithmetic notation is preserved because operators are bound to interfaces, not to built-in types. Explicit `Decimal("19.99")` rules out hidden rounding when mixing with `Float`.
 2. **Effects without syntax.** Package permissions already answer "what can the program do". Function effects are useful to the reader and the AI, but they can be computed rather than required in writing; signatures stay short and no information is lost. Once an effect influences execution (GPU), it becomes part of the signature through `uses`.
 3. **`Float` per IEEE 754.** Deviating from the standard would make numeric code surprising to everyone who knows other languages. The dangerous spots are closed by forbidding `Hash` and `match` patterns, not by changing the operator's semantics.
 4. **Resources without `==`.** Comparing handles has no obvious meaning for a reader: contents or identity? A compile error with the hint `is_same` makes the choice explicit.
 5. **Rust and Cranelift.** Unio's safe subset rests on a safe compiler; Rust provides that without manual memory checking. Cranelift gives fast, deterministic builds, which matters more than peak optimization for CLI utilities and for the "generate, check" loop. LLVM may become a second backend for `--release` if the 0.2 benchmarks require it. Self-hosting moves to 1.0: writing a compiler in a language that is still changing means writing it twice.
+6. **Sandbox as a requirement, not an option.** Permissions in the manifest are checked by the compiler, but a compiler check protects only against what the compiler understands. Code written by AI is run often and reviewed briefly, so the consequences of a mistake must be limited by the operating system. Failing closed keeps a missing kernel feature from silently turning the sandbox off.
+7. **Honest guarantees on termination.** Running `release` needs memory and a working runtime, which are exactly what is missing after memory exhaustion or a kill signal. Promising more would be untestable; atomic replacement of files gives a guarantee that does not depend on how the program ends.

@@ -1,0 +1,2 @@
+# expect-error: 2
+var counter = 0

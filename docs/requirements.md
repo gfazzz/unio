@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.2 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.3 (draft). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.2: a mandatory sandbox enforced by the operating system and an external policy (section 4.6); a single rule for calling a function with `fails with` (L-14, L-16); a termination model with separate guarantees for faults, memory exhaustion, and abnormal termination, and atomic file writes (sections 4.5, S-9, R-2).
 
 The words "must" and "shall" denote mandatory requirements; "should" denotes desirable ones; "may" denotes permitted ones.
 
@@ -33,7 +35,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - Language: the constructs of `docs/concept.md`, sections 2–5.
 - Compiler with type and error checking; native builds for Linux x86-64, Linux arm64, macOS arm64, Windows x86-64.
-- Runtime: GC, resources, faults, `main` startup.
+- Runtime: GC, resources, faults, termination model, `main` startup.
+- Sandbox: enforcement of manifest permissions and of an external policy by operating-system mechanisms (section 4.6).
 - Standard library for CLI (section 5).
 - Tools: `unio build`, `run`, `check`, `fmt`, `test`, `add`, `remove`, `update`, `doc`, `symbol`, `explain`.
 - Package manager with manifest, lock file, and registry.
@@ -78,17 +81,19 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - L-12. `Option[T]` with `some`/`none`, operators `or` and `?.`.
 - L-13. `error` declares an error type. `fails with` lists a function's errors and is part of its type.
-- L-14. Calling a function with `fails with` without `try` is a compile error. Prefix `try` propagates; `try:` with `on` handles; `try ... on E as e:` handles one error inline.
+- L-14. Calling a function with `fails with` without `try` is a compile error in every position: a statement, an initializer, an argument, a `match` subject. Prefix `try` propagates; `try:` with `on` handles; `try ... on E as e:` handles one error inline. Such a call never yields a `Result` implicitly.
+- L-14a. The block of an inline handler `try ... on E as e:` must not complete normally: it ends with `return`, `fail`, `break`, `continue`, or a call of a function that never returns (`assert_fail`). The value of the expression is therefore always the successful result.
 - L-15. The compiler checks completeness of handling: every error is either handled or listed in the current function's `fails with`. `on Error` handles any error.
-- L-16. `Result[T, E]` supports `try` and `match`.
-- L-17. Faults: index out of range, division by zero, `Int` overflow, failed `assert`, out of memory. Behavior: diagnostic to stderr, exit code 101, release of resources in `using`. A fault cannot be handled with `on`.
+- L-16. `Result[T, E]` is an ordinary `enum` with variants `ok(value)` and `error(value)`. A `Result` value exists only where a function declares `returns Result[T, E]` or the value is constructed explicitly. `match` inspects it; `try` applied to it propagates or handles `E` exactly as for a call with `fails with E`. There is no implicit conversion in either direction.
+- L-17. Faults: index out of range, division by zero, `Int` overflow, failed `assert`, `assert_fail`. Behavior is controlled termination (section 4.5): diagnostic with a stack trace to stderr, release of resources in `using`, exit code 101. A fault cannot be handled with `on`.
+- L-17a. Exhaustion of memory (heap or stack) is not a fault: it causes emergency termination with exit code 102 (section 4.5), during which no user code runs, `release` included.
 - L-18. Every faulting operation in the standard library has a safe form returning `Option` or an error.
 
 ### 3.5 Memory and resources
 
 - L-19. Managed values live under the GC. A program cannot obtain the address of a value.
 - L-20. The `Resource` interface with the method `release`. A resource value is created in `using` or as a field of another resource; storing a resource in an ordinary struct that outlives the block is a compile error.
-- L-21. Release in `using` happens on normal exit, on error, and on fault, in reverse order.
+- L-21. Release in `using` happens on normal exit, on error, and on fault, in reverse order of creation. On emergency and abnormal termination (section 4.5) release is not performed; guarantees for files in those cases come only from atomic writes (S-9).
 
 ### 3.6 Modules and visibility
 
@@ -127,7 +132,27 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - C-13. The GC is precise, tracing, non-moving. Pauses and throughput are measured in the performance suite.
 - C-14. The stack trace on a fault contains function names, files, and lines without external debug formats.
-- C-15. Exit codes: 0 success, the value of `main` otherwise, 101 fault, 102 out of memory.
+- C-15. Exit codes: 0 success; otherwise the value of `main`, which lies in 0–100; 101 fault; 102 memory exhausted (heap or stack); 103 the sandbox or the policy could not be applied (section 4.6). Codes 104–127 are reserved for the runtime. A `main` value outside 0–100 is a fault.
+
+### 4.5 Termination model
+
+- C-16. Normal termination: `main` returns. Buffered output is written, resources are already released by their `using` blocks.
+- C-17. Controlled termination (fault, code 101): user code stops at the fault point; the runtime prints the diagnostic and the stack trace, unwinds the stack, and calls `release` for every open `using` in reverse order. `release` runs with a memory reserve set aside at startup. A fault or error inside `release` during termination is reported, and the remaining resources are still released; the exit code stays 101.
+- C-18. Emergency termination (code 102): the heap is exhausted beyond the reserve, the heap limit of the policy is exceeded, or the stack overflows. The runtime writes a preallocated diagnostic to stderr and exits without running user code. Descriptors are closed by the operating system; data buffered inside the program is lost.
+- C-19. Abnormal termination: a kill signal, power loss, a crash of external code, an operating-system failure. The runtime gives no guarantees; only the guarantees of the operating system and of atomic writes (S-9) remain.
+- C-20. The documentation lists for each kind of termination which guarantees hold for resources, standard output, and files. Writes through an open file handle without `open_atomic` are not called safe: after emergency or abnormal termination their content may be cut off at any point.
+
+### 4.6 Sandbox
+
+- SB-1. Every program started through `unio run`, `unio test`, or as a built executable runs in a sandbox. The runtime applies the restrictions by operating-system mechanisms before `main`; the program cannot lift them later, and child processes inherit them.
+- SB-2. Effective permissions are the intersection of the manifest permissions (T-6) and the external policy (SB-3). Without declared permissions a program can only read its arguments and standard input and write to standard output and standard error.
+- SB-3. The external policy is a file given by the operator with `--policy <file>` or the environment variable `UNIO_POLICY`. It can only narrow the manifest permissions and sets limits: heap size, wall time, CPU time, number of processes, size of written files. Extra permissions in a policy have no effect and produce a warning. A policy that cannot be read or parsed stops the start with code 103.
+- SB-4. Mechanisms: Linux — Landlock for the file system, seccomp-bpf for system calls, `no_new_privs`, resource limits; macOS — a Seatbelt profile and resource limits; Windows — AppContainer and a Job Object. The choice is confirmed by prototypes in stage 4 of the plan; the requirement is the outcome, verified by SB-8.
+- SB-5. The sandbox fails closed: if the operating system lacks a required mechanism, the program does not start (code 103). Only the operator can allow a weaker sandbox, with `--allow-weaker-sandbox` or `allow_weaker = true` in the policy; the runtime then prints the restrictions that are missing. The program itself cannot do this.
+- SB-6. An operation blocked by the sandbox ends with the error that the standard library function already declares (for example, `IoError` of kind `permission_denied` naming the denied permission), not with a fault. Safe code reaches the operating system only through the standard library.
+- SB-7. The compile-time check stays: using a standard-library module outside the declared permissions is a compile error, and derived effects are shown in `unio symbol`. The sandbox is the second line of defence, not a replacement.
+- SB-8. A test suite of programs that attempt forbidden actions through every standard-library module and through child processes runs on all four platforms; every attempt must be denied.
+- SB-9. The documentation states the limits of the sandbox: it does not protect against kernel vulnerabilities and side channels, nor against misuse of granted permissions. For AI-generated code it recommends a minimal manifest, an external policy with limits, and a separate user, container, or virtual machine for untrusted code.
 
 ## 5. Standard library requirements
 
@@ -139,6 +164,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-5. `std.json`: parse to a value, encode and decode structs from their declaration, without annotations.
 - S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
 - S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
+- S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6).
+- S-9. Atomic writes in `std.files`: `write_text` and `write_bytes` replace the target through a temporary file in the same directory followed by a rename, so a reader sees either the old or the new complete content under any kind of termination. The `durable = true` option also syncs the file and the directory to storage. `open_atomic(path)` returns a resource whose content replaces the target only when its `using` block completes normally; on error or fault the target is unchanged and the temporary file is removed. After emergency or abnormal termination a temporary file named `.<name>.unio-tmp-<id>` may remain; it never replaces the target.
 
 ## 6. Tooling requirements
 
@@ -148,10 +175,10 @@ Release 0.1 is intended for writing command-line utilities and automation script
 |---|---|---|
 | `unio new <name>` | Create a package with manifest and example | `--lib`, `--bin` |
 | `unio build` | Build an executable | `--release`, `--target` |
-| `unio run` | Build and run | arguments after `--` |
+| `unio run` | Build and run | arguments after `--`, `--policy` |
 | `unio check` | Check without building | `--diagnostics=json` |
 | `unio fmt` | Format | `--check` for CI |
-| `unio test` | Run tests | `--json`, name filter |
+| `unio test` | Run tests | `--json`, name filter, `--policy` |
 | `unio add/remove/update` | Manage dependencies | version, `--unsafe-ok` |
 | `unio doc` | Build package documentation | `--open` |
 | `unio symbol`, `unio outline`, `unio explain` | Context for people and AI | `--json` |
@@ -169,7 +196,14 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 6.4 Packages
 
-- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions (`files`, `network`, `process`, `env`), list of `unsafe module`.
+- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions, list of `unsafe module`. Permissions are scoped: `files.read` and `files.write` are lists of paths with the placeholders `$HOME`, `$CWD`, `$TEMP` and the suffix `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. Example:
+
+```toml
+[permissions]
+files.read = ["$HOME/.todo.json"]
+files.write = ["$HOME/.todo.json"]
+env = ["TODO_FILE", "HOME"]
+```
 - T-7. `unio.lock` contains versions and content hashes of all dependencies. A build with a lock file does not touch the network.
 - T-8. Registry: signed publishing, signature verification on install, no deletion of published versions.
 - T-9. Installing a dependency with `unsafe module` or with permissions wider than the package's own requires explicit confirmation.
@@ -198,7 +232,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 ### 7.2 Reliability
 
 - R-1. The compiler does not crash on any input; verified by fuzzing for at least 24 hours before release.
-- R-2. The runtime, on out-of-memory, exits with code 102 and a diagnostic without corrupting files opened through `using`.
+- R-2. On memory exhaustion the runtime exits with code 102 and a preallocated diagnostic. Files written with the atomic operations of S-9 keep either the old or the new complete content; verified by tests that exhaust memory and kill the process during writing on every platform. No other guarantee about files is given.
 - R-3. A fault inside `using` releases all resources; verified by tests on every platform.
 
 ### 7.3 Security
@@ -207,6 +241,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 - R-5. All `external function` code in the standard library is reviewed by two people and tested with memory sanitizers.
 - R-6. The release build is reproducible, artifacts are signed, an SBOM is published.
 - R-7. The compiler and package manager do not execute dependency code during a build.
+- R-7a. The sandbox (section 4.6) passes the SB-8 suite on every platform; a release with a failing SB-8 test is not published.
 
 ### 7.4 Compatibility and platforms
 

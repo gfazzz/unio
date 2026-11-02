@@ -1,0 +1,5 @@
+# expect-error: 4
+function f() returns Int:
+    var count = 0
+    count += 1
+    return count

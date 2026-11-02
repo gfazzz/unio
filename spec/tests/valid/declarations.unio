@@ -1,0 +1,66 @@
+## Declarations: constants, structs, errors, enums, interfaces, extensions, generics.
+
+import std.text
+import std.json as json
+from std.collections import Stack, Queue
+
+public let VERSION as Text = "0.1"
+let DEFAULT_PORT = 8080
+
+## A user account.
+public struct User:
+    id as Int
+    name as Text
+    var active as Bool = true
+
+struct Marker
+
+struct Pair[A, B]:
+    first as A
+    second as B
+
+public error NotFound:
+    id as Int
+
+error Cancelled
+
+enum Shape:
+    Circle(radius as Float)
+    Rectangle(width as Float, height as Float)
+    Empty
+
+interface Display:
+    function to_text(self) returns Text
+
+interface Store[T]:
+    function get(self, id as Int) returns Option[T]
+    function put(var self, item as T) fails with Cancelled
+
+extend User with Display:
+    function to_text(self) returns Text:
+        return "{self.name} (#{self.id})"
+
+extend User:
+    public function rename(self, name as Text) returns User:
+        return User(id = self.id, name = name, active = self.active)
+
+function first[T](items as List[T]) returns Option[T]:
+    return items.get(0)
+
+function describe_all[T with Display and Hash](items as List[T]) returns Text:
+    return join([item.to_text() for item in items], ", ")
+
+function connect(host as Text, port as Int = DEFAULT_PORT, secure as Bool = false) returns Bool:
+    return port > 0
+
+function apply(f as Function[(Int, Int) -> Int], a as Int, b as Int) returns Int:
+    return f(a, b)
+
+function load(path as Path, parse as Function[(Text) -> Config fails with ParseError]) returns Config fails with IoError, ParseError:
+    return try parse(try read_text(path))
+
+function sort_in_place(var items as List[Int]):
+    items.sort()
+
+test "first of an empty list":
+    assert first([]) == none

@@ -1,0 +1,22 @@
+## Lexical structure: literals, text interpolation, escapes, comments.
+
+# An ordinary comment on its own line.
+let answer as Int = 42          # a trailing comment
+let big as Int = 1_000_000
+let mask as Int = 0xFF_FF
+let bits as Int = 0b1010_0101
+let ratio as Float = 0.25
+let tiny as Float = 1.5e-3
+let huge as Float = 6e23
+let flag as Bool = true
+
+function texts(name as Text, count as Int) returns List[Text]:
+    return [
+        "plain",
+        "Hello, {name}!",
+        "{count} item(s), next is {count + 1}",
+        "nested: {join(["a", "b"], ", ")}",
+        "escapes: \n \t \r \0 \\ \" \{ \}",
+        "unicode: \u{1F600} and Юникод",
+        "",
+    ]

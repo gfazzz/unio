@@ -1,0 +1,60 @@
+## Counts lines, words, and bytes in files.
+##
+## Usage:
+##     wc FILE...
+##
+## Prints one line per file and a total when there is more than one file.
+## Exit code: 0 on success, 1 if a file could not be read, 2 on wrong usage.
+
+import std.args
+import std.files
+
+struct Counts:
+    lines as Int
+    words as Int
+    bytes as Int
+
+extend Counts with Add:
+    function add(self, other as Counts) returns Counts:
+        return Counts(lines = self.lines + other.lines, words = self.words + other.words, bytes = self.bytes + other.bytes)
+
+let ZERO as Counts = Counts(lines = 0, words = 0, bytes = 0)
+
+## Counts of one text: line ends, words separated by white space, UTF-8 bytes.
+function count(text as Text) returns Counts:
+    return Counts(lines = text.count("\n"), words = text.split_whitespace().length(), bytes = text.byte_length())
+
+function describe(counts as Counts, name as Text) returns Text:
+    return "{counts.lines} {counts.words} {counts.bytes} {name}"
+
+public function main() returns Int:
+    let names = args.list()
+    if names.is_empty():
+        print_error("Usage: wc FILE...")
+        return 2
+    var total = ZERO
+    var status = 0
+    for name in names:
+        let text = try files.read_text(Path(name)) on IoError as e:
+            print_error("wc: {name}: {e.reason}")
+            status = 1
+            continue
+        let counts = count(text)
+        print(describe(counts, name))
+        total = total + counts
+    if names.length() > 1:
+        print(describe(total, "total"))
+    return status
+
+test "count of an empty text":
+    assert count("") == ZERO
+
+test "count of two lines":
+    assert count("one two\nthree\n") == Counts(lines = 2, words = 3, bytes = 14)
+
+test "bytes are counted in UTF-8":
+    assert count("ёж").bytes == 4
+
+test "counts add up":
+    let a = Counts(lines = 1, words = 2, bytes = 3)
+    assert a + a == Counts(lines = 2, words = 4, bytes = 6)

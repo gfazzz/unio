@@ -1,0 +1,81 @@
+## Statements: bindings, assignment, branches, loops, match, errors, resources.
+
+function control(items as List[Int], limit as Int) returns Int:
+    var total = 0
+    let count as Int = items.length()
+    if count > limit:
+        return -1
+    else if count == limit:
+        total = limit
+    else:
+        total = 0
+    for item in items:
+        if item < 0:
+            continue
+        if item > 1000:
+            break
+        total = total + item
+    for index, item in items.enumerate():
+        print("{index}: {item}")
+    var queue = items.copy()
+    while not queue.is_empty():
+        total = total - queue.pop()
+    assert total >= 0
+    return total
+
+function patterns(value as Option[Int], words as List[Text], point as Tuple[Int, Int]) returns Text:
+    match value:
+        case some(0):
+            return "zero"
+        case some(-1):
+            return "minus one"
+        case some(n) if n > 100:
+            return "large"
+        case some(_):
+            return "other"
+        case none:
+            pass_through()
+    match words:
+        case []:
+            return "empty"
+        case ["one"] | ["single"]:
+            return "one word"
+        case [first, rest...]:
+            return first
+    match point:
+        case (0, 0):
+            return "origin"
+        case (x, y) as whole:
+            return "{x},{y}"
+    match parse_shape(words):
+        case ok(Circle(radius = r)):
+            return "circle {r}"
+        case ok(Shape.Rectangle(w, h)):
+            return "rectangle"
+        case ok(Empty):
+            return "empty shape"
+        case error(ParseError as e):
+            return e.message
+    return "done"
+
+function errors(path as Path) returns Int fails with ConfigError:
+    let text = try read_text(path) on IoError as e:
+        fail ConfigError(reason = e.reason)
+    try:
+        let config = parse_config(text)
+        run(config)
+    on ParseError as e:
+        print("line {e.line}: {e.message}")
+        return 1
+    on Error as e:
+        print_error(e.to_text())
+        return 2
+    try check(text)
+    return 0
+
+function resources(path as Path) returns Int fails with IoError:
+    using file = try open_file(path):
+        using output = try files.open_atomic(path.with_extension("out")):
+            for line in file.lines():
+                output.write_line(line)
+        return 0

@@ -1,0 +1,2 @@
+# expect-error: 2 E0006
+let path = "C:\\dir \q"

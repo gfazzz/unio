@@ -1,0 +1,6 @@
+# expect-error: 5
+function f(path as Path) returns Text:
+    try:
+        return read_text(path)
+    catch IoError as e:
+        return ""

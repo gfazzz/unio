@@ -1,0 +1,3 @@
+# expect-error: 3 E0001
+function f() returns Int:
+	return 1

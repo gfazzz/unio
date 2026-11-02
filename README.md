@@ -36,4 +36,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Requirements specification for release 0.1](docs/requirements.md)
 - [Work plan](docs/plan.md)
 - [Example program](docs/examples/todo.unio)
+- [Grammar and specification tests](spec/README.md)
+- [Reference utilities](examples)
+- [RFC process](docs/rfcs/README.md)
 - [Русская версия документации](docs/ru/README.md)

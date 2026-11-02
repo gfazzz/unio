@@ -1,0 +1,3 @@
+# expect-error: 3 E0009
+function f() returns List[Int]:
+    return [1, 2,

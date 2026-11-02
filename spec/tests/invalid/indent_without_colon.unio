@@ -1,0 +1,4 @@
+# expect-error: 4 E0003
+function f() returns Int:
+    let x = 1
+        return x

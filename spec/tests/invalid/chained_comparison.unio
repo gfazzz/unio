@@ -1,0 +1,3 @@
+# expect-error: 3
+function between(a as Int, b as Int, c as Int) returns Bool:
+    return a < b < c

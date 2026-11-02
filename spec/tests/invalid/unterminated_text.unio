@@ -1,0 +1,2 @@
+# expect-error: 2 E0005
+let greeting = "hello

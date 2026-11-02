@@ -1,0 +1,3 @@
+# expect-error: 2
+function greet(name) returns Text:
+    return "Hello, {name}!"

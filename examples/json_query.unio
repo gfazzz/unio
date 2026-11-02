@@ -1,0 +1,88 @@
+## Selects a value from a JSON file by a path of keys and indexes.
+##
+## Usage:
+##     json-query PATH FILE
+##
+## PATH is a dotted list of object keys and array indexes, for example
+## "users.0.name"; "." selects the whole document.
+## Exit code: 0 on success, 1 if the file cannot be read or parsed,
+## 2 on wrong usage, 3 if the path does not exist in the document.
+
+import std.args
+import std.files
+import std.json as json
+from std.json import Value
+from std.text import split
+
+error QueryError:
+    message as Text
+
+## One step of the path: a key in an object or an index in an array.
+function step(value as Value, key as Text) returns Value fails with QueryError:
+    match value:
+        case Value.Object(fields):
+            match fields.get(key):
+                case some(child):
+                    return child
+                case none:
+                    fail QueryError(message = "no key \"{key}\"")
+        case Value.Array(items):
+            match key.to_int():
+                case some(index):
+                    match items.get(index):
+                        case some(child):
+                            return child
+                        case none:
+                            fail QueryError(message = "index {index} is out of range 0..{items.length()}")
+                case none:
+                    fail QueryError(message = "an array index must be an integer: {key}")
+        case _:
+            fail QueryError(message = "cannot select \"{key}\" from a {json.kind_name(value)}")
+
+function select(document as Value, path as Text) returns Value fails with QueryError:
+    if path == ".":
+        return document
+    var current = document
+    for key in split(path, "."):
+        current = try step(current, key)
+    return current
+
+public function main() returns Int:
+    match args.list():
+        case [path, name]:
+            try:
+                let document = json.parse(files.read_text(Path(name)))
+                print(json.encode(select(document, path), pretty = true))
+                return 0
+            on IoError as e:
+                print_error("json-query: {name}: {e.reason}")
+                return 1
+            on ParseError as e:
+                print_error("json-query: {name}: invalid JSON on line {e.line}: {e.message}")
+                return 1
+            on QueryError as e:
+                print_error("json-query: {e.message}")
+                return 3
+        case _:
+            print_error("Usage: json-query PATH FILE")
+            return 2
+
+test "select a nested value":
+    let document = try json.parse("\{\"users\": [\{\"name\": \"Anna\"\}]\}") on ParseError as e:
+        assert_fail(e.message)
+    let name = try select(document, "users.0.name") on QueryError as e:
+        assert_fail(e.message)
+    assert name == Value.Text("Anna")
+
+test "a missing key is reported":
+    try:
+        select(Value.Object({}), "missing")
+        assert_fail("expected a query error")
+    on QueryError as e:
+        assert e.message == "no key \"missing\""
+
+test "the whole document":
+    let document = Value.Array([])
+    let result = try select(document, ".") on QueryError as e:
+        assert_fail(e.message)
+    assert result == document

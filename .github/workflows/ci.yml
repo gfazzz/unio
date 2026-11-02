@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  spec:
+    name: grammar and documentation
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Documentation formatting and links
+        run: python .github/scripts/check_docs.py
+      - name: Grammar consistency and corpus
+        run: python spec/check_grammar.py --corpus
+      - name: Reference programs
+        shell: bash
+        run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio

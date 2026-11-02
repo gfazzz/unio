@@ -1,0 +1,2 @@
+# expect-error: 2
+let text = "sum: {1 +}"

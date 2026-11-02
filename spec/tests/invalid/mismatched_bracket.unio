@@ -1,0 +1,2 @@
+# expect-error: 2 E0010
+let items = [1, 2)

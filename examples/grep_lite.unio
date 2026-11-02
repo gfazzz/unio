@@ -1,0 +1,81 @@
+## Prints the lines of files that contain a pattern.
+##
+## Usage:
+##     grep-lite [--ignore-case] PATTERN FILE...
+##
+## Output lines have the form "file:line: text".
+## Exit code: 0 if a line was found, 1 if none was found, 2 on an error.
+
+import std.args
+import std.files
+
+struct Options:
+    pattern as Text
+    ignore_case as Bool
+    paths as List[Path]
+
+struct Found:
+    path as Path
+    line_number as Int
+    line as Text
+
+error UsageError:
+    message as Text
+
+let USAGE as Text = "Usage: grep-lite [--ignore-case] PATTERN FILE..."
+
+function parse_options(arguments as List[Text]) returns Options fails with UsageError:
+    match arguments:
+        case ["--ignore-case", pattern, names...] if not names.is_empty():
+            return Options(pattern = pattern, ignore_case = true, paths = [Path(name) for name in names])
+        case [pattern, names...] if not names.is_empty() and not pattern.starts_with("--"):
+            return Options(pattern = pattern, ignore_case = false, paths = [Path(name) for name in names])
+        case _:
+            fail UsageError(message = USAGE)
+
+function matches(line as Text, options as Options) returns Bool:
+    if options.ignore_case:
+        return line.to_lower().contains(options.pattern.to_lower())
+    return line.contains(options.pattern)
+
+## Lines of one file that match, numbered from 1.
+function search(path as Path, options as Options) returns List[Found] fails with IoError:
+    let text = try files.read_text(path)
+    return [Found(path = path, line_number = number, line = line) for number, line in text.lines().enumerate(start = 1) if matches(line, options)]
+
+public function main() returns Int:
+    let options = try parse_options(args.list()) on UsageError as e:
+        print_error(e.message)
+        return 2
+    var found_any = false
+    var had_error = false
+    for path in options.paths:
+        let found = try search(path, options) on IoError as e:
+            print_error("grep-lite: {path}: {e.reason}")
+            had_error = true
+            continue
+        for item in found:
+            print("{item.path}:{item.line_number}: {item.line}")
+            found_any = true
+    if had_error:
+        return 2
+    return 0 if found_any else 1
+
+test "plain pattern and files":
+    let options = try parse_options(["todo", "a.txt", "b.txt"]) on UsageError as e:
+        assert_fail(e.message)
+    assert options.pattern == "todo"
+    assert not options.ignore_case
+    assert options.paths == [Path("a.txt"), Path("b.txt")]
+
+test "a pattern without files is a usage error":
+    try:
+        parse_options(["todo"])
+        assert_fail("expected a usage error")
+    on UsageError as e:
+        assert e.message == USAGE
+
+test "ignore case":
+    let options = Options(pattern = "TODO", ignore_case = true, paths = [])
+    assert matches("a todo item", options)
+    assert not matches("a done item", options)

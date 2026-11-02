@@ -1,0 +1,5 @@
+# expect-error: 4 E0003
+function f(x as Int) returns Int:
+    if x > 0
+        return 1
+    return 0

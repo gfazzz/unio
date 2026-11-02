@@ -1,0 +1,251 @@
+(* Unio core grammar, version 0.1-draft.
+
+   Notation (ISO 14977 style):
+     =  definition      ,  concatenation is written by juxtaposition
+     |  alternative     [ ] optional      { } zero or more
+     ( ) grouping       "x" terminal      (* *) comment
+
+   The parser consumes the token stream produced by the lexer (section L).
+   Alternatives are written so that trying them in the order given yields
+   the intended parse; spec/check_grammar.py interprets this file directly
+   in that way and checks the programs in spec/tests/. Constraints the EBNF
+   cannot express are stated in comments next to the rules they restrict. *)
+
+
+(* ===================== L. Lexical structure ===================== *)
+
+(* A source file is UTF-8 text with the extension ".unio". Line ends are
+   LF or CRLF. The lexer produces the following synthetic tokens:
+
+     NEWLINE  the end of a logical line that contains at least one token;
+     INDENT   the indentation of a logical line is exactly 4 spaces deeper
+              than the enclosing block;
+     DEDENT   the indentation returns to an enclosing level (one DEDENT per
+              closed block);
+     EOF      the end of the file (preceded by NEWLINE and DEDENTs as needed).
+
+   Rules:
+     - indentation consists of spaces only; a tab in indentation is E0001;
+     - indentation is a multiple of 4 (E0002); it grows by one level at a time
+       and only after a line that ends with ":" (E0003); because of this rule
+       every smaller multiple of 4 is an open level, so a dedent is always
+       valid once E0002 holds;
+     - inside ( ), [ ] and { } line ends and indentation are ignored
+       (implicit line continuation);
+     - blank lines and lines that contain only a comment produce no tokens;
+     - "#" starts a comment that runs to the end of the line, "##" starts a
+       documentation comment; both are trivia, not tokens;
+     - the other lexical errors (E0005-E0011) are listed in spec/README.md. *)
+
+letter          = "A" | ... | "Z" | "a" | ... | "z" ;
+digit           = "0" | ... | "9" ;
+NAME            = ( letter | "_" ) { letter | digit | "_" } ;   (* not a keyword *)
+
+INT             = decimal_int | "0x" hex_digit { hex_digit | "_" }
+                | "0b" ( "0" | "1" ) { "0" | "1" | "_" } ;
+decimal_int     = digit { digit | "_" } ;
+FLOAT           = decimal_int "." decimal_int [ exponent ]
+                | decimal_int exponent ;
+exponent        = ( "e" | "E" ) [ "+" | "-" ] decimal_int ;
+hex_digit       = digit | "a" | ... | "f" | "A" | ... | "F" ;
+
+TEXT            = '"' { text_char | escape | interpolation } '"' ;
+text_char       = (* any character except '"', "\", "{", "}" and line end *) ;
+escape          = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "{" | "}" )
+                | "\u{" hex_digit { hex_digit } "}" ;
+interpolation   = "{" expression "}" ;     (* may contain nested TEXT *)
+
+(* Keywords (fixed for 0.1; adding one requires an RFC):
+
+     and as assert break case continue else enum error extend external
+     fail fails false for from function if import in interface let match
+     module not on or public return returns self struct test true try
+     unsafe using var while with
+
+   Reserved for later releases (using them is E0032): uses
+
+   Punctuation and operators:
+
+     ( ) [ ] { } , : . ?. ... = == != < <= > >= + - * / % ** -> |       *)
+
+
+(* ===================== F. Files and declarations ===================== *)
+
+file            = [ module_header ] { top_item } EOF ;
+module_header   = "unsafe" "module" NEWLINE ;
+top_item        = import | declaration | extend_decl | test_block ;
+
+import          = "import" module_path [ "as" NAME ] NEWLINE
+                | "from" module_path "import" NAME { "," NAME } NEWLINE ;
+module_path     = NAME { "." NAME } ;
+
+declaration     = [ "public" ] ( function_decl
+                               | external_decl
+                               | struct_decl
+                               | enum_decl
+                               | error_decl
+                               | interface_decl
+                               | constant_decl ) ;
+
+function_decl   = function_sig ":" block ;
+external_decl   = "external" function_sig NEWLINE ;
+function_sig    = "function" NAME [ generic_params ] "(" [ params ] ")"
+                  [ "returns" type ] [ "fails" "with" type_list ] ;
+generic_params  = "[" generic_param { "," generic_param } "]" ;
+generic_param   = NAME [ "with" type { "and" type } ] ;
+params          = param { "," param } [ "," ] ;
+param           = [ "var" ] "self"
+                | [ "var" ] NAME "as" type [ "=" expression ] ;
+
+struct_decl     = "struct" NAME [ generic_params ] ( ":" field_block | NEWLINE ) ;
+error_decl      = "error" NAME ( ":" field_block | NEWLINE ) ;
+field_block     = NEWLINE INDENT field { field } DEDENT ;
+field           = [ "var" ] NAME "as" type [ "=" expression ] NEWLINE ;
+
+enum_decl       = "enum" NAME [ generic_params ] ":"
+                  NEWLINE INDENT variant { variant } DEDENT ;
+variant         = NAME [ "(" variant_field { "," variant_field } ")" ] NEWLINE ;
+variant_field   = NAME "as" type ;
+
+interface_decl  = "interface" NAME [ generic_params ] ":"
+                  NEWLINE INDENT function_sig NEWLINE { function_sig NEWLINE } DEDENT ;
+
+extend_decl     = "extend" type [ "with" type ] ":"
+                  NEWLINE INDENT member { member } DEDENT ;
+member          = [ "public" ] function_decl ;
+
+constant_decl   = "let" NAME [ "as" type ] "=" expression NEWLINE ;
+
+test_block      = "test" TEXT ":" block ;
+
+
+(* ===================== S. Statements ===================== *)
+
+block           = NEWLINE INDENT statement { statement } DEDENT ;
+
+statement       = simple_statement NEWLINE
+                | handled_statement
+                | if_statement
+                | for_statement
+                | while_statement
+                | match_statement
+                | try_statement
+                | using_statement ;
+
+simple_statement = let_statement
+                 | assignment
+                 | return_statement
+                 | fail_statement
+                 | assert_statement
+                 | "break"
+                 | "continue"
+                 | expression ;
+
+(* A simple statement whose last element is an inline handler
+   ("try X on E as e") takes the handler body as an indented block.
+   At most one inline handler is allowed per statement (E0024). *)
+handled_statement = simple_statement ":" block ;
+
+let_statement   = ( "let" | "var" ) NAME [ "as" type ] "=" expression ;
+assignment      = place "=" expression ;
+place           = postfix ;          (* must end in NAME, field_access or index: E0030 *)
+return_statement = "return" [ expression ] ;
+fail_statement  = "fail" expression ;
+assert_statement = "assert" expression ;
+
+if_statement    = "if" expression ":" block
+                  { "else" "if" expression ":" block }
+                  [ "else" ":" block ] ;
+for_statement   = "for" NAME { "," NAME } "in" expression ":" block ;
+while_statement = "while" expression ":" block ;
+match_statement = "match" expression ":" NEWLINE INDENT case { case } DEDENT ;
+case            = "case" pattern [ "if" expression ] ":" block ;
+try_statement   = "try" ":" block handler { handler } ;
+handler         = "on" type [ "as" NAME ] ":" block ;
+using_statement = "using" NAME "=" expression ":" block ;
+
+
+(* ===================== E. Expressions ===================== *)
+
+(* Precedence from lowest to highest:
+     conditional ... if ... else ...      right
+     or                                   left
+     and                                  left
+     not                                  prefix
+     == != < <= > >= in, not in           non-associative (E0020)
+     + -                                  left
+     * / %                                left
+     - (negation), try                    prefix
+     **                                   right
+     call, index, generic call, . , ?.    postfix                        *)
+
+expression      = lambda | conditional ;
+lambda          = "function" "(" [ params ] ")" [ "returns" type ]
+                  [ "fails" "with" type_list ] ":" expression ;
+conditional     = or_expr [ "if" or_expr "else" expression ] ;
+or_expr         = and_expr { "or" and_expr } ;
+and_expr        = not_expr { "and" not_expr } ;
+not_expr        = "not" not_expr | comparison ;
+comparison      = additive [ comparison_op additive ] ;
+comparison_op   = "==" | "!=" | "<" | "<=" | ">" | ">=" | "in" | "not" "in" ;
+additive        = multiplicative { ( "+" | "-" ) multiplicative } ;
+multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
+unary           = "-" unary
+                | "try" unary [ inline_handler ]
+                | power ;
+inline_handler  = "on" type [ "as" NAME ] ;     (* body: see handled_statement *)
+power           = postfix [ "**" unary ] ;
+
+postfix         = primary { call | generic_call | index | field_access | safe_access } ;
+call            = "(" [ argument { "," argument } [ "," ] ] ")" ;
+argument        = [ NAME "=" ] expression ;   (* positional before named: E0023 *)
+(* "[" after an expression starts generic arguments when its first token is a
+   NAME that begins with an upper-case letter and the matching "]" is
+   directly followed by "("; otherwise it is an index. *)
+generic_call    = "[" type { "," type } "]" call ;
+index           = "[" expression "]" ;
+field_access    = "." NAME ;
+safe_access     = "?." NAME ;
+
+primary         = INT | FLOAT | TEXT | "true" | "false" | "self"
+                | NAME
+                | "error"                       (* the Result variant error(...) *)
+                | "(" expression ")"
+                | tuple
+                | list
+                | map ;
+tuple           = "(" expression "," [ expression { "," expression } [ "," ] ] ")" ;
+list            = "[" [ expression ( comprehension
+                                   | { "," expression } [ "," ] ) ] "]" ;
+comprehension   = "for" NAME { "," NAME } "in" or_expr [ "if" or_expr ] ;
+map             = "{" [ map_entry { "," map_entry } [ "," ] ] "}" ;
+map_entry       = expression ":" expression ;
+
+
+(* ===================== P. Patterns ===================== *)
+
+pattern         = bind_pattern { "|" bind_pattern } ;
+bind_pattern    = primary_pattern [ "as" NAME ] ;
+primary_pattern = "_"
+                | literal_pattern
+                | constructor_pattern
+                | NAME                         (* binding or variant: resolved by check *)
+                | list_pattern
+                | tuple_pattern ;
+literal_pattern = [ "-" ] INT | TEXT | "true" | "false" ;
+constructor_pattern = pattern_name "(" [ pattern_arg { "," pattern_arg } ] ")" ;
+pattern_name    = ( NAME | "error" ) { "." NAME } ;
+pattern_arg     = [ NAME "=" ] pattern ;
+list_pattern    = "[" [ list_element { "," list_element } ] "]" ;
+list_element    = NAME "..." | pattern ;       (* at most one rest, last: E0034 *)
+tuple_pattern   = "(" pattern "," [ pattern { "," pattern } ] ")" ;
+
+
+(* ===================== T. Types ===================== *)
+
+type            = type_name [ "[" type_argument { "," type_argument } "]" ] ;
+type_name       = NAME { "." NAME } ;
+type_argument   = type | function_shape ;
+function_shape  = "(" [ type { "," type } ] ")" [ "->" type ]
+                  [ "fails" "with" type_list ] ;
+type_list       = type { "," type } ;

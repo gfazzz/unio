@@ -37,6 +37,7 @@ Work:
 - Semantics of types, `Option`, `fails with`, `try`, faults, `using`, modules in the reference.
 - Operator interfaces, effect derivation, and `std.decimal` described in the reference (decisions from the concept, section 10).
 - JSON diagnostics schema (JSON Schema), list of the first 50 error codes.
+- Sandbox prototypes on Linux, macOS, and Windows: a program that tries to read a file outside its permissions is denied on each platform.
 - All ten reference utilities written on paper and checked for readability by hand.
 
 Result: `spec/` and `docs/reference/` at version 0.1-draft; accepted RFCs.
@@ -78,7 +79,8 @@ Goal: core programs run, even if slowly; semantics are locked by tests before na
 Work:
 - Intermediate representation (IR) with explicit errors, resources, and fault points.
 - IR interpreter for fast semantic validation and for `unio test` in the early stages.
-- Runtime: precise GC, `Resource` and `using`, faults with trace and exit codes.
+- Runtime: precise GC, `Resource` and `using`, faults with trace and exit codes; the termination model of specification section 4.5 with a memory reserve for `release` and a preallocated diagnostic for code 102.
+- Atomic writes in `std.files` (S-9) and tests that kill the process and exhaust memory during writing.
 - Minimal standard library: `text`, `collections`, `files`, `path`, `env`, `args`, `json`.
 - `unio test` with text and JSON output, `expect_fault`.
 
@@ -94,8 +96,9 @@ Work:
 - Deterministic build (C-4), verified in CI by hash comparison.
 - Cross-compilation to the four targets; CI on all of them.
 - Benchmarks of specification section 7.1 in CI with thresholds.
+- Sandbox (specification section 4.6) on four platforms: Landlock and seccomp-bpf, Seatbelt, AppContainer with a Job Object; the external policy and its limits; the SB-8 suite of forbidden actions in CI.
 
-Exit criterion: all ten utilities build natively on four platforms; the 7.1 metrics are met, or deviations are recorded with a remediation plan.
+Exit criterion: all ten utilities build natively on four platforms and run in the sandbox with the permissions from their manifests; the SB-8 suite is green on all platforms; the 7.1 metrics are met, or deviations are recorded with a remediation plan.
 
 ### Stage 5. Standard library and packages (weeks 28–38)
 
@@ -104,7 +107,7 @@ Goal: the full module set of the specification and reproducible dependencies.
 Work:
 - Modules `process`, `time`, `random`, `log`, `math`, `decimal`, `test`; documentation and examples for every public function.
 - Review and sanitizers for all `external function` code.
-- `unio.toml`, `unio.lock`, permissions, `unsafe module`.
+- `unio.toml`, `unio.lock`, scoped permissions (T-6), `unsafe module`.
 - Registry: signed publishing, verification, no deletion; `add`, `remove`, `update`.
 - Documentation generation with `unio doc`.
 
@@ -168,6 +171,8 @@ Stages overlap: the front end and semantics proceed in parallel with specificati
 | Text and JSON performance below CPython | medium | 7.1 violated | Benchmarks in CI from stage 3; optimize `Text` (UTF-8 with cached length) before stage 4 |
 | Language vocabulary grows under feature pressure | high | loss of readability, the main property | RFC process with a mandatory section "why existing constructs cannot express this" |
 | Windows support lags | medium | R-8 violated | Windows CI from stage 1; paths through `Path`, no assumptions about separators |
+| Sandbox mechanisms differ between platforms or are missing on older systems | high | SB-1 holds unevenly; stage 4 slips | Prototype all three mechanisms in stage 0–1; one SB-8 suite for all platforms; fail closed with code 103 instead of a silently weaker sandbox |
+| Termination guarantees cannot be tested reliably | medium | R-2 unverified | Guarantees limited to atomic writes; tests that kill the process at random points of a write |
 
 ## 7. Project metrics
 
@@ -192,7 +197,7 @@ Each later release starts with its own specification modeled on `docs/requiremen
 
 ## 9. Immediate actions
 
-1. Concept 0.3 is approved and has no open questions. Set up the RFC process in `docs/rfcs/` for future changes.
-2. Create the repository layout of section 2 and CI with document formatting checks.
-3. Write the EBNF grammar and the specification test corpus.
-4. Write the remaining nine reference utilities in Unio following `docs/examples/todo.unio`.
+1. Concept 0.4 closes the review findings: mandatory sandbox, one rule for calls with `fails with`, termination model. Set up the RFC process in `docs/rfcs/` for future changes.
+2. Fix the EBNF grammar (`spec/grammar.ebnf`) and a small set of reference programs (`spec/tests/`) checked against it automatically.
+3. Create the repository layout of section 2 and CI with document formatting checks and the grammar check.
+4. Write the remaining reference utilities in Unio following `docs/examples/todo.unio`.
