@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.11. Changes from 0.10: allocator lifetimes in the `system` profile (section 8.1).
+Version: 0.12. Changes from 0.11: post-quantum cryptography policy for distribution, connections, and UnioS (section 6; `docs/cryptography.md`).
+
+Changes from 0.10: allocator lifetimes in the `system` profile (section 8.1).
 
 Changes from 0.9: decisions on borrowings from other languages (`docs/influences.md`): explicit allocators in the `system` profile, the progressive path down the layers, content hashes of symbols, and the refusal of `comptime` and an implicit context (sections 7, 8, 8.1, 10, rationale 18).
 
@@ -381,6 +383,7 @@ let data = json.parse(text)
 - Per-function effects in the signature (`uses files`) are not declared in the first release. The compiler derives effects from the call graph and shows them in `unio symbol` and in documentation: the reader and the AI see that a function touches files or processes without growing the language vocabulary. The word `uses` is reserved for the compute extension (`uses gpu`), where an effect influences resource scheduling, not only permissions.
 - Dependencies: registry signatures, hash verification, warnings about `unsafe module`, no network actions during build.
 - Release: reproducible build, signed artifacts, SBOM.
+- Post-quantum protection is the default for project-controlled cryptography as each component is introduced. Distribution requires post-quantum signatures; network profiles protect key establishment and authentication separately, including trust provisioning and recovery. No silent downgrade is allowed. Algorithm choices, explicit compatibility boundaries, and acceptance checks are fixed in [the cryptography policy](cryptography.md) (T-8a, R-6a to R-6c); they are requirements, not a claim of implemented protection.
 - Separate reliability tests: behavior under out-of-memory, under a fault inside `using`, under an error in external code.
 
 ## 7. Working with AI

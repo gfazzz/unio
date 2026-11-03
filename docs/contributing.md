@@ -1,6 +1,6 @@
 # Accepting contributions: defenses against bad and malicious code
 
-Version: 0.1. Russian localization: `docs/ru/contributing.md`. Security reports: `SECURITY.md`.
+Version: 0.2. Changes from 0.1: post-quantum release-signature verification (section 3.5). Russian localization: `docs/ru/contributing.md`. Security reports: `SECURITY.md`.
 
 This document is the architecture for taking pull requests from anyone other than the owner. It covers two different threats with overlapping defenses: **bad code**, which is honest work that lowers quality, and **malicious code**, which is work designed to harm the project, its users, or whoever runs its checks. The language's own defenses for running untrusted Unio programs (the sandbox SB-1 to SB-15, permissions, the registry rules T-8 and T-9) are in `docs/requirements.md`; this document is about the project's repository, checks, and releases.
 
@@ -78,6 +78,7 @@ The same rules the language imposes on packages apply to this repository:
 - Dependencies are audited with a deny list (licenses, known advisories, yanked versions) in CI, and the number of direct dependencies is kept small and justified in the pull request that adds each one.
 - Crates with build scripts or procedural macros are avoided where an alternative exists and are listed explicitly where not.
 - Releases are built reproducibly (C-4), signed, and shipped with an SBOM (R-6). Two people compare the hashes of independent builds before a release is published.
+- Before publication, sign the release manifest under [the cryptography policy](cryptography.md) (R-6a to R-6c), and test verification against independently provisioned trust roots, including missing or corrupted post-quantum signatures, revoked keys, and unauthorized rollback. Repository commit signatures and transport authentication do not replace release verification; a classical-only signature is insufficient.
 - Signing keys live outside CI; a release is signed by the owner on a machine that is not the build runner.
 
 ### 3.6 Agents

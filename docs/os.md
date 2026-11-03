@@ -1,6 +1,8 @@
 # UnioS: a site about Unio, in Unio, on an operating system written in Unio
 
-Version: 0.3 (draft). Changes from 0.2: requirements for human and AI understanding, local and remote administration, their acceptance checks, and an integrated base system (sections 1.1–1.2).
+Version: 0.4 (draft). Changes from 0.3: post-quantum transport, identity, and update requirements (OS-7; `docs/cryptography.md`).
+
+Changes from 0.2: requirements for human and AI understanding, local and remote administration, their acceptance checks, and an integrated base system (sections 1.1–1.2).
 
 Status: accepted as a separate track; not part of release 0.1. Basis: `docs/concept.md` (section 8.1, system programming), `docs/plan.md` (section 9), release 0.5 "System".
 
@@ -25,6 +27,7 @@ UnioS inherits the language's basic requirements: it must be understandable to p
 - **OS-4. Predictable changes.** Support the cycle "inspect, plan, validate, apply, verify". Configuration changes can be validated before application, with their expected effects and required permissions shown. Detect stale revisions; document atomicity and rollback limits. Declare which operations are idempotent; give other operations identifiers so a retry after a lost connection can query the outcome without silently repeating an action. Long operations expose progress, deadlines, and cancellation semantics.
 - **OS-5. Explicit authority and accountability.** Local and remote agents act under an authenticated identity with only the capabilities granted to it. SSH authentication does not grant additional system privileges. Record who requested a change, its target, and its outcome in an audit log; expose resource limits and permission denials with actionable diagnostics. Human operators can inspect and revoke an agent's access.
 - **OS-6. Acceptance through shared scenarios.** Publish scenarios for inspecting service health and resource use, diagnosing a failed service, validating and applying configuration, restarting a service, and verifying recovery. Run the same scenarios through local interfaces and SSH, both manually and with an AI agent given only the documented interfaces. Check resulting state, error reporting, denied operations, stale revisions, and recovery after a disconnected request. Record completion, human interventions, and failures; the U-0 specification fixes the scenario set and measurable acceptance thresholds before implementation.
+- **OS-7. Post-quantum protection by default.** TLS and SSH, identities and trust provisioning, system images and updates, and any encrypted storage or recovery path follow [the cryptography policy](cryptography.md). U-0 specifies the profiles and trust lifecycle; U-3 verifies both key establishment and authentication, update signatures, downgrade rejection, and recovery. Public HTTPS/ACME and standard SSH interoperability may require explicit compatibility endpoints; they are documented separately and do not count as strict-profile acceptance. Update verification never falls back to classical-only signatures.
 
 U-0 specifies these contracts and checks. U-2 delivers local management for the services used by the site. U-3 delivers authenticated SSH management and passes the local and remote scenarios before public deployment. This baseline does not depend on running a model inside UnioS; accelerator support and model serving remain in U-4. A general-purpose interactive shell also remains in U-4; the earlier management CLI must work without it.
 
@@ -126,7 +129,7 @@ Stages overlap where the next one can start on finished parts; the weeks are the
 |---|---|---|
 | UnioS pulls effort from the language before 0.5 is stable | high | Separate team; U-1 starts only when the 0.5 prototype kernel boots |
 | Cranelift lacks what the kernel needs | medium | Already covered by the freestanding prototype in plan stage 4 and the LLVM option |
-| TLS implemented from scratch has protocol defects | medium | TLS 1.3 only, one cipher suite, test vectors from the RFCs, interoperability tests against three existing clients, external review before public exposure |
+| TLS implemented from scratch has protocol defects | medium | TLS 1.3 with explicitly selected profiles under `docs/cryptography.md`, test vectors from the RFCs, interoperability tests against three existing clients, external review before public exposure |
 | `std` over UnioS diverges from `std` over Linux | medium | One `std` interface, two backends; the specification test corpus and the reference utilities run on both |
 | Kernel-level AI support stays a slogan | medium | U-4 ships a measurable service: model inference with memory and latency visible in the profiler |
 | Expectation that UnioS runs on quantum hardware | medium | The QPU is a coprocessor device model; stated plainly in section 2 |

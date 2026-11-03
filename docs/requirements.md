@@ -1,6 +1,10 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.10 (draft). Changes from 0.9: stability of content hashes (C-11a) and a catalog check for diagnostic messages (R-12). Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+Specification version: 0.11 (draft). Changes from 0.10: post-quantum distribution and cryptography policy (T-8a, R-6a to R-6c; `docs/cryptography.md`).
+
+Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
+
+Changes from 0.9: stability of content hashes (C-11a) and a catalog check for diagnostic messages (R-12).
 
 Changes from 0.8: content hashes of symbols (C-11a) and the diagnostic message standard (R-12), from `docs/influences.md`.
 
@@ -253,6 +257,7 @@ env = ["TODO_FILE", "HOME"]
 ```
 - T-7. `unio.lock` contains versions and content hashes of all dependencies. A build with a lock file does not touch the network.
 - T-8. Registry: signed publishing, signature verification on install, no deletion of published versions.
+- T-8a. Package manifests, payload digests, and trust metadata are authenticated according to [the cryptography policy](cryptography.md). Verify the required post-quantum signatures before extraction or installation, independently of transport security. A classical signature alone is insufficient; test tampering, missing signatures, trust-root provisioning, key rotation and revocation, and unauthorized rollback.
 - T-9. Installing a dependency with `unsafe module` or with permissions wider than the package's own requires explicit confirmation.
 
 ### 6.5 Editor
@@ -287,6 +292,9 @@ Universal C-level speed is not promised and is not measured as a requirement.
 - R-4. User code cannot bypass bounds, type, or resource checks.
 - R-5. All `external function` code in the standard library is reviewed by two people and tested with memory sanitizers.
 - R-6. The release build is reproducible, artifacts are signed, an SBOM is published.
+- R-6a. Release artifacts and their authenticated manifests require ML-DSA-65 signatures and an independently provisioned post-quantum trust anchor under the cryptography policy. Verification includes payload digests, version and purpose binding, key lifecycle, and rollback protection. A classical compatibility signature must not replace a required post-quantum signature.
+- R-6b. Project-controlled cryptographic components follow `docs/cryptography.md` as they are introduced. The 0.1 release and package tooling implement its signature policy before publication; 0.2 networking and UnioS additionally implement the specified transport and identity profiles. Compatibility exceptions are explicit, scoped, observable, and never authorize weaker artifact verification. This requirement does not add networking or a public cryptography API to application code in 0.1.
+- R-6c. A component claims post-quantum compliance only after the inventory, standard vectors, independent interoperability, downgrade and tampering tests, key lifecycle tests, resource measurements, and security review in the policy pass. Missing protocol support or a failed check blocks the affected claim; no fallback may disable verification.
 - R-7. The compiler and package manager do not execute dependency code during a build.
 - R-7a. The sandbox (section 4.6) passes the SB-8 and SB-15 suites on every platform; a release with a failing test of either suite is not published.
 

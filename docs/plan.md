@@ -4,6 +4,8 @@ Version: 0.1 (draft). Basis: `docs/requirements.md`. Russian localization: `docs
 
 Changes from the initial 0.1 draft: UnioS requires human- and AI-accessible administration and an integrated base system (section 9; `docs/os.md`, sections 1.1–1.2).
 
+Changes from the initial 0.1 draft: post-quantum signing is required for 0.1 distribution; network and UnioS profiles follow `docs/cryptography.md` (requirements T-8a, R-6a to R-6c, OS-7).
+
 ## 1. Project principles
 
 - **Specification before code.** A construct enters the compiler only after its syntax and semantics are written in the reference.
@@ -138,6 +140,7 @@ Work:
 - 24-hour compiler fuzzing; defect fixes.
 - Readability trial (1.4, item 2) with external participants.
 - Reproducible release build, signatures, SBOM, installers for four platforms.
+- Post-quantum release verification, independently provisioned trust roots, rotation/revocation and rollback tests before publication (R-6a to R-6c). Stage 5 package verification follows T-8a; bootstrap signing tools may be external under concept section 1.1.
 - Reference, guide, library documentation in both languages. The guide includes the chapter on moving from classes (requirement D-2).
 - Acceptance per specification section 9.2.
 
@@ -229,10 +232,11 @@ The proof of concept (U-0 to U-3) is the UnioS 0.1 milestone and is announced on
 
 ### 9.2 What the language owes the track
 
-Already planned: the `core`, `alloc`, and `std` layers and `unio check --profile=core` in 0.1; task-based concurrency and `std.net` as interfaces without POSIX assumptions in 0.2; the `system` profile, the memory model, and the freestanding prototype in stage 4 and release 0.5. Three consequences are recorded here so that they are not lost:
+Already planned: the `core`, `alloc`, and `std` layers and `unio check --profile=core` in 0.1; task-based concurrency and `std.net` as interfaces without POSIX assumptions in 0.2; the `system` profile, the memory model, and the freestanding prototype in stage 4 and release 0.5. The following consequences are recorded here so that they are not lost:
 
 - `std` has one interface and two backends, a host operating system and UnioS; the specification test corpus and the reference utilities must run on both.
 - An HTTPS server in Unio needs cryptography, which the roadmap did not contain: `std.crypto` (hashes, authenticated encryption, key exchange, signatures for certificates) with constant-time primitives in reviewed `unsafe module` files (S-7, R-5) that allocate nothing and do not touch the GC, and a cryptographically secure random source, kept separate from the fast generator of `std.random`. This is new work for release 0.2, where the HTTP server is, and goes through an RFC.
+- The networking RFC applies `docs/cryptography.md`: ML-KEM hybrid key establishment, post-quantum identity authentication, versioned algorithm profiles, and explicit compatibility endpoints. UnioS U-0 defines trust enrollment and recovery; U-3 must pass OS-7 for transport and image/update signatures. A public HTTPS/ACME compatibility endpoint cannot establish strict-profile readiness. Account for key, signature, and message sizes in the resource estimates.
 - The sandbox requirements (SB-1 onward) are stated so that a kernel capability model satisfies them without a host sandbox.
 
 Any further need the track discovers goes to the language as an RFC.
@@ -242,7 +246,7 @@ Any further need the track discovers goes to the language as an RFC.
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | UnioS pulls engineers from the language before 0.5 is stable | high | Separate team; U-1 starts only when the 0.5 prototype kernel boots |
-| TLS written from scratch has protocol defects | medium | TLS 1.3 only, one cipher suite, RFC test vectors, interoperability with three existing clients, external review before public exposure |
+| TLS written from scratch has protocol defects | medium | TLS 1.3 with explicitly selected profiles under `docs/cryptography.md`, RFC test vectors, interoperability with three existing clients, external review before public exposure |
 | `std` over UnioS diverges from `std` over Linux | medium | One interface, two backends, one test corpus |
 | "AI in the kernel" remains a slogan | medium | U-4 ships a measurable model-serving service with memory and latency visible in the profiler |
 | Expectation that UnioS runs on quantum hardware | medium | A QPU is a coprocessor device model; stated plainly in `docs/os.md` |
