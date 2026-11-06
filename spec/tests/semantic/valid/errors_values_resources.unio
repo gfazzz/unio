@@ -107,7 +107,14 @@ function loops(items as List[Int]) returns Int:
 function resources() returns Int:
     using h = open(1):
         let value = h.read()
-        return value + h.id
+        return value + h.id + checked(h)
+
+## A parameter of a resource type may be used and passed on (semantics 7.2).
+function checked(h as Handle) returns Int:
+    return identity(h) + h.id
+
+function identity(h as Handle) returns Int:
+    return h.id
 
 function discard() returns Int:
     let _ = risky_free()

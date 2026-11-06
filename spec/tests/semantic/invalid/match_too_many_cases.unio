@@ -1,0 +1,36 @@
+# expect-error: 20 E0068
+## The cases cover every value, but they combine into more cases than the checker enumerates
+## (semantics 6.5), so the match needs `case _`.
+function first(
+    b0 as Bool,
+    b1 as Bool,
+    b2 as Bool,
+    b3 as Bool,
+    b4 as Bool,
+    b5 as Bool,
+    b6 as Bool,
+    b7 as Bool,
+    b8 as Bool,
+    b9 as Bool,
+    b10 as Bool,
+    b11 as Bool,
+    b12 as Bool,
+    b13 as Bool,
+) returns Int:
+    match (b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13):
+        case (true, _, _, _, _, _, _, _, _, _, _, _, _, _): return 0
+        case (_, true, _, _, _, _, _, _, _, _, _, _, _, _): return 1
+        case (_, _, true, _, _, _, _, _, _, _, _, _, _, _): return 2
+        case (_, _, _, true, _, _, _, _, _, _, _, _, _, _): return 3
+        case (_, _, _, _, true, _, _, _, _, _, _, _, _, _): return 4
+        case (_, _, _, _, _, true, _, _, _, _, _, _, _, _): return 5
+        case (_, _, _, _, _, _, true, _, _, _, _, _, _, _): return 6
+        case (_, _, _, _, _, _, _, true, _, _, _, _, _, _): return 7
+        case (_, _, _, _, _, _, _, _, true, _, _, _, _, _): return 8
+        case (_, _, _, _, _, _, _, _, _, true, _, _, _, _): return 9
+        case (_, _, _, _, _, _, _, _, _, _, true, _, _, _): return 10
+        case (_, _, _, _, _, _, _, _, _, _, _, true, _, _): return 11
+        case (_, _, _, _, _, _, _, _, _, _, _, _, true, _): return 12
+        case (_, _, _, _, _, _, _, _, _, _, _, _, _, true): return 13
+        case (false, false, false, false, false, false, false, false, false, false, false, false, false, false):
+            return 14

@@ -199,18 +199,36 @@ function read_word_list(
         case none: fail GrammarError(message = "missing \"{start}\" in the grammar")
 
 ## The text with every (* comment *) replaced by a space.
+## Comments nest, as in ISO 14977, so that a comment can show the notation "(* *)".
 function strip_comments(source as Text) returns Text:
     var result = ""
     var start = 0
     while true:
         match source.index_of("(*", start = start):
             case some(open):
-                match source.index_of("*)", start = open + 2):
+                match comment_end(source, open + 2):
                     case some(close):
                         result = result + source.slice(start, open) + " "
-                        start = close + 2
+                        start = close
                     case none: return result + source.slice(start, source.length())
             case none: return result + source.slice(start, source.length())
+
+## The position after the "*)" that closes a comment whose text starts at the position.
+function comment_end(source as Text, position as Int) returns Option[Int]:
+    var depth = 1
+    var at = position
+    while depth > 0:
+        match source.index_of("*)", start = at):
+            case some(close):
+                match source.index_of("(*", start = at):
+                    case some(open) if open < close:
+                        depth = depth + 1
+                        at = open + 2
+                    case _:
+                        depth = depth - 1
+                        at = close + 2
+            case none: return none
+    return some(at)
 
 function tokenize_ebnf(source as Text) returns List[EbnfToken] fails with GrammarError:
     let characters = source.chars()

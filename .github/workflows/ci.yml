@@ -14,22 +14,39 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # The checks are the Unio tools of tools/, run by the interpreter of sprint S5
+      # (docs/runtime.md 8.3); they replaced the temporary Python checkers.
+      - name: Build the interpreter
+        run: cargo build --release --manifest-path compiler/Cargo.toml -p unio
+      - name: Documentation formatting and links
+        run: compiler/target/release/unio run tools/check_docs.unio
+      - name: Grammar consistency and corpus
+        run: compiler/target/release/unio run tools/check_grammar.unio -- --corpus
+      - name: Unio sources parse (reference programs, standard library, tools)
+        run: compiler/target/release/unio run tools/check_grammar.unio -- docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+      - name: Unio sources use only the standard library API
+        run: compiler/target/release/unio run tools/check_api.unio
+      - name: Unio test blocks (stdlib, examples, tools)
+        run: compiler/target/release/unio test docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+
+  python-parity:
+    # Until the Python checkers are deleted, the Unio tools must give their results
+    # (AGENTS.md); this job and compiler/unio/tests/tools.rs go away with them.
+    name: Unio tools agree with the Python checkers
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Documentation formatting and links
-        run: python .github/scripts/check_docs.py
-      - name: Grammar consistency and corpus
-        run: python spec/check_grammar.py --corpus
-      - name: Unio sources parse (reference programs, standard library, tools)
-        shell: bash
-        run: python spec/check_grammar.py docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
-      - name: Unio sources use only the standard library API
-        run: python spec/check_api.py
-      # The Python checkers are temporary: tools/*.unio do the same work and replace
-      # them once the stage 3 interpreter can run Unio programs (plan, section 1).
+      - name: Compare every check
+        working-directory: compiler
+        run: cargo test --release -p unio --test tools -- --ignored
 
   editors:
     name: editor highlighting

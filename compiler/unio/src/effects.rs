@@ -9,33 +9,75 @@ use crate::catalog;
 use crate::diag::{Diagnostic, Span};
 use crate::program::{FnId, ModId, Owner, Program, LAYER_NAMES};
 
-/// The derived effects, in the order `unio symbol` prints them.
-pub const EFFECTS: [&str; 5] = ["files", "network", "process", "env", "allocates"];
+/// The derived effects, in the order `unio symbol` prints them. `files.read` and `files.write`
+/// are the scopes of the manifest of the same names (T-6).
+pub const EFFECTS: [&str; 6] = [
+    "files.read",
+    "files.write",
+    "network",
+    "process",
+    "env",
+    "allocates",
+];
+const FILES_READ: usize = 0;
+const FILES_WRITE: usize = 1;
 
 /// What a function needs, and for each need the call that brings it in, so that a
 /// diagnostic can show the chain of calls down to the function that has it itself.
 pub struct Derived {
     /// A bit per entry of EFFECTS.
     pub effects: Vec<u8>,
-    pub effect_via: Vec<[Option<(FnId, Span)>; 5]>,
+    pub effect_via: Vec<[Option<(FnId, Span)>; EFFECTS.len()]>,
     /// The index in LAYER_NAMES of the lowest layer the function needs.
     pub layer: Vec<usize>,
     pub layer_via: Vec<Option<(FnId, Span)>>,
 }
 
-/// The effect an external function of a standard-library module has itself.
-fn module_effect(module: &str) -> Option<usize> {
-    let effect = match module {
-        "std.files" => "files",
+/// The effects an external function of a standard-library module has itself, as bits. An
+/// external of `std.files` has the scopes its "Permission:" line names (semantics 8.2).
+fn external_effects(p: &Program, f: FnId) -> u8 {
+    let def = &p.funcs[f];
+    let module = &p.modules[def.module];
+    let effect = match module.name.as_str() {
+        "std.files" => return file_scopes(&module.analysis.source, def.span.start.line),
         "std.net" => "network",
         "std.process" => "process",
         "std.env" => "env",
-        _ => return None,
+        _ => return 0,
     };
-    EFFECTS.iter().position(|e| *e == effect)
+    EFFECTS
+        .iter()
+        .position(|e| *e == effect)
+        .map_or(0, |e| 1 << e)
 }
 
-const ALLOCATES: usize = 4;
+/// The file scopes named by the "Permission:" sentence of the documentation comment that ends
+/// above the line; both scopes when there is none, so that a missing line is never permissive.
+fn file_scopes(source: &str, line: usize) -> u8 {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut doc = String::new();
+    let mut at = line.saturating_sub(1).min(lines.len());
+    while at > 0 && lines[at - 1].trim_start().starts_with("##") {
+        at -= 1;
+        doc.insert_str(0, lines[at]);
+    }
+    let Some((_, permission)) = doc.split_once("Permission:") else {
+        return (1 << FILES_READ) | (1 << FILES_WRITE);
+    };
+    let mut scopes = 0;
+    if permission.contains("files.read") {
+        scopes |= 1 << FILES_READ;
+    }
+    if permission.contains("files.write") {
+        scopes |= 1 << FILES_WRITE;
+    }
+    if permission.trim_start().starts_with("none") {
+        scopes = 0;
+    }
+    scopes
+}
+
+const ALLOCATES: usize = 5;
 
 /// Effects and layers of every function: what it has itself, joined with what its callees
 /// have, until nothing changes.
@@ -43,7 +85,7 @@ pub fn derive(p: &Program) -> Derived {
     let n = p.funcs.len();
     let mut d = Derived {
         effects: vec![0; n],
-        effect_via: vec![[None; 5]; n],
+        effect_via: vec![[None; EFFECTS.len()]; n],
         layer: vec![0; n],
         layer_via: vec![None; n],
     };
@@ -55,9 +97,7 @@ pub fn derive(p: &Program) -> Derived {
         }
         let external = def.body.is_none() && !matches!(def.owner, Owner::Interface(_));
         if external && p.modules[def.module].stdlib {
-            if let Some(e) = module_effect(&p.modules[def.module].name) {
-                d.effects[f] |= 1 << e;
-            }
+            d.effects[f] |= external_effects(p, f);
         }
     }
     let mut edges: Vec<(FnId, FnId, Span)> = p
@@ -171,12 +211,15 @@ pub fn manifest_permissions(package: &Path) -> Option<HashSet<&'static str>> {
         if !granted {
             continue;
         }
-        let effect = match key.split('.').next().unwrap_or("") {
-            "files" => "files",
-            "network" | "net" => "network",
-            "process" => "process",
-            "env" => "env",
-            _ => continue,
+        let effect = match key {
+            "files.read" => "files.read",
+            "files.write" => "files.write",
+            _ => match key.split('.').next().unwrap_or("") {
+                "network" | "net" => "network",
+                "process" => "process",
+                "env" => "env",
+                _ => continue,
+            },
         };
         permitted.insert(effect);
     }

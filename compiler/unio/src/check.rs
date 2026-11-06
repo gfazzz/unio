@@ -30,6 +30,9 @@ struct ParamSpec {
     named_only: bool,
     has_default: bool,
     var: bool,
+    /// Declared with a generic type bounded by `Resource`, such as `is_same(a as T, b as T)`:
+    /// a resource may be passed to it (semantics 7.2).
+    resource_bound: bool,
 }
 
 /// How a local name was introduced: it decides whether the name can change (L-10, L-11).
@@ -250,7 +253,15 @@ struct Checker<'a> {
     use_ok: HashSet<(usize, usize)>,
     /// While positive, checks run again for their types only and report nothing.
     silent: usize,
+    /// Steps left for the coverage check of the current `match` (semantics 6.5).
+    coverage_budget: usize,
+    /// Set when the alternatives of a pattern combine into more rows than are enumerated.
+    pattern_overflow: std::cell::Cell<bool>,
 }
+
+/// The number of pattern rows the coverage check of one `match` may examine. A match whose
+/// patterns combine into more cases is not taken as covered and needs `case _` (semantics 6.5).
+const COVERAGE_LIMIT: usize = 10_000;
 
 impl<'a> Checker<'a> {
     fn new(
@@ -283,6 +294,8 @@ impl<'a> Checker<'a> {
             creation_ok: HashSet::new(),
             use_ok: HashSet::new(),
             silent: 0,
+            coverage_budget: COVERAGE_LIMIT,
+            pattern_overflow: std::cell::Cell::new(false),
         }
     }
 
@@ -933,12 +946,19 @@ impl<'a> Checker<'a> {
             return true;
         }
         let mut rows = Vec::new();
+        self.pattern_overflow.set(false);
         for case in cases.iter().filter(|c| c.guard.is_none()) {
             for p in self.abstract_pattern(&case.pattern, &ty) {
                 rows.push(vec![p]);
             }
         }
-        match self.missing(rows, vec![ty], 0) {
+        self.coverage_budget = COVERAGE_LIMIT;
+        let missing = self.missing(rows, vec![ty], 0);
+        if missing.is_some() && self.pattern_overflow.get() || self.coverage_budget == 0 {
+            self.err("E0068", span, catalog::match_too_many_cases());
+            return false;
+        }
+        match missing {
             None => true,
             Some(witness) => {
                 let example = witness.first().cloned().unwrap_or_else(|| "_".to_string());
@@ -1016,7 +1036,7 @@ impl<'a> Checker<'a> {
                         columns[i] = self.abstract_pattern(q, &fields[i]);
                     }
                 }
-                product(&columns)
+                product(&columns, &self.pattern_overflow)
                     .into_iter()
                     .map(|args| Pat::Variant(d, v, args))
                     .collect()
@@ -1036,7 +1056,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                product(&columns)
+                product(&columns, &self.pattern_overflow)
                     .into_iter()
                     .map(|items| Pat::List(items, rest))
                     .collect()
@@ -1051,7 +1071,10 @@ impl<'a> Checker<'a> {
                     .zip(&types)
                     .map(|(q, t)| self.abstract_pattern(q, t))
                     .collect();
-                product(&columns).into_iter().map(Pat::Tuple).collect()
+                product(&columns, &self.pattern_overflow)
+                    .into_iter()
+                    .map(Pat::Tuple)
+                    .collect()
             }
             PatternKind::Bind { pattern, .. } => self.abstract_pattern(pattern, subject),
             PatternKind::Or(alternatives) => alternatives
@@ -1072,11 +1095,22 @@ impl<'a> Checker<'a> {
         if types.is_empty() {
             return rows.is_empty().then(Vec::new);
         }
-        if depth > 12 {
-            return None;
+        // Too many cases to enumerate: not covered (semantics 6.5); the caller reports it.
+        self.coverage_budget = self.coverage_budget.saturating_sub(rows.len().max(1));
+        if self.coverage_budget == 0 {
+            return Some(vec!["_".to_string(); types.len()]);
         }
+        let _ = depth;
         let ty = self.resolved(&types[0]);
         let rest_types = types[1..].to_vec();
+        // When no row names a constructor in the first column, only the rows that start with
+        // `_` can match, whatever the value: the witness is `_` followed by theirs.
+        if !rows.is_empty() && rows.iter().all(|row| matches!(row[0], Pat::Wild)) {
+            let defaults: Vec<Vec<Pat>> = rows.iter().map(|row| row[1..].to_vec()).collect();
+            return self
+                .missing(defaults, rest_types, depth + 1)
+                .map(|w| [vec!["_".to_string()], w].concat());
+        }
         let enum_variants = match &ty {
             Ty::Named(d, _) => match &self.p.defs[*d].kind {
                 DefKind::Enum(vs) => Some((*d, vs.len())),
@@ -1752,6 +1786,10 @@ impl<'a> Checker<'a> {
                 named_only: p.named_only,
                 has_default: p.has_default,
                 var: p.var,
+                resource_bound: matches!(&p.ty, Ty::Param(id) if self.p.params[*id]
+                    .bounds
+                    .iter()
+                    .any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == self.known.resource))),
             })
             .collect()
     }
@@ -1765,6 +1803,7 @@ impl<'a> Checker<'a> {
                 named_only: label.is_some(),
                 has_default: false,
                 var: false,
+                resource_bound: false,
             })
             .collect()
     }
@@ -1870,7 +1909,7 @@ impl<'a> Checker<'a> {
                     var_roots.push(name);
                 }
             }
-            if self.takes_resource(&p.ty.clone()) {
+            if p.resource_bound || self.takes_resource(&p.ty.clone()) {
                 self.use_ok.insert(span_key(arg.value.span));
             }
         }
@@ -2095,6 +2134,7 @@ impl<'a> Checker<'a> {
                 named_only: false,
                 has_default: false,
                 var: false,
+                resource_bound: false,
             })
             .collect();
         self.call(params, result, args, span, &Ty::Unknown)
@@ -2225,9 +2265,19 @@ impl<'a> Checker<'a> {
             if self.silent == 0 && !t.is_unknown() {
                 let resolved = self.resolved(&t);
                 let captured = scope < self.lambda_floor;
-                let escapes = kind == LocalKind::Using && !self.use_ok.contains(&span_key(span));
-                if (captured || escapes) && self.is_resource(&resolved) {
-                    self.err("E0081", span, catalog::resource_escapes(name));
+                let used_in_place = self.use_ok.contains(&span_key(span));
+                let parameter = matches!(kind, LocalKind::Param | LocalKind::VarParam);
+                let escapes = kind == LocalKind::Using && !used_in_place;
+                if (captured || escapes || parameter && !used_in_place)
+                    && self.is_resource(&resolved)
+                {
+                    // A resource parameter may be used and passed on, not kept (semantics 7.2).
+                    let message = if parameter {
+                        catalog::resource_parameter_escapes(name)
+                    } else {
+                        catalog::resource_escapes(name)
+                    };
+                    self.err("E0081", span, message);
                 }
             }
             return t;
@@ -2694,6 +2744,9 @@ impl<'a> Checker<'a> {
                 }
             }
             "==" | "!=" | "<" | "<=" | ">" | ">=" => {
+                // Comparing reads the operands; `==` on a resource is E0066, not E0081.
+                self.use_ok.insert(span_key(left.span));
+                self.use_ok.insert(span_key(right.span));
                 let lt = self.expr(left, &Ty::Unknown);
                 let rt = self.expr(right, &lt);
                 let (l, r) = (self.resolved(&lt), self.resolved(&rt));
@@ -3394,7 +3447,7 @@ fn prelude_iface(p: &Program, name: &str) -> Option<DefId> {
 }
 
 /// Every combination of one pattern from each column.
-fn product(columns: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
+fn product(columns: &[Vec<Pat>], overflow: &std::cell::Cell<bool>) -> Vec<Vec<Pat>> {
     let mut result = vec![Vec::new()];
     for column in columns {
         let mut next = Vec::new();
@@ -3407,8 +3460,10 @@ fn product(columns: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
         }
         result = next;
         if result.len() > 256 {
-            // Too many combinations to enumerate: treat the rest as matching anything.
-            return vec![vec![Pat::Wild; columns.len()]];
+            // Too many combinations to enumerate: the pattern counts as matching nothing, and
+            // the match is not taken as covered (semantics 6.5).
+            overflow.set(true);
+            return Vec::new();
         }
     }
     result

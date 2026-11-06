@@ -14,3 +14,4 @@ name = "unio"
 path = "src/main.rs"
 
 [dependencies]
+unio-runtime = { path = "../unio-runtime" }

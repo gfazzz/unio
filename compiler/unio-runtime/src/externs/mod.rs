@@ -47,7 +47,9 @@ pub fn bindings() -> BTreeMap<&'static str, ExternFn> {
 
 /// Calls an external by its full name.
 pub fn call(runtime: &mut Runtime, name: &str, arguments: &mut [Value]) -> Outcome {
-    match bindings().get(name) {
+    static TABLE: std::sync::OnceLock<BTreeMap<&'static str, ExternFn>> =
+        std::sync::OnceLock::new();
+    match TABLE.get_or_init(bindings).get(name) {
         Some(function) => function(runtime, arguments),
         None => Err(runtime.fault(
             FaultKind::NotProvided,

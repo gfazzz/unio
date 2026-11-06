@@ -5,6 +5,7 @@
 ##     check_grammar --corpus [DIR]   check spec/tests: valid/ must parse, invalid/ must fail
 ##                                    where the first line "# expect-error: LINE [CODE]" says
 ##     check_grammar --self-check     check the grammar file for consistency
+##     check_grammar --tree FILE...   print the parse tree of each file
 ##
 ## Exit code: 0 if everything passed, 1 if a check failed, 2 if the grammar cannot be read.
 ## This is the Unio version of spec/check_grammar.py, which it replaces once the interpreter runs.
@@ -17,7 +18,7 @@ let GRAMMAR_PATH as Text = "spec/grammar.ebnf"
 
 let DEFAULT_CORPUS as Text = "spec/tests"
 
-let USAGE as Text = "Usage: check_grammar FILE... | --corpus [DIR] | --self-check"
+let USAGE as Text = "Usage: check_grammar FILE... | --corpus [DIR] | --self-check | --tree FILE..."
 
 ## The expected first error of a file in the invalid corpus. code is "" when only the line is given.
 struct Expectation:
@@ -51,18 +52,59 @@ public function main() returns Int:
         let root = Path(arguments[1]) if arguments.length() > 1 else Path(DEFAULT_CORPUS)
         let passed = run_corpus(root, language)
         return 0 if passed and problems.is_empty() else 1
+    let tree_mode = arguments[0] == "--tree"
+    let names = arguments.slice(1, arguments.length()) if tree_mode else arguments
     var status = 0
-    for name in arguments:
+    for name in names:
         let source = try files.read_text(Path(name)) on IoError as e:
             print("{name}: {e.reason}")
             status = 1
             continue
-        match grammar.check_source(source, language).problem:
+        let result = grammar.check_source(source, language, build_tree = tree_mode)
+        match result.problem:
             case some(problem):
                 status = 1
                 print("{name}:{problem.line}:{problem.column}: {problem.code}: {problem.message}")
-            case none: print("{name}: ok")
+            case none:
+                if tree_mode:
+                    var lines as List[Text] = []
+                    format_tree(grammar.tree_of(result), 0, lines)
+                    for line in lines:
+                        print(line)
+                else: print("{name}: ok")
     return status
+
+## The lines of a parse tree, two spaces per level; chains of rules that wrap a single child
+## are collapsed, and layout tokens are left out.
+function format_tree(tree as grammar.Tree, indent as Int, var lines as List[Text]):
+    match grammar.token_of(tree):
+        case some(token):
+            if token.kind == "TEXT":
+                lines.append(padding(indent) + "TEXT")
+                for part in token.parts:
+                    lines.append(padding(indent + 1) + "interpolation")
+            else if token.kind not in ["NEWLINE", "INDENT", "DEDENT", "EOF"]:
+                let shown = token.value if token.kind == token.value else "{token.kind} {token.value}"
+                lines.append(padding(indent) + shown)
+            return
+        case none: pass
+    var name = grammar.rule_of(tree)
+    var children = grammar.children_of(tree)
+    while children.length() == 1 and grammar.token_of(children[0]).is_none():
+        name = grammar.rule_of(children[0])
+        children = grammar.children_of(children[0])
+    if children.length() == 1:
+        format_tree(children[0], indent, lines)
+        return
+    lines.append(padding(indent) + name)
+    for child in children:
+        format_tree(child, indent + 1, lines)
+
+function padding(indent as Int) returns Text:
+    var result = ""
+    for level in range(0, indent):
+        result = result + "  "
+    return result
 
 function load() returns grammar.Grammar fails with SetupError:
     return try grammar.read_grammar(Path(GRAMMAR_PATH)) on grammar.GrammarError as e:
@@ -147,7 +189,7 @@ function relative(path as Path, root as Path) returns Text:
         rest = rest.slice(1, rest.length())
     return rest
 
-let SMALL_GRAMMAR as Text = "(* Keywords (fixed; adding one requires an RFC): let\n   Reserved (using them is E0032): uses\n   Punctuation and operators: = *)\nfile = \{ statement \} EOF ;\nstatement = \"let\" NAME \"=\" INT NEWLINE ;\n"
+let SMALL_GRAMMAR as Text = "(* Keywords (fixed; adding one requires an RFC): let\n   Contextual keywords (ordinary names except where a rule uses them):\n   A contextual keyword is lexed as NAME.\n   Reserved (using them is E0032): uses\n   Punctuation and operators: = *)\nfile = \{ statement \} EOF ;\nstatement = \"let\" NAME \"=\" INT NEWLINE ;\n"
 
 function small() returns grammar.Grammar:
     return try grammar.load_grammar(SMALL_GRAMMAR) on grammar.GrammarError as e:

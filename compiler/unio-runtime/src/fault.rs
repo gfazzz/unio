@@ -87,8 +87,8 @@ pub enum FaultKind {
 /// One frame of a fault trace (C-14).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    pub function: String,
-    pub file: String,
+    pub function: std::rc::Rc<str>,
+    pub file: std::rc::Rc<str>,
     pub line: u32,
 }
 

@@ -175,7 +175,7 @@ public function main() returns Int:
     assert_eq!(r.documentation, "Reads a file.\nThen counts it.");
     assert!(r.declared.ends_with("app.unio:5:10"), "{}", r.declared);
     assert_eq!(r.errors, ["IoError"]);
-    assert_eq!(r.effects, ["files", "allocates"]);
+    assert_eq!(r.effects, ["files.read", "allocates"]);
     assert_eq!(r.layer, "std");
     assert!(
         r.calls.contains(&"std.files.read_text".to_string()),
@@ -185,11 +185,11 @@ public function main() returns Int:
     assert_eq!(r.usages.len(), 1, "{:?}", r.usages);
     assert!(r.usages[0].ends_with("app.unio:9:16"), "{:?}", r.usages);
     let text = r.text();
-    assert!(text.contains("effects: files, allocates"), "{text}");
+    assert!(text.contains("effects: files.read, allocates"), "{text}");
     assert!(text.contains("hash: unio-hash-v1:sha384:"), "{text}");
     let json = r.json();
     assert!(
-        json.contains("\"effects\":[\"files\",\"allocates\"]"),
+        json.contains("\"effects\":[\"files.read\",\"allocates\"]"),
         "{json}"
     );
     assert!(json.contains("\"hash\":\"unio-hash-v1:sha384:"), "{json}");
@@ -253,6 +253,30 @@ public function main() returns Int:
     return text.length()
 ";
 
+/// Every external of std.files states its scope, because the scope is its effect (semantics 8.2).
+#[test]
+fn every_external_of_std_files_states_its_permission() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/files.unio");
+    let source = std::fs::read_to_string(root).unwrap();
+    let lines: Vec<&str> = source.lines().collect();
+    let mut missing = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("external function") {
+            continue;
+        }
+        let mut doc = String::new();
+        let mut j = i;
+        while j > 0 && lines[j - 1].trim_start().starts_with("##") {
+            j -= 1;
+            doc.push_str(lines[j]);
+        }
+        if !doc.contains("Permission: files.") && !doc.contains("Permission: none") {
+            missing.push(line.trim().to_string());
+        }
+    }
+    assert!(missing.is_empty(), "{missing:#?}");
+}
+
 #[test]
 fn the_manifest_permits_effects() {
     let manifest = |permissions: &str| {
@@ -289,7 +313,48 @@ fn the_manifest_permits_effects() {
         ],
     );
     assert!(codes(&unmanaged, "app.unio", Profile::Application).is_empty());
-    for dir in [denied, allowed, unmanaged] {
+    // files.read and files.write are separate scopes (T-6): writing needs files.write.
+    let writer = "\
+import std.files as files
+
+function save(path as Path) fails with IoError:
+    try files.write_text(path, \"x\")
+
+public function main() returns Int:
+    try save(Path(\"a.txt\")) on IoError as e:
+        return 1
+    return 0
+";
+    let read_only = package(
+        "read_only",
+        &[
+            ("app.unio", writer),
+            ("unio.toml", &manifest("files.read = [\"$CWD/**\"]\n")),
+        ],
+    );
+    let found = codes(&read_only, "app.unio", Profile::Application);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].0.as_str(), found[0].1), ("E0085", 4));
+    assert!(found[0].2.contains("files.write"), "{}", found[0].2);
+    let writable = package(
+        "writable",
+        &[
+            ("app.unio", writer),
+            ("unio.toml", &manifest("files.write = [\"$CWD/**\"]\n")),
+        ],
+    );
+    assert!(codes(&writable, "app.unio", Profile::Application).is_empty());
+    let write_only = package(
+        "write_only",
+        &[
+            ("app.unio", READER),
+            ("unio.toml", &manifest("files.write = [\"$CWD/**\"]\n")),
+        ],
+    );
+    let found = codes(&write_only, "app.unio", Profile::Application);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].2.contains("files.read"), "{}", found[0].2);
+    for dir in [denied, allowed, unmanaged, read_only, writable, write_only] {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -106,13 +106,18 @@ impl Runtime {
     // ---------------------------------------------------------------- calls and traces
 
     /// Enters a call; exceeding the stack limit is exhaustion with code 102.
-    pub fn enter(&mut self, function: &str, file: &str, line: u32) -> Result<(), Unwind> {
+    pub fn enter(
+        &mut self,
+        function: impl Into<std::rc::Rc<str>>,
+        file: impl Into<std::rc::Rc<str>>,
+        line: u32,
+    ) -> Result<(), Unwind> {
         if self.frames.len() >= self.stack_limit {
             return Err(Unwind::Exhausted(Exhaustion::Stack));
         }
         self.frames.push(Frame {
-            function: function.to_string(),
-            file: file.to_string(),
+            function: function.into(),
+            file: file.into(),
             line,
         });
         Ok(())

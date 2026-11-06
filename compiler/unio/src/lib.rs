@@ -10,6 +10,7 @@ pub mod check;
 pub mod diag;
 pub mod effects;
 pub mod format;
+pub mod interp;
 pub mod lexer;
 pub mod outline;
 pub mod parser;
@@ -65,7 +66,7 @@ pub fn check_files(files: &[std::path::PathBuf]) -> Vec<Analysis> {
 
 /// Loads and checks a program: syntax, then, when every module parses, the semantic checks,
 /// the profile and the permissions of the manifest.
-fn load_checked(files: &[std::path::PathBuf], profile: effects::Profile) -> program::Program {
+pub fn load_checked(files: &[std::path::PathBuf], profile: effects::Profile) -> program::Program {
     let mut program = program::Program::load(files);
     let syntax_ok = program.modules.iter().all(|m| !m.analysis.has_errors());
     if syntax_ok {

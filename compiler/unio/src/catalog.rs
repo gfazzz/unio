@@ -536,7 +536,10 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0083", outside_loop("break")),
         ("E0084", layer_violation("print", "std", "core")),
         ("E0084", profile_violation("main", "alloc", "main -> join")),
-        ("E0085", effect_not_permitted("files", "main -> read_text")),
+        (
+            "E0085",
+            effect_not_permitted("files.read", "main -> read_text"),
+        ),
         ("E0050", is_name_not_bound("x")),
         ("E0065", operator_not_defined("+", "Point")),
         ("E0065", operands_differ("==", "Int", "Text")),
@@ -1350,6 +1353,13 @@ pub fn resource_outside_using(ty: &str) -> Msg {
     )
 }
 
+pub fn resource_parameter_escapes(name: &str) -> Msg {
+    Msg::new(
+        format!("the resource parameter '{name}' would outlive the call; use it or pass it on, but do not store, return or capture it"),
+        format!("параметр-ресурс '{name}' пережил бы вызов; используйте его или передайте дальше, но не сохраняйте, не возвращайте и не захватывайте"),
+    )
+}
+
 pub fn resource_escapes(name: &str) -> Msg {
     Msg::new(
         format!("the resource '{name}' would leave its 'using' block; use it inside the block"),
@@ -1361,6 +1371,13 @@ pub fn match_not_exhaustive(example: &str) -> Msg {
     Msg::new(
         format!("this match does not cover {example}; add a case for it or 'case _'"),
         format!("этот match не покрывает {example}; добавьте для него ветку или 'case _'"),
+    )
+}
+
+pub fn match_too_many_cases() -> Msg {
+    Msg::new(
+        "the patterns of this match combine into more cases than the checker enumerates, so it is not taken as covered; add 'case _'",
+        "образцы этого match дают больше случаев, чем перебирает проверка, поэтому он не считается полным; добавьте 'case _'",
     )
 }
 

@@ -2,8 +2,9 @@
 
 The front end of the Unio compiler, written in Rust (requirements, section 10): the lexer, the
 parser, the syntax tree, diagnostics and their catalog, the formatter, the outline, the static
-checks of [docs/semantics.md](../docs/semantics.md), and `unio symbol`. These are sprints S1 to S4
-of the plan; the interpreter and code generation follow in later sprints.
+checks of [docs/semantics.md](../docs/semantics.md), `unio symbol`, and the interpreter of
+[docs/runtime.md](../docs/runtime.md) behind `unio run` and `unio test`. These are sprints S1 to
+S5 of the plan; the native runtime, the sandbox, and code generation follow in sprint S6.
 
 ## Build and test
 
@@ -13,10 +14,14 @@ network and is reproducible (C-4).
 ```sh
 cd compiler
 cargo build --release          # target/release/unio
-cargo test                     # corpus, repository sources, diagnostics, fuzzing
+cargo test                     # corpus, repository sources, diagnostics, fuzzing, interpreter
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+cargo test --release -p unio --test tools -- --ignored   # Unio tools against the Python checkers
 ```
+
+The workspace has two crates: `unio` (this front end, the interpreter, and the command) and
+`unio-runtime` (values, faults, the release stack, and the externals; see its README).
 
 `UNIO_FUZZ_ITERATIONS=100000 cargo test --release --test fuzz` runs a longer mutation run.
 
@@ -30,6 +35,8 @@ cargo fmt --check
 | `unio outline [--json] FILE` | Lists the declarations with their signatures and lines; members of structs, enums, errors, interfaces, and extend blocks are indented (C-12) |
 | `unio parse --ast FILE` | Prints the syntax tree as an S-expression without spans; the form is stable and is used to compare parses |
 | `unio explain CODE` | Prints the explanation of a diagnostic code with an example of the error and the example fixed (C-9) |
+| `unio run FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`. Until the sandbox of S6 exists it writes a warning that the program runs without SB-1 (runtime 7.4). Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion, 1 if the program does not compile |
+| `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). It writes the same warning as `unio run`. Exit code 0 when every test passed, 1 otherwise |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,
 and is English otherwise (C-10). Codes and the JSON format do not depend on it.
@@ -118,16 +125,27 @@ declared or imported in a module hides a prelude name of the same spelling for r
   read, is E0043 (L-30); `let _ = ...` drops it on purpose. Other results may be dropped.
 - Resources: created only as a `using` initializer, the return of a function that returns a
   resource, or a field of another resource (E0080); a `using` name must not leave its block,
-  directly or captured by a lambda (E0081).
+  directly or captured by a lambda (E0081). A parameter of a resource type may be used, compared,
+  and passed on to a parameter of a resource type or of a generic type bounded by `Resource`
+  (`is_same`), but storing, returning or capturing it is E0081 too (semantics 7.2).
+- Coverage of `match` is searched with a budget of 10,000 pattern rows per `match`, and the
+  alternatives (`|`) of one tuple or list pattern expand to at most 256 rows; a column in which
+  no case names a constructor is skipped in one step. A `match` that exceeds either limit and has
+  no `case _` is not taken as covered: E0068 says that its patterns combine into more cases than
+  the checker enumerates (semantics 6.5). Before S5, such a pattern counted as matching anything.
 
 `src/effects.rs` derives effects and layers from the call graph that the checks record (section
-8): an external function of `std.files`, `std.env`, `std.process` or `std.net` has the effect of
-its module, every function of the `alloc` layer has `allocates`, and a function has the union of
-what it calls. A library module that calls a higher layer is E0084; `--profile=core` applies the
-rule to the functions of a package, with the chain of calls. When the `unio.toml` of a package has
-a `[permissions]` table, a call that needs an effect the table does not grant is E0085, once per
-effect and module, with the chain (`files.read` or `files.write` grant `files`; `env`, `process`
-and `network` grant themselves). A manifest without the table is not checked.
+8): an external function of `std.env`, `std.process` or `std.net` has the effect of its module,
+an external of `std.files` has the scopes `files.read` and `files.write` that the "Permission:"
+sentence of its documentation names ("Permission: none" for an operation on a descriptor that is
+already open; a missing sentence counts as both scopes, and a test requires the sentence on every
+external of `std.files`), every function of the `alloc` layer has `allocates`, and a function has
+the union of what it calls. A library module that calls a higher layer is E0084;
+`--profile=core` applies the rule to the functions of a package, with the chain of calls. When
+the `unio.toml` of a package has a `[permissions]` table, a call that needs an effect the table
+does not grant is E0085, once per effect and module, with the chain; `files.read` and
+`files.write` are checked separately against the keys of the same names (T-6), and `env`,
+`process` and `network` grant themselves. A manifest without the table is not checked.
 
 `src/symbol.rs` and `src/sha.rs` compute the content hashes of C-11a and C-11b: SHA-384, with
 the scheme version `unio-hash-v1` and a domain for each kind of input, over the S-expression of
@@ -137,6 +155,60 @@ are sorted by identity, references inside it are written as identities and refer
 as their hashes, and each member's hash binds the component hash and the member's identity.
 Formatting, comments and the order of declarations do not change a hash; a change of the body,
 of a name, or of anything referenced does.
+
+## The interpreter (sprint S5)
+
+`src/interp.rs` executes a checked program; `unio-runtime` supplies the values, faults, the
+release stack and the 70 externals. The interpreter walks the checked syntax tree with the
+program tables of the checker (resolved declarations, methods by type, signatures); runtime 8.1
+describes a lowered representation with slots and explicit error edges, which is left to the
+native runtime of S6, because the tree walk already gives the evaluation order of runtime 1 and
+is the reference for it.
+
+- Evaluation is strict and left to right (runtime 1.1), including assignment: the target place
+  and its indices are resolved before the right-hand side. Defaults of parameters are evaluated
+  at each call that omits them, in the module of the function and after the preceding
+  arguments; externals get their defaults the same way.
+- Values come from `unio_runtime::value`: reference counting with copy-on-write, so changing an
+  unshared value happens in place. `var` arguments and `var self` receivers are taken out of
+  their place for the call and written back afterwards, also when the call fails. A resource is a
+  shared cell: its methods see one value, `release` runs once.
+- Calls: functions and methods through the tables of the checker, interface values and default
+  methods of interfaces, functions of a type (`T.f`), and lambdas as closures that capture the
+  values of the names they use; named functions and closures implement `unio_runtime::Callable`,
+  so that externals such as `expect_fault` can call them.
+- Errors travel as `Unwind::Error` to the nearest `try ... on` or `try:` handler that names their
+  type or `Error`; faults (`Unwind::Fault`) carry the trace of function, file and line of every
+  frame (C-14), run the `release` of every open `using` block on the way out (C-17), and end
+  `unio run` with code 101; exhaustion of the stack, or of the heap limit when a policy sets one,
+  ends it with 102 (C-18). An
+  exit code of `main` outside 0–100 is a fault (C-15).
+- Top-level constants are evaluated on first use, once, which is dependency order (runtime 6.3).
+- Externals are called by their binding-table names (`Text.slice`, `std.files.system_rename`,
+  bare names for the prelude); `std.json.to_value` and `std.json.from_value` are generated from
+  the static type: structs, enums, options, lists, maps and sets, with the strict decoding of
+  S-17 (unknown fields and variants, missing required fields, `Float` for `Int` are
+  `DecodeError` with a JSON Pointer path; defaults are fresh).
+- `unio run` and `unio test` run the program on a thread with a 1 GiB stack, so that the frame
+  limit of the runtime, not the native stack, decides exhaustion.
+
+Decisions made where docs/runtime.md is silent:
+
+- `try e` unwraps a `Result` value only when `e` is not a call of a function with `fails with`;
+  `a or b` keeps an `Option` when `b` is `none` or `some(...)`, and gives the inner value
+  otherwise, following semantics 4.3.
+- Iterating a `Map` yields its keys in insertion order; iterating a `Text` yields its characters
+  as one-character texts; `Range` iteration needs no allocation.
+- The generated `to_text` of an error is `Name(field = value, ...)`, with each field as its own
+  `to_text` writes it (texts without quotes).
+- A `match` without a matching case cannot happen after E0068, so it is an internal fault.
+
+Speed, measured on the reference tools in a release build on one core: the whole repository's
+113 test blocks run in 0.9 s; `tools/check_grammar.unio --corpus` takes 3.7 s, the parse check of
+every source 30 s, and `tools/check_api.unio` 29 s, against 0.1 s, 0.2 s and 1.4 s for the Python
+checkers. A loop of a million iterations and 250,000 recursive calls takes 0.7 s. The binding
+table is built once per process, frames hold shared names, and method lookup does not allocate;
+the remaining cost is the tree walk and allocation of environments, which S6 replaces.
 
 ## Tests
 
@@ -168,12 +240,25 @@ The tests were written before the code (concept, section 1.2):
   exit criterion of S3 and S4 that every `.unio` source of the repository passes `unio check`, and
   random renaming of names in real programs that must never make the checker panic (R-1). The
   semantic corpus is checked by the compiler only; `spec/check_grammar.py` checks syntax.
+- `tests/interpreter.rs`: every `test` block of `stdlib`, `examples`, `docs/examples`,
+  `docs/ru/examples` and `tools` runs and passes under `unio test` (the exit criterion of S5);
+  failing and non-compiling tests and the filter; the reference utilities `wc`, `grep_lite`,
+  `json_query`, `csv_sum`, `log_tail`, `rename --dry-run` and `todo` (with `TODO_FILE` in a
+  temporary directory) end to end with their output and exit codes; a fault that releases two
+  `using` blocks in reverse order and ends with 101 and its trace, exit codes of `main` inside and
+  outside 0–100, and recursion that ends with 102.
+- `tests/tools.rs` (ignored by default, run in CI in a release build): `tools/check_docs.unio`,
+  `tools/check_grammar.unio` (corpus, self-check, sources, invalid sources, parse trees) and
+  `tools/check_api.unio` under `unio run` give the same output and exit code as the Python
+  checkers.
 
 ## Not done yet
 
-- Known limits of S4: effects follow direct calls, so a call through an interface method or a
-  function value does not carry the effects of the implementation; the core profile looks at
-  calls, not at list or map literals; usages of types are listed per referencing declaration;
-  a `case` whose tuple and list patterns expand to more than 256 combinations is treated as
-  matching anything, so exhaustiveness may miss a gap there.
-- The interpreter, `unio test`, code generation, and the other commands of requirement 6.1.
+- Known limits: effects follow direct calls, so a call through an interface method or a function
+  value does not carry the effects of the implementation; the core profile looks at calls, not at
+  list or map literals; usages of types are listed per referencing declaration.
+- Methods are found by the short name of the receiver's type, so two types of one name in
+  different modules would share an entry of the method table; no program of the repository has
+  such types.
+- The sandbox of SB-1, the heap limit of a policy, the native runtime and code generation of S6,
+  and the other commands of requirement 6.1.

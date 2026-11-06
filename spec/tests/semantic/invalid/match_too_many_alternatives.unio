@@ -1,0 +1,17 @@
+# expect-error: 15 E0068
+## Every value matches, but the alternatives combine into more rows than the checker
+## enumerates (semantics 6.5), so the match needs `case _`.
+function any(
+    b0 as Bool,
+    b1 as Bool,
+    b2 as Bool,
+    b3 as Bool,
+    b4 as Bool,
+    b5 as Bool,
+    b6 as Bool,
+    b7 as Bool,
+    b8 as Bool,
+) returns Int:
+    match (b0, b1, b2, b3, b4, b5, b6, b7, b8):
+        case (true | false, true | false, true | false, true | false, true | false, true | false, true | false, true | false, true | false):
+            return 1

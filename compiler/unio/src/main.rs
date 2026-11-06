@@ -7,6 +7,8 @@ use unio::Lang;
 const USAGE: &str = "Usage:
     unio check [--diagnostics=json] [--lang=en|ru] [--profile=application|core] FILE...
     unio fmt [--check] FILE...
+    unio run FILE [-- ARGS...]
+    unio test [--json] [FILTER] FILE...
     unio outline [--json] FILE
     unio symbol [--json] MODULE.NAME
     unio parse --ast FILE
@@ -16,6 +18,9 @@ The language of messages is taken from --lang, then from UNIO_LANG, and is Engli
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some("run") {
+        return run(&arguments[1..]);
+    }
     let mut lang = std::env::var("UNIO_LANG")
         .ok()
         .and_then(|v| Lang::parse(&v))
@@ -68,6 +73,7 @@ fn main() -> ExitCode {
         "symbol" if files.len() == 1 => symbol(&files[0], json),
         "parse" if ast && files.len() == 1 => parse(&files[0], lang),
         "fmt" => fmt(files, check_only, lang),
+        "test" => test(files, json, lang),
         "outline" if files.len() == 1 => outline(&files[0], json, lang),
         "explain" if files.len() == 1 => match unio::catalog::explain(&files[0], lang) {
             Some(text) => {
@@ -240,4 +246,220 @@ fn outline(path: &str, json: bool, lang: Lang) -> ExitCode {
         print!("{}", unio::outline::outline_text(&analysis.file));
     }
     ExitCode::SUCCESS
+}
+
+/// The stack of the interpreter thread; deep Unio recursion ends with code 102 at the
+/// runtime's frame limit long before this is used up.
+const RUN_STACK: usize = 1024 * 1024 * 1024;
+
+fn on_run_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(RUN_STACK)
+        .spawn(f)
+        .expect("a thread for the interpreter")
+        .join()
+        .expect("the interpreter thread")
+}
+
+/// Prints the diagnostics of files and tells whether any of them is an error.
+fn report_errors(files: &[std::path::PathBuf], lang: Lang) -> bool {
+    let mut failed = false;
+    for analysis in unio::check_files(files) {
+        if analysis.has_errors() {
+            failed = true;
+            eprint!("{}", analysis.render_text(lang));
+        }
+    }
+    failed
+}
+
+const UNSANDBOXED: &str =
+    "unio: warning: until sprint S6 the program runs without the sandbox of SB-1\n";
+
+fn run(arguments: &[String]) -> ExitCode {
+    let (file, rest) = match arguments.split_first() {
+        Some((file, rest)) => (std::path::PathBuf::from(file), rest),
+        None => return usage("unio run needs a file"),
+    };
+    let program_args: Vec<String> = match rest.first().map(String::as_str) {
+        Some("--") => rest[1..].to_vec(),
+        Some(_) => rest.to_vec(),
+        None => Vec::new(),
+    };
+    if report_errors(std::slice::from_ref(&file), Lang::En) {
+        return ExitCode::from(1);
+    }
+    let code = on_run_stack(move || {
+        let program = unio::load_checked(&[file], unio::effects::Profile::Application);
+        let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
+        let interp = unio::interp::Interp::new(program);
+        let mut rt = unio_runtime::Runtime::new(program_args);
+        rt.write_error(UNSANDBOXED);
+        unio::interp::run_main(&interp, &mut rt, module)
+    });
+    ExitCode::from(code.clamp(0, 255) as u8)
+}
+
+fn json_text(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `unio test [--json] [FILTER] FILE...` (T-4, T-5, T-5a).
+fn test(arguments: &[String], json: bool, lang: Lang) -> ExitCode {
+    let (filter, files): (Option<String>, Vec<std::path::PathBuf>) = match arguments.split_first() {
+        Some((first, rest))
+            if !first.ends_with(".unio") && !std::path::Path::new(first).is_file() =>
+        {
+            (
+                Some(first.clone()),
+                rest.iter().map(std::path::PathBuf::from).collect(),
+            )
+        }
+        _ => (
+            None,
+            arguments.iter().map(std::path::PathBuf::from).collect(),
+        ),
+    };
+    if files.is_empty() {
+        return usage("unio test needs files");
+    }
+    // Runtime 7.4: tests run without the sandbox until S6, and say so.
+    eprint!("{UNSANDBOXED}");
+    let mut records = Vec::new();
+    let (mut passed, mut failed) = (0, 0);
+    for file in files {
+        let display = file.display().to_string();
+        let analyses = unio::check_files(std::slice::from_ref(&file));
+        let Some(analysis) = analyses.into_iter().next() else {
+            continue;
+        };
+        let tests: Vec<(usize, usize, usize)> = analysis
+            .file
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                unio::ast::Item::Test(t) => Some((i, t.span.start.line, t.span.end.line)),
+                _ => None,
+            })
+            .collect();
+        let errors: Vec<&unio::Diagnostic> = analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == unio::Severity::Error)
+            .collect();
+        let outside: Vec<&&unio::Diagnostic> = errors
+            .iter()
+            .filter(|d| {
+                !tests
+                    .iter()
+                    .any(|(_, s, e)| (*s..=*e).contains(&d.span.start.line))
+            })
+            .collect();
+        if !outside.is_empty() || analysis.has_errors() && tests.is_empty() {
+            eprint!("{}", analysis.render_text(lang));
+            failed += 1;
+            records.push(format!(
+                "{{\"file\": {}, \"name\": null, \"status\": \"failed\", \"message\": {}}}",
+                json_text(&display),
+                json_text("the file does not compile")
+            ));
+            continue;
+        }
+        let failing: Vec<(usize, String)> = tests
+            .iter()
+            .filter_map(|(i, s, e)| {
+                let mine: Vec<String> = errors
+                    .iter()
+                    .filter(|d| (*s..=*e).contains(&d.span.start.line))
+                    .map(|d| format!("{}:{}: {}", d.span.start.line, d.code, d.message.get(lang)))
+                    .collect();
+                (!mine.is_empty()).then(|| (*i, mine.join("\n")))
+            })
+            .collect();
+        let path = file.clone();
+        let filter = filter.clone();
+        let results = on_run_stack(move || {
+            let program = unio::load_checked(&[path], unio::effects::Profile::Application);
+            let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
+            let interp = unio::interp::Interp::new(program);
+            let mut results = Vec::new();
+            for (i, item) in interp.program.modules[module]
+                .analysis
+                .file
+                .items
+                .iter()
+                .enumerate()
+            {
+                let unio::ast::Item::Test(t) = item else {
+                    continue;
+                };
+                let name = unio::interp::description(&t.description);
+                if filter.as_ref().is_some_and(|f| !name.contains(f.as_str())) {
+                    continue;
+                }
+                if let Some((_, message)) = failing.iter().find(|(j, _)| *j == i) {
+                    results.push(unio::interp::TestResult {
+                        name,
+                        passed: false,
+                        message: format!("the test does not compile:\n{message}\n"),
+                        output: String::new(),
+                        millis: 0,
+                    });
+                    continue;
+                }
+                results.push(unio::interp::run_test(&interp, module, i));
+            }
+            results
+        });
+        for r in results {
+            if r.passed {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+            if !json {
+                if r.passed {
+                    println!("ok   {display}: {} ({} ms)", r.name, r.millis);
+                } else {
+                    println!("FAIL {display}: {}", r.name);
+                    for line in r.message.lines().chain(r.output.lines()) {
+                        println!("     {line}");
+                    }
+                }
+            }
+            records.push(format!(
+                "{{\"file\": {}, \"name\": {}, \"status\": \"{}\", \"time_ms\": {}, \"output\": {}, \"message\": {}}}",
+                json_text(&display),
+                json_text(&r.name),
+                if r.passed { "passed" } else { "failed" },
+                r.millis,
+                json_text(&r.output),
+                json_text(&r.message)
+            ));
+        }
+    }
+    if json {
+        println!("[{}]", records.join(",\n "));
+    } else {
+        println!("{passed} passed, {failed} failed");
+    }
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }

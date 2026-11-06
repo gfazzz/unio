@@ -1,0 +1,13 @@
+# expect-error: 13 E0081
+struct Handle:
+    id as Int
+
+extend Handle with Resource:
+    function release(var self):
+        pass
+
+struct Holder:
+    handle as Handle
+
+function keep(h as Handle) returns Holder:
+    return Holder(handle = h)

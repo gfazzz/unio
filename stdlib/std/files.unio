@@ -111,9 +111,11 @@ extend FileReader:
             case some(problem): fail problem
             case none: return none
 
+## Opens the file for reading and returns its descriptor. Permission: files.read.
 external function system_open_read(path as Path) returns Int fails with IoError
 
 ## Blocks until data, EOF or error; retries interrupted reads. data.length() <= max_bytes.
+## Permission: none; the descriptor was opened with files.read.
 external function system_read_chunk(
     descriptor as Int,
     path as Path,
@@ -390,28 +392,37 @@ extend AtomicFile with Resource:
                     let remove = self.steps.remove
                     remove(self.temporary)
 
+## Whether the file system of the path can make a commit durable; asked only when writing it.
+## Permission: files.write.
 external function system_supports_durability(path as Path) returns Bool
 
 ## Creates .<name>.unio-tmp-<id> next to the target and opens it for writing.
+## Permission: files.write.
 external function system_open_temporary(target as Path) returns TemporaryFile fails with IoError
 
+## Writes the text to the descriptor. Permission: none; the descriptor was opened with files.write.
 external function system_write(descriptor as Int, text as Text) fails with IoError
 
+## Writes the bytes to the descriptor. Permission: none, like system_write.
 external function system_write_bytes(descriptor as Int, data as Bytes) fails with IoError
 
 ## fsync on Linux, fcntl(F_FULLFSYNC) on macOS, FlushFileBuffers on Windows.
+## Permission: none, like system_write.
 external function system_sync_data(descriptor as Int) fails with IoError
 
 ## Releases the descriptor even when it reports an error; a released descriptor is never closed again.
+## Permission: none; the descriptor was opened with its permission.
 external function system_close(descriptor as Int) fails with IoError
 
 ## rename on Linux and macOS, MoveFileExW with MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH on Windows.
+## Permission: files.write.
 external function system_rename(temporary as Path, target as Path) fails with IoError
 
 ## fsync of the directory on Linux and macOS; on Windows MOVEFILE_WRITE_THROUGH has done this already.
+## Permission: files.write.
 external function system_sync_directory(directory as Path) fails with IoError
 
-## Removes the file; errors are ignored.
+## Removes the file; errors are ignored. Permission: files.write.
 external function system_remove(path as Path)
 
 # ---------------------------------------------------------------- tests of the commit protocol
