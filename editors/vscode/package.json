@@ -1,0 +1,50 @@
+{
+  "name": "unio",
+  "displayName": "Unio",
+  "description": "Syntax highlighting for the Unio programming language, in .unio files and in ```unio blocks of Markdown.",
+  "version": "0.1.0",
+  "publisher": "unio",
+  "license": "SEE LICENSE IN README.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gfazzz/unio"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "unio",
+        "aliases": ["Unio", "unio"],
+        "extensions": [".unio"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "unio",
+        "scopeName": "source.unio",
+        "path": "./syntaxes/unio.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.unio.codeblock",
+        "path": "./syntaxes/unio.markdown.tmLanguage.json",
+        "injectTo": ["text.html.markdown"],
+        "embeddedLanguages": {
+          "meta.embedded.block.unio": "unio"
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/grammar.test.mjs"
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.2.0"
+  }
+}

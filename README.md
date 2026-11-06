@@ -43,6 +43,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Standard library](docs/stdlib.md), written in Unio in [stdlib/](stdlib) in the layers `core`, `alloc`, and `std`
 - [Reference utilities](examples)
 - [Project tools in Unio](tools)
+- [Editor support](editors/README.md): VS Code, Cursor, JetBrains, Vim and Neovim
 - [RFC process](docs/rfcs/README.md)
 - [Influences](docs/influences.md): what Unio takes from other languages and what it declines
 - [Accepting contributions](docs/contributing.md): defenses against bad and malicious code; [security policy](SECURITY.md)

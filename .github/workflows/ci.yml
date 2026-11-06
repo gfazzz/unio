@@ -30,3 +30,25 @@ jobs:
         run: python spec/check_api.py
       # The Python checkers are temporary: tools/*.unio do the same work and replace
       # them once the stage 3 interpreter can run Unio programs (plan, section 1).
+
+  editors:
+    name: editor highlighting
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the TextMate engine for the tests
+        run: npm ci
+      - name: Grammar tests (keywords from spec/grammar.ebnf, all .unio files)
+        run: npm test
+      - name: Build the VS Code and Cursor package
+        run: npx --yes @vscode/vsce@4.1.0 package --allow-missing-repository
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unio-vscode-extension
+          path: editors/vscode/*.vsix

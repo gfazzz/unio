@@ -1,0 +1,323 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Unio",
+  "scopeName": "source.unio",
+  "fileTypes": [
+    "unio"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#names"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.unio",
+          "match": "##.*$"
+        },
+        {
+          "name": "comment.line.number-sign.unio",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "unsafe module: contextual keywords at the start of a file",
+          "match": "^\\s*(unsafe)\\s+(module)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.unsafe.unio"
+            },
+            "2": {
+              "name": "storage.modifier.module.unio"
+            }
+          }
+        },
+        {
+          "comment": "error declaration: contextual keyword error before a type name",
+          "match": "^\\s*(?:(public)\\s+)?(error)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.public.unio"
+            },
+            "2": {
+              "name": "storage.type.error.unio"
+            },
+            "3": {
+              "name": "entity.name.type.unio"
+            }
+          }
+        },
+        {
+          "comment": "test block: contextual keyword test before its description",
+          "match": "^\\s*(test)(?=\\s+\\\")",
+          "captures": {
+            "1": {
+              "name": "storage.type.test.unio"
+            }
+          }
+        },
+        {
+          "comment": "external function: contextual keyword external",
+          "match": "^\\s*(?:(public)\\s+)?(external)(?=\\s+function\\b)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.public.unio"
+            },
+            "2": {
+              "name": "storage.modifier.external.unio"
+            }
+          }
+        },
+        {
+          "comment": "named parameter: contextual keyword named before NAME as",
+          "match": "\\b(named)(?=\\s+[a-z_][A-Za-z0-9_]*\\s+as\\b)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.named.unio"
+            }
+          }
+        },
+        {
+          "match": "\\b(function)\\s+([a-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.unio"
+            },
+            "2": {
+              "name": "entity.name.function.unio"
+            }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|interface)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.unio"
+            },
+            "2": {
+              "name": "entity.name.type.unio"
+            }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "comment": "Text is split into literal parts and interpolations, so that code inside {} is not marked as string",
+          "name": "meta.string.unio",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "string.quoted.double.unio punctuation.definition.string.begin.unio"
+            }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": {
+              "name": "string.quoted.double.unio punctuation.definition.string.end.unio"
+            }
+          },
+          "patterns": [
+            {
+              "name": "string.quoted.double.unio constant.character.escape.unio",
+              "match": "\\\\(?:[ntr0\\\\\\\"{}]|u\\{[0-9A-Fa-f]{1,6}\\})"
+            },
+            {
+              "name": "invalid.illegal.escape.unio",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.unio",
+              "begin": "\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.unio"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.unio"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            },
+            {
+              "name": "string.quoted.double.unio",
+              "match": "[^\\\"\\\\{}]+"
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.unio",
+          "match": "\\b0x[0-9A-Fa-f][0-9A-Fa-f_]*\\b"
+        },
+        {
+          "name": "constant.numeric.binary.unio",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.float.unio",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*(?:[eE][+-]?[0-9][0-9_]*)?|[eE][+-]?[0-9][0-9_]*)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.unio",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.unio",
+          "match": "\\b(if|else|for|in|while|match|case|return|fail|try|on|using|break|continue|pass|assert)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.unio",
+          "match": "\\b(and|or|not)\\b"
+        },
+        {
+          "name": "storage.type.function.unio",
+          "match": "\\bfunction\\b"
+        },
+        {
+          "name": "storage.type.unio",
+          "match": "\\b(struct|enum|interface|extend|let)\\b"
+        },
+        {
+          "name": "storage.modifier.unio",
+          "match": "\\b(public|var)\\b"
+        },
+        {
+          "name": "keyword.other.unio",
+          "match": "\\b(as|returns|fails|with|import|from)\\b"
+        },
+        {
+          "name": "keyword.other.reserved.unio",
+          "match": "\\b(uses)\\b"
+        },
+        {
+          "name": "variable.language.self.unio",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.unio",
+          "match": "\\b(true|false|none)\\b"
+        },
+        {
+          "name": "support.function.variant.unio",
+          "match": "\\b(some|ok|error)(?=\\s*\\()"
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.unio",
+          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*(?:\\[[A-Z][^\\]]*\\]\\s*)?\\()"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.unio",
+          "match": "\\b(Int|Float|Bool|Text|Bytes|List|Map|Set|Option|Result|Tuple|Path|Function|Never|Self|OrderedFloat|Range)\\b"
+        },
+        {
+          "name": "entity.name.type.unio",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.unio",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.comparison.unio",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.unio",
+          "match": "\\*\\*|[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.access.unio",
+          "match": "\\?\\.|\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.assignment.unio",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.alternative.unio",
+          "match": "\\|"
+        }
+      ]
+    },
+    "names": {
+      "patterns": [
+        {
+          "name": "punctuation.accessor.unio",
+          "match": "\\.(?!\\.)"
+        },
+        {
+          "name": "punctuation.separator.unio",
+          "match": "[,:]"
+        },
+        {
+          "name": "variable.other.unio",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}
