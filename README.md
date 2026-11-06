@@ -55,3 +55,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 
 - [Comparative-review contracts](docs/language-contracts.md): semantics, library, tooling and acceptance.
 - [RFC 0001](docs/rfcs/0001-language-contracts.md): accepted language changes.
+
+## Credits
+
+Unio grew out of the idea [“A universal programming language for AI and humans”](https://eurecable.com/ideas/992) by fazzz, published on Eurecable on November 4, 2026: writing programs with AI runs into the limits of languages that evolved for people alone, so a language designed from scratch for AI should still be one that people can read and check.
