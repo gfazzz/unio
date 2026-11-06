@@ -15,4 +15,13 @@ The ten programs of requirements section 9.1. They are tests, benchmarks, and ma
 | `log-tail` | [log_tail.unio](log_tail.unio) | Last lines of a log, filtered by level and text | `files.read` |
 | `release-notes` | [release_notes.unio](release_notes.unio) | Markdown release notes from `git log` | `process = ["git"]` |
 
-They use only the standard library in [stdlib/](../stdlib) and the `application` profile. `spec/check_grammar.py` and `spec/check_api.py` check them in CI; once the interpreter of stage 3 runs, their tests run as well.
+## Programs of the reference customer
+
+Scenario programs of tanstaafl, a product written with AI ([../docs/customers.md](../docs/customers.md)). They follow the same rules and are checked the same way; the gaps they find are recorded in that document.
+
+| Program | File | What it does | Permissions it needs |
+|---|---|---|---|
+| `risk-register` | [risk_register.unio](risk_register.unio) | Ranks audit findings by annual loss in rubles with ROSI; findings without a norm reference are rejected, unapproved ones are drafts | `files.read` |
+| `event-journal` | [event_journal.unio](event_journal.unio) | Event journal of a site agent: pending, acknowledgement, compaction with the 72-hour autonomy window | `files.read`, `files.write` for the journal |
+
+All these programs use only the standard library in [stdlib/](../stdlib) and the `application` profile. `spec/check_grammar.py` and `spec/check_api.py` check them in CI; once the interpreter of stage 3 runs, their tests run as well.

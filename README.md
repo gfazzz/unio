@@ -47,4 +47,5 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Influences](docs/influences.md): what Unio takes from other languages and what it declines
 - [Accepting contributions](docs/contributing.md): defenses against bad and malicious code; [security policy](SECURITY.md)
 - [UnioS](docs/os.md): the operating system in Unio and the self-hosted site proof of concept
+- [Reference customer](docs/customers.md): tanstaafl, a product written with AI, as scenarios and the gaps they find
 - [Русская версия документации](docs/ru/README.md)

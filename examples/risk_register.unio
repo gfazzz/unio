@@ -1,0 +1,223 @@
+## Ranks the findings of a security systems audit by the money they put at risk.
+##
+## Usage:
+##     risk-register FILE
+##
+## FILE is a JSON audit: {"site": text, "findings": [finding...]}. A finding names the norm and
+## the clause it rests on, the expected number of incidents per hundred years without the fix and
+## with it, the loss of one incident, and the cost of the fix, both in whole rubles. Risk is
+## money: the annual loss expectancy is ALE = loss × incidents per year, and the return on the
+## fix is ROSI = (ALE without the fix − ALE with it − cost) / cost. A finding without a norm
+## reference is rejected: every finding points to the clause it rests on. A finding that no
+## person has approved is printed as a draft and left out of the totals: the program prepares,
+## a person decides.
+## Exit code: 0 on success, 1 if the file cannot be read or has an error, 2 on wrong usage.
+##
+## A program of the reference customer tanstaafl (docs/customers.md, scenario A).
+
+import std.args
+import std.files
+import std.json as json
+from std.text import join
+
+struct Finding:
+    id as Text
+    system as Text
+    norm as Text
+    clause as Text
+    summary as Text
+    per_century as Int
+    per_century_after as Int
+    loss as Int
+    fix_cost as Int
+    approved_by as Option[Text] = none
+
+struct Audit:
+    site as Text
+    findings as List[Finding]
+
+## A finding with its money: ale and ale_after are rubles per year; rosi is in percent and is
+## none when the fix costs nothing.
+struct Risk:
+    finding as Finding
+    ale as Int
+    ale_after as Int
+    rosi as Option[Int]
+
+error AuditError:
+    finding as Text
+    message as Text
+
+## Expected annual loss in whole rubles, rounded down; none if it does not fit in Int.
+function annual_loss(loss as Int, per_century as Int) returns Option[Int]:
+    match loss.checked_multiply(per_century):
+        case some(product):
+            return some(product / 100)
+        case none:
+            return none
+
+function validate(finding as Finding) fails with AuditError:
+    if finding.norm.trim().is_empty() or finding.clause.trim().is_empty():
+        fail AuditError(finding = finding.id, message = "no norm reference: a finding rests on a clause of a norm")
+    if finding.per_century < 0 or finding.per_century_after < 0:
+        fail AuditError(finding = finding.id, message = "the number of incidents is negative")
+    if finding.loss < 0 or finding.fix_cost < 0:
+        fail AuditError(finding = finding.id, message = "an amount of money is negative")
+    if finding.per_century_after > finding.per_century:
+        fail AuditError(finding = finding.id, message = "the fix makes incidents more frequent")
+
+function money_of(finding as Finding, per_century as Int) returns Int fails with AuditError:
+    match annual_loss(finding.loss, per_century):
+        case some(value):
+            return value
+        case none:
+            fail AuditError(finding = finding.id, message = "the annual loss does not fit in Int")
+
+function assess(finding as Finding) returns Risk fails with AuditError:
+    try validate(finding)
+    let ale = try money_of(finding, finding.per_century)
+    let ale_after = try money_of(finding, finding.per_century_after)
+    if finding.fix_cost == 0:
+        return Risk(finding = finding, ale = ale, ale_after = ale_after, rosi = none)
+    match (ale - ale_after - finding.fix_cost).checked_multiply(100):
+        case some(benefit):
+            return Risk(finding = finding, ale = ale, ale_after = ale_after, rosi = some(benefit / finding.fix_cost))
+        case none:
+            fail AuditError(finding = finding.id, message = "the return on the fix does not fit in Int")
+
+## The findings with their money, the largest annual loss first.
+function rank(audit as Audit) returns List[Risk] fails with AuditError:
+    var seen = Set[Text]()
+    var risks as List[Risk] = []
+    for finding in audit.findings:
+        if finding.id in seen:
+            fail AuditError(finding = finding.id, message = "the finding is listed twice")
+        seen.insert(finding.id)
+        risks.append(try assess(finding))
+    return risks.sorted_with(function (a as Risk, b as Risk) returns Bool: a.ale > b.ale)
+
+## 1250000 becomes "1 250 000 ₽".
+function rubles(amount as Int) returns Text:
+    let digits = amount.to_text()
+    let negative = digits.starts_with("-")
+    let plain = digits.slice(1, digits.length()) if negative else digits
+    var groups as List[Text] = []
+    var end = plain.length()
+    while end > 3:
+        groups.append(plain.slice(end - 3, end))
+        end = end - 3
+    groups.append(plain.slice(0, end))
+    let sign = "-" if negative else ""
+    return "{sign}{join(groups.reversed(), " ")} ₽"
+
+function describe(risk as Risk) returns Text:
+    let finding = risk.finding
+    var line = "{finding.id} {finding.system}: {rubles(risk.ale)} → {rubles(risk.ale_after)} per year, fix {rubles(finding.fix_cost)}"
+    match risk.rosi:
+        case some(percent):
+            line = line + ", ROSI {percent} %"
+        case none:
+            line = line + ", no cost"
+    line = line + " [{finding.norm}, {finding.clause}]"
+    match finding.approved_by:
+        case some(person):
+            return line + " approved by {person}"
+        case none:
+            return line + " DRAFT, not approved"
+
+function report(audit as Audit, risks as List[Risk]) returns List[Text]:
+    var lines = ["Site: {audit.site}"]
+    var total = 0
+    var total_after = 0
+    var drafts = 0
+    for risk in risks:
+        lines.append(describe(risk))
+        if risk.finding.approved_by.is_some():
+            total = total + risk.ale
+            total_after = total_after + risk.ale_after
+        else:
+            drafts = drafts + 1
+    lines.append("Approved findings: {rubles(total)} → {rubles(total_after)} per year; drafts left out: {drafts}")
+    return lines
+
+public function main() returns Int:
+    let arguments = args.list()
+    if arguments.length() != 1:
+        print_error("Usage: risk-register FILE")
+        return 2
+    let name = arguments[0]
+    let text = try files.read_text(Path(name)) on IoError as e:
+        print_error("risk-register: {name}: {e.reason}")
+        return 1
+    let value = try json.parse(text) on ParseError as e:
+        print_error("risk-register: {name}:{e.line}:{e.column}: {e.message}")
+        return 1
+    let audit = try json.decode[Audit](value) on DecodeError as e:
+        print_error("risk-register: {name}: {e.path}: {e.message}")
+        return 1
+    let risks = try rank(audit) on AuditError as e:
+        print_error("risk-register: {name}: finding {e.finding}: {e.message}")
+        return 1
+    for line in report(audit, risks):
+        print(line)
+    return 0
+
+function sample(id as Text, per_century as Int, loss as Int) returns Finding:
+    return Finding(id = id, system = "fire alarm", norm = "SP 484.1311500.2020", clause = "6.2.1", summary = "sample",
+        per_century = per_century, per_century_after = 0, loss = loss, fix_cost = 100000, approved_by = some("auditor"))
+
+test "the annual loss is the loss times the yearly frequency, rounded down":
+    assert annual_loss(1000000, 5) == some(50000)
+    assert annual_loss(999, 1) == some(9)
+    assert annual_loss(9000000000000000000, 2) == none
+
+test "a finding without a norm reference is rejected":
+    var finding = sample("F-1", 5, 1000000)
+    finding.clause = " "
+    try:
+        assess(finding)
+        assert_fail("expected an audit error")
+    on AuditError as e:
+        assert e.finding == "F-1"
+        assert e.message.contains("no norm reference")
+
+test "a fix that makes incidents more frequent is rejected":
+    var finding = sample("F-2", 1, 1000)
+    finding.per_century_after = 2
+    try:
+        validate(finding)
+        assert_fail("expected an audit error")
+    on AuditError as e:
+        assert e.message.contains("more frequent")
+
+test "ROSI is the saved loss minus the cost, over the cost":
+    let risk = try assess(sample("F-3", 50, 1000000)) on AuditError as e:
+        assert_fail(e.message)
+    assert risk.ale == 500000
+    assert risk.rosi == some(400)
+
+test "findings are ranked by the annual loss and must be unique":
+    let audit = Audit(site = "warehouse", findings = [sample("small", 1, 1000000), sample("large", 10, 1000000)])
+    let risks = try rank(audit) on AuditError as e:
+        assert_fail(e.message)
+    assert risks.map(function (risk as Risk) returns Text: risk.finding.id) == ["large", "small"]
+    try:
+        rank(Audit(site = "warehouse", findings = [sample("same", 1, 1), sample("same", 2, 2)]))
+        assert_fail("expected a duplicate")
+    on AuditError as e:
+        assert e.message.contains("twice")
+
+test "drafts are printed but left out of the totals":
+    var draft = sample("draft", 10, 1000000)
+    draft.approved_by = none
+    let audit = Audit(site = "office", findings = [draft, sample("approved", 1, 1000000)])
+    let risks = try rank(audit) on AuditError as e:
+        assert_fail(e.message)
+    let lines = report(audit, risks)
+    assert lines[1].contains("DRAFT")
+    assert lines[3] == "Approved findings: 10 000 ₽ → 0 ₽ per year; drafts left out: 1"
+
+test "rubles are grouped by thousands":
+    assert rubles(0) == "0 ₽"
+    assert rubles(1250000) == "1 250 000 ₽"
+    assert rubles(-1000) == "-1 000 ₽"

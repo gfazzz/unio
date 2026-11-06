@@ -1,0 +1,192 @@
+## Keeps the event journal of a site agent while the cloud is out of reach.
+##
+## Usage:
+##     event-journal pending JOURNAL
+##     event-journal ack JOURNAL SEQUENCE
+##     event-journal compact JOURNAL NOW
+##
+## JOURNAL holds one JSON event per line: {"sequence", "time", "device", "kind", "sent"}, with
+## time in Unix seconds and sequence numbers growing from line to line. pending prints the events
+## not yet delivered to the cloud. ack marks the events up to SEQUENCE as delivered. compact
+## removes delivered events older than the autonomy window of 72 hours before NOW and keeps every
+## undelivered event however old: the site loses nothing while it lives without the cloud. If an
+## undelivered event is older than the window, compact still writes the journal, names the event,
+## and exits with 3: the site has been on its own longer than the agent promises. The journal is
+## rewritten atomically and durably, so a power cut leaves either the old journal or the new one.
+## Exit code: 0 on success, 1 if the journal cannot be read or written, 2 on wrong usage,
+## 3 if the autonomy window is exceeded.
+##
+## A program of the reference customer tanstaafl (docs/customers.md, scenario B).
+
+import std.args
+import std.files
+import std.json as json
+
+let AUTONOMY_SECONDS as Int = 72 * 60 * 60
+
+struct Event:
+    sequence as Int
+    time as Int
+    device as Text
+    kind as Text
+    var sent as Bool = false
+
+enum Command:
+    Pending(journal as Path)
+    Ack(journal as Path, up_to as Int)
+    Compact(journal as Path, now as Int)
+
+## What compact keeps, how many events it removes, and which undelivered events are too old.
+struct Compaction:
+    kept as List[Event]
+    removed as Int
+    overdue as List[Event]
+
+error JournalError:
+    line as Int
+    message as Text
+
+error UsageError:
+    message as Text
+
+function parse_journal(text as Text) returns List[Event] fails with JournalError:
+    var events as List[Event] = []
+    for number, line in text.lines().enumerate(start = 1):
+        if line.trim().is_empty():
+            continue
+        let value = try json.parse(line) on ParseError as e:
+            fail JournalError(line = number, message = e.message)
+        let event = try json.decode[Event](value) on DecodeError as e:
+            fail JournalError(line = number, message = "{e.path}: {e.message}")
+        match events.last():
+            case some(previous) if event.sequence <= previous.sequence:
+                fail JournalError(line = number, message = "sequence {event.sequence} does not follow {previous.sequence}")
+            case _:
+                pass
+        events.append(event)
+    return events
+
+function read_journal(path as Path) returns List[Event] fails with IoError, JournalError:
+    if not files.exists(path):
+        return []
+    let text = try files.read_text(path)
+    return try parse_journal(text)
+
+## Permission: files.write for the journal and its directory.
+function write_journal(path as Path, events as List[Event]) fails with IoError:
+    using file = try files.open_atomic(path, durable = true):
+        for event in events:
+            try file.write_line(json.encode(event))
+        try file.commit()
+
+function acknowledge(events as List[Event], up_to as Int) returns List[Event]:
+    var result = events
+    for index, event in events.enumerate():
+        if event.sequence <= up_to:
+            result[index].sent = true
+    return result
+
+function compact(events as List[Event], now as Int) returns Compaction:
+    let old = function (event as Event) returns Bool: now - event.time > AUTONOMY_SECONDS
+    let kept = events.filter(function (event as Event) returns Bool: not (event.sent and old(event)))
+    let overdue = events.filter(function (event as Event) returns Bool: not event.sent and old(event))
+    return Compaction(kept = kept, removed = events.length() - kept.length(), overdue = overdue)
+
+function number_argument(text as Text, name as Text) returns Int fails with UsageError:
+    match text.to_int():
+        case some(value):
+            return value
+        case none:
+            fail UsageError(message = "{name} must be an integer: {text}")
+
+function parse_command(arguments as List[Text]) returns Command fails with UsageError:
+    match arguments:
+        case ["pending", journal]:
+            return Pending(journal = Path(journal))
+        case ["ack", journal, sequence]:
+            return Ack(journal = Path(journal), up_to = try number_argument(sequence, "SEQUENCE"))
+        case ["compact", journal, now]:
+            return Compact(journal = Path(journal), now = try number_argument(now, "NOW"))
+        case _:
+            fail UsageError(message = "usage: event-journal pending JOURNAL | ack JOURNAL SEQUENCE | compact JOURNAL NOW")
+
+function describe(event as Event) returns Text:
+    return "{event.sequence} {event.time} {event.device} {event.kind}"
+
+function run(command as Command) returns Int fails with IoError, JournalError:
+    match command:
+        case Pending(journal):
+            for event in try read_journal(journal):
+                if not event.sent:
+                    print(describe(event))
+            return 0
+        case Ack(journal, up_to):
+            let events = try read_journal(journal)
+            try write_journal(journal, acknowledge(events, up_to))
+            return 0
+        case Compact(journal, now):
+            let result = compact(try read_journal(journal), now)
+            try write_journal(journal, result.kept)
+            print("removed {result.removed}, kept {result.kept.length()}")
+            for event in result.overdue:
+                print_error("undelivered for more than 72 hours: {describe(event)}")
+            return 0 if result.overdue.is_empty() else 3
+
+public function main() returns Int:
+    try:
+        return run(parse_command(args.list()))
+    on UsageError as e:
+        print_error(e.message)
+        return 2
+    on IoError as e:
+        print_error("event-journal: {e.path}: {e.reason}")
+        return 1
+    on JournalError as e:
+        print_error("event-journal: line {e.line}: {e.message}")
+        return 1
+
+function event(sequence as Int, time as Int, sent as Bool) returns Event:
+    return Event(sequence = sequence, time = time, device = "detector 2.14", kind = "fire", sent = sent)
+
+test "a journal is read line by line and empty lines are skipped":
+    let text = "\{\"sequence\": 1, \"time\": 100, \"device\": \"d\", \"kind\": \"fault\"\}\n\n\{\"sequence\": 2, \"time\": 200, \"device\": \"d\", \"kind\": \"fire\", \"sent\": true\}\n"
+    let events = try parse_journal(text) on JournalError as e:
+        assert_fail(e.message)
+    assert events.length() == 2
+    assert not events[0].sent
+    assert events[1].sent
+
+test "a sequence number that does not grow is an error on its line":
+    let text = "\{\"sequence\": 5, \"time\": 1, \"device\": \"d\", \"kind\": \"k\"\}\n\{\"sequence\": 5, \"time\": 2, \"device\": \"d\", \"kind\": \"k\"\}\n"
+    try:
+        parse_journal(text)
+        assert_fail("expected a journal error")
+    on JournalError as e:
+        assert e.line == 2
+
+test "ack marks the events up to the sequence as delivered":
+    let events = acknowledge([event(1, 0, false), event(2, 0, false), event(3, 0, false)], 2)
+    assert events.map(function (item as Event) returns Bool: item.sent) == [true, true, false]
+
+test "compact removes old delivered events and keeps every undelivered one":
+    let now = 1000000
+    let old = now - AUTONOMY_SECONDS - 1
+    let result = compact([event(1, old, true), event(2, old, false), event(3, now, true)], now)
+    assert result.removed == 1
+    assert result.kept.map(function (item as Event) returns Int: item.sequence) == [2, 3]
+    assert result.overdue.map(function (item as Event) returns Int: item.sequence) == [2]
+
+test "an event exactly at the window edge is not overdue":
+    let now = 1000000
+    let result = compact([event(1, now - AUTONOMY_SECONDS, false)], now)
+    assert result.overdue.is_empty()
+
+test "parse_command reads the numbers of ack and compact":
+    let command = try parse_command(["ack", "journal.jsonl", "42"]) on UsageError as e:
+        assert_fail(e.message)
+    assert command == Ack(journal = Path("journal.jsonl"), up_to = 42)
+    try:
+        parse_command(["compact", "journal.jsonl", "soon"])
+        assert_fail("expected a usage error")
+    on UsageError as e:
+        assert e.message.contains("NOW")
