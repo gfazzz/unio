@@ -62,6 +62,12 @@ A program that reaches the runtime has passed `unio check`: names resolve, types
 | Processes | `std.process.run` | std |
 
 4. Until the sandbox of sprint S6 exists, `unio run` and `unio test` run programs without the restrictions of SB-1 and say so in a warning on standard error. This is the only stage in which a Unio program runs unsandboxed, and it is used for the project's own tests in CI.
+5. Behavior fixed while implementing the externals, where the declarations were silent:
+   - `Float.to_text` writes decimal notation for exponents from −6 to 20 and scientific notation otherwise (`1e+300`), always with a fraction for whole numbers (`2.0`), and `nan`, `inf`, `-inf` for non-finite values; `Text.to_float` does not read the last three back.
+   - `Text.index_of` with a `start` outside `0..length()` is a fault, like `slice`. `Int ** n` with a negative `n` is a fault.
+   - `std.files.rename` never replaces a target: for files it links and then unlinks, which is atomic; for directories it checks and then renames, which leaves a short race window that the documentation of the function states.
+   - `std.env.home_dir` asks the operating system for the profile directory of the user; on Windows that directory is what the system reports through the user profile, not a variable the program set.
+   - `std.process.run` gives a child an empty standard input; a child ended by a signal has status 128 plus the signal number; a timeout of zero or less is a `ProcessError` of kind `Other`.
 
 ## 8. The interpreter of sprint S5
 
