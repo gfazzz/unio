@@ -276,3 +276,20 @@ Changes from the initial 0.1 draft: [RFC 0001](rfcs/0001-language-contracts.md) 
 | 0.3 / 0.5 | Typed compute kernels and buffers; ABI/layout/operation costs and cross-target tests |
 
 Accepting the document and passing static scripts does not complete stage 2 or 3. The delivery table in the contracts identifies mechanisms that are still design-only. Multi-statement lambdas, general yield, dimensional algebra and dynamic downcasts are outside this change.
+
+## 12. Sprint to release 0.1
+
+The stages of section 3 stay the acceptance criteria; this section orders the work into sprints so that release 0.1 is reached as early as possible. A sprint is a vertical slice that ends with green CI, updated documentation in both languages, and its exit criterion met, not a fixed number of weeks. Sprints follow the critical path; work that does not block the next sprint runs in parallel streams. Every task starts with a failing check (section 1). Scope is cut only through an RFC, never silently.
+
+| Sprint | Contents | Exit criterion | Stage |
+|---|---|---|---|
+| S1 Front end | Rust lexer and parser with spans and error recovery, diagnostics in text and JSON in English and Russian, `unio check` for syntax, `unio parse --ast` | Every corpus file and every `.unio` source of the repository gives the same result as `spec/check_grammar.py`; the parser survives randomized mutation | 1 |
+| S2 Formatter and context | `unio fmt` (comments kept, AST before equals AST after, idempotent), `unio outline`, `unio explain`, the catalog of syntax codes; CI runs the Rust parser next to the Python checker | Stage 1 exit criterion; all sources are formatted | 1 |
+| S3 Names and types | Modules and packages, visibility (L-23 to L-23d), types and local inference, generics, interface values and defaults (L-6b, L-6c), named parameters (RFC 0001) | The standard library, the reference utilities, and the tools pass name and type checks | 2 |
+| S4 Errors, resources, effects | `fails with` and `try` analysis, `match` exhaustiveness, `using` and resource escape, mutability and values, layers and `--profile=core`, derived effects with `allocates`, `unio symbol`; the R-10 control set grows from here | Stage 2 exit criterion | 2 |
+| S5 Interpreter and runtime | IR, interpreter, GC, `Resource` and `using`, the termination model, `unio test` with T-5a, the external primitives of `core`, `alloc`, and `std` | Every `test` block of `stdlib/`, `examples/`, `docs/examples/`, and `tools/` runs and passes; CI switches to the Unio tools and the Python checkers are deleted | 3 |
+| S6 Native build and sandbox | Cranelift code generation, one executable, deterministic builds, Linux x86-64 first and then the other three targets, the sandbox with the SB-8 and SB-15 suites, power-loss tests of atomic writes, benchmarks of 7.1 | Stage 4 exit criterion | 4 |
+| S7 Packages and library | `unio.toml`, `unio.lock`, the registry with post-quantum signatures, `add`, `remove`, `update`, `unio doc`, the remaining modules of S-1 | Stage 5 exit criterion | 5 |
+| S8 Editor, trials, release | Language server and the VS Code extension on top of the existing highlighting, the R-10 and readability trials, 24 hours of fuzzing, the guide with the chapter on classes, reproducible signed release | Acceptance of requirements section 9.2 | 6, 7 |
+
+Streams that run beside the critical path: the standard library and the reference programs grow with each sprint; documentation and its Russian localization follow every change; editor support started early, the syntax highlighting of `editors/` exists already and is tested against `spec/grammar.ebnf`.
