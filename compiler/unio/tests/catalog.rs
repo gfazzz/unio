@@ -26,11 +26,30 @@ fn every_code_has_an_explanation_with_an_example_and_its_fix() {
     }
 }
 
+/// Checks an example as a whole file: syntax only for syntax codes, names and types too for
+/// the codes of docs/semantics.md. Each semantic example gets its own directory, so that the
+/// example of E0058 can import itself.
+fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
+    if !catalog::SEMANTIC_CODES.contains(&code) {
+        return unio::check_source("example.unio", source);
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "unio-catalog-{}-{code}-{which}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("example.unio");
+    std::fs::write(&file, source).unwrap();
+    let mut results = unio::check_files(std::slice::from_ref(&file));
+    let _ = std::fs::remove_dir_all(&dir);
+    results.remove(0)
+}
+
 #[test]
 fn every_example_shows_its_error_and_every_fix_is_clean() {
     for code in catalog::CODES {
         let entry = catalog::entry(code).unwrap();
-        let analysis = unio::check_source("example.unio", entry.example);
+        let analysis = check_example(code, entry.example, "error");
         assert!(
             analysis.diagnostics.iter().any(|d| d.code == *code),
             "{code}: the example does not produce it: {:?}",
@@ -40,7 +59,7 @@ fn every_example_shows_its_error_and_every_fix_is_clean() {
                 .map(|d| d.code)
                 .collect::<Vec<_>>()
         );
-        let fixed = unio::check_source("fixed.unio", entry.fixed);
+        let fixed = check_example(code, entry.fixed, "fixed");
         assert!(
             fixed.diagnostics.is_empty(),
             "{code}: the fixed example has errors: {}",

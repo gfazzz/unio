@@ -1,0 +1,40 @@
+## Names, imports, local inference, struct construction, generics, and calls.
+
+import std.files
+from std.text import join, split
+
+struct Point:
+    public x as Int
+    public y as Int = 0
+
+let ORIGIN as Point = Point(x = 0)
+
+function distance(a as Point, b as Point) returns Int:
+    let dx = a.x - b.x
+    let dy = a.y - b.y
+    return dx * dx + dy * dy
+
+function largest[T with Order](items as List[T]) returns Option[T]:
+    if items.is_empty(): return none
+    var best = items[0]
+    for item in items:
+        if item > best: best = item
+    return some(best)
+
+function connect(host as Text, named port as Int = 8080) returns Text:
+    return "{host}:{port}"
+
+function words(text as Text) returns Text:
+    let parts = split(text, " ")
+    return join(parts.map(function (part): part.to_upper()), "-")
+
+function exists(name as Text) returns Bool:
+    return files.exists(Path(name))
+
+test "everything fits together":
+    assert distance(ORIGIN, Point(x = 3, y = 4)) == 25
+    assert largest([3, 1, 2]) == some(3)
+    assert connect("localhost", port = 9000) == "localhost:9000"
+    assert words("a b") == "A-B"
+    let empty as List[Int] = []
+    assert largest(empty) == none

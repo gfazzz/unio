@@ -1,0 +1,4 @@
+# expect-error: 3 E0060
+function empty() returns Int:
+    let items = []
+    return 0

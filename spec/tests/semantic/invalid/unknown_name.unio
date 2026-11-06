@@ -1,0 +1,3 @@
+# expect-error: 3 E0056
+function greet(name as Text) returns Text:
+    return "Hello, {nme}"

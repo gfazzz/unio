@@ -1,0 +1,5 @@
+# expect-error: 5 E0057
+import std.files
+
+function committed(file as files.AtomicFile) returns Bool:
+    return file.durable

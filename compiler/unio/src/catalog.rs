@@ -56,7 +56,17 @@ pub const INTERNAL_NAMES: &[&str] = &[
 /// Every code the front end reports.
 pub const CODES: &[&str] = &[
     "E0001", "E0002", "E0003", "E0005", "E0006", "E0007", "E0008", "E0009", "E0010", "E0011",
-    "E0012", "E0013", "E0020", "E0023", "E0024", "E0030", "E0032", "E0034",
+    "E0012", "E0013", "E0020", "E0023", "E0024", "E0030", "E0032", "E0034", "E0040", "E0041",
+    "E0044", "E0049", "E0050", "E0051", "E0052", "E0053", "E0054", "E0055", "E0056", "E0057",
+    "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
+    "E0069", "E0071", "E0072",
+];
+
+/// Codes of the name and type checks (sprint S3); their examples need the whole check.
+pub const SEMANTIC_CODES: &[&str] = &[
+    "E0040", "E0041", "E0044", "E0049", "E0050", "E0051", "E0052", "E0053", "E0054", "E0055",
+    "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
+    "E0066", "E0067", "E0069", "E0071", "E0072",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -179,7 +189,7 @@ pub fn entry(code: &str) -> Option<Entry> {
             "function f(x as List[Int]) returns Int:\n    match x:\n        case [rest..., last]: return last\n        case _: return 0\n",
             "function f(x as List[Int]) returns Int:\n    match x:\n        case [first, rest...]: return first\n        case _: return 0\n",
         ),
-        _ => return None,
+        _ => semantic_entry(code)?,
     };
     let example = if example == "DEEP" { DEEP } else { example };
     Some(Entry {
@@ -461,6 +471,57 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0023", positional_after_named()),
         ("E0024", handler_in_interpolation()),
         ("E0034", rest_not_last()),
+        ("E0051", duplicate("x")),
+        ("E0052", import_collision("x")),
+        ("E0053", module_not_found("std.x")),
+        ("E0054", name_not_in_module("x", "std.text")),
+        ("E0058", import_cycle("a -> b -> a")),
+        ("E0059", type_arity("Map", 2, 1)),
+        ("E0057", private_used("x")),
+        ("E0057", private_fields("AtomicFile")),
+        ("E0056", did_you_mean("count")),
+        ("E0056", unknown_type("Itme")),
+        ("E0056", unknown_name("x")),
+        ("E0056", no_field("x", "Point")),
+        ("E0056", not_in_module("x", "std.files")),
+        ("E0056", no_member("x", "Value")),
+        ("E0056", no_method("x", "Text")),
+        ("E0071", not_object_safe("Equal", "equals")),
+        ("E0041", parameter_grouping()),
+        ("E0055", local_repeats("x")),
+        ("E0044", second_implementation("Display", "Point")),
+        ("E0044", foreign_implementation("Display", "Int")),
+        ("E0069", missing_method("Display", "to_text")),
+        ("E0069", signature_differs("to_text")),
+        ("E0060", cannot_infer()),
+        ("E0061", returns_nothing()),
+        ("E0061", missing_return_value("Int")),
+        ("E0061", cannot_destructure("Int", 2)),
+        ("E0061", not_iterable("Int")),
+        ("E0061", type_mismatch("Int", "Text")),
+        ("E0061", type_is_not_a_value("Point")),
+        ("E0061", module_is_not_a_value("files")),
+        ("E0061", no_membership("Int")),
+        ("E0061", not_callable("Int")),
+        ("E0040", missing_label("port")),
+        ("E0064", too_many_arguments(1)),
+        ("E0064", argument_twice("x")),
+        ("E0064", unknown_argument("x")),
+        ("E0064", missing_argument("x")),
+        ("E0062", constraint_not_met("Point", "Order")),
+        ("E0063", fields_are_named("Point")),
+        ("E0063", unknown_field("z", "Point")),
+        ("E0063", missing_field("y", "Point")),
+        ("E0063", variant_fields("Add", 1)),
+        ("E0072", variant_collision("List", "Command")),
+        ("E0050", is_name_not_bound("x")),
+        ("E0065", operator_not_defined("+", "Point")),
+        ("E0065", operands_differ("==", "Int", "Text")),
+        ("E0065", text_plus("Int")),
+        ("E0065", not_indexable("Int")),
+        ("E0066", resource_equality()),
+        ("E0067", not_display("Point")),
+        ("E0049", lambda_needs_types("x")),
     ]
 }
 
@@ -553,4 +614,501 @@ pub fn token_block_end() -> Msg {
 
 pub fn token_file_end() -> Msg {
     Msg::new("the end of the file", "конец файла")
+}
+
+// ---------------------------------------------------------------- names and types (sprint S3)
+
+type EntryText = (&'static str, &'static str, &'static str, &'static str);
+
+/// Entries of the codes of docs/semantics.md, sections 1–4, and of RFC 0001 and RFC 0002.
+/// Examples are whole files; the example of E0058 is named example.unio and imports itself.
+fn semantic_entry(code: &str) -> Option<EntryText> {
+    Some(match code {
+        "E0040" => (
+            "A parameter declared `named` must be given with its name at every call (RFC 0001). Write the name before the value.",
+            "Параметр, объявленный `named`, передаётся с именем при каждом вызове (RFC 0001). Напишите имя перед значением.",
+            "function connect(host as Text, named port as Int) returns Text:\n    return host\n\nlet A as Text = connect(\"h\", 80)\n",
+            "function connect(host as Text, named port as Int) returns Text:\n    return host\n\nlet A as Text = connect(\"h\", port = 80)\n",
+        ),
+        "E0041" => (
+            "Parameters given only by name follow the ordinary ones, and parameters with defaults come last within each group (RFC 0001). Reorder the parameters.",
+            "Параметры только по имени идут после обычных, а параметры со значениями по умолчанию — последними в каждой группе (RFC 0001). Переставьте параметры.",
+            "function connect(named port as Int, host as Text) returns Text:\n    return host\n",
+            "function connect(host as Text, named port as Int) returns Text:\n    return host\n",
+        ),
+        "E0044" => (
+            "A type implements an interface once, in the module that declares the type or the interface. Remove the second implementation or move it there.",
+            "Тип реализует интерфейс один раз, в модуле, где объявлен тип или интерфейс. Удалите вторую реализацию или перенесите её туда.",
+            "struct P:\n    x as Int\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"p\"\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"q\"\n",
+            "struct P:\n    x as Int\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"p\"\n",
+        ),
+        "E0049" => (
+            "A lambda may leave out its types only where a function type is expected, as in an argument (L-8a). Write the types of its parameters.",
+            "Анонимная функция может опустить типы только там, где ожидается тип функции, например в аргументе (Я-8a). Запишите типы её параметров.",
+            "let DOUBLE = function (x): x * 2\n",
+            "let DOUBLE = function (x as Int) returns Int: x * 2\n",
+        ),
+        "E0050" => (
+            "A name bound by `is` exists only in the branch the test guards (L-33). Use it inside that branch, or use `match`.",
+            "Имя, связанное `is`, существует только в ветке, которую охраняет проверка (Я-33). Используйте его внутри ветки или примените `match`.",
+            "function f(x as Option[Int]) returns Int:\n    if x is some(v):\n        return v\n    return v\n",
+            "function f(x as Option[Int]) returns Int:\n    if x is some(v):\n        return v\n    return 0\n",
+        ),
+        "E0051" => (
+            "A module declares each name once, and a type has one method of each name. Rename or remove one of the declarations.",
+            "Модуль объявляет каждое имя один раз, а у типа один метод с каждым именем. Переименуйте или удалите одно из объявлений.",
+            "function f() returns Int:\n    return 1\n\nfunction f() returns Int:\n    return 2\n",
+            "function f() returns Int:\n    return 1\n\nfunction g() returns Int:\n    return 2\n",
+        ),
+        "E0052" => (
+            "An imported name may not repeat a declaration of the module or another import. Import the module under another name with `as`.",
+            "Импортированное имя не может повторять объявление модуля или другой импорт. Импортируйте модуль под другим именем через `as`.",
+            "import std.files\n\nfunction files() returns Int:\n    return 1\n",
+            "import std.files as file_system\n\nfunction files() returns Int:\n    return 1\n",
+        ),
+        "E0053" => (
+            "The module is not in the standard library or in the package. Check the spelling of the module path.",
+            "Модуля нет ни в стандартной библиотеке, ни в пакете. Проверьте написание пути модуля.",
+            "import std.filez\n",
+            "import std.files\n",
+        ),
+        "E0054" => (
+            "The module does not declare the imported name, or does not make it public. Check the name in the module.",
+            "Модуль не объявляет импортируемое имя или не делает его публичным. Проверьте имя в модуле.",
+            "from std.text import joined\n",
+            "from std.text import join\n",
+        ),
+        "E0055" => (
+            "A local name may not repeat a local name that is visible at that place, so that a reader always knows which one is meant. Choose another name.",
+            "Локальное имя не может повторять видимое в этом месте локальное имя, чтобы читатель всегда знал, какое имеется в виду. Выберите другое имя.",
+            "function f(items as List[Int]) returns Int:\n    let total = 0\n    for total in items:\n        pass\n    return total\n",
+            "function f(items as List[Int]) returns Int:\n    let total = 0\n    for item in items:\n        pass\n    return total\n",
+        ),
+        "E0056" => (
+            "The name is not declared where it is used. Check the spelling; the fix suggests the closest visible name.",
+            "Имя не объявлено там, где используется. Проверьте написание; исправление предлагает ближайшее видимое имя.",
+            "function f(count as Int) returns Int:\n    return cuont\n",
+            "function f(count as Int) returns Int:\n    return count\n",
+        ),
+        "E0057" => (
+            "The declaration, field, or method is private to its module (L-23). Use a public function of that module, or make the member public there.",
+            "Объявление, поле или метод приватны для своего модуля (Я-23). Используйте публичную функцию этого модуля или сделайте член публичным там.",
+            "import std.files\n\nfunction f(file as files.AtomicFile) returns Bool:\n    return file.durable\n",
+            "import std.files\n\nfunction f(file as files.AtomicFile) returns Bool:\n    return file.is_replaced()\n",
+        ),
+        "E0058" => (
+            "Modules may not import each other in a cycle (L-24). Move what both need into a third module.",
+            "Модули не могут импортировать друг друга по кругу (Я-24). Вынесите общее в третий модуль.",
+            "import example\n\nlet A as Int = 1\n",
+            "let A as Int = 1\n",
+        ),
+        "E0059" => (
+            "A generic type takes a fixed number of type arguments: List one, Map two. Give the right number.",
+            "Обобщённый тип принимает фиксированное число аргументов типа: List — один, Map — два. Укажите нужное число.",
+            "let A as Map[Text] = {}\n",
+            "let A as Map[Text, Int] = {}\n",
+        ),
+        "E0060" => (
+            "The value does not tell its type, as with `[]`, `{}` or `none` alone. Write the type: `let items as List[Int] = []`.",
+            "Значение не сообщает свой тип, как `[]`, `{}` или одно `none`. Запишите тип: `let items as List[Int] = []`.",
+            "let A = []\n",
+            "let A as List[Int] = []\n",
+        ),
+        "E0061" => (
+            "The value has another type than the place expects, and there are no implicit conversions (L-5). Convert explicitly, or change the type of the place.",
+            "Значение имеет не тот тип, который ожидает место, а неявных преобразований нет (Я-5). Преобразуйте явно или измените тип места.",
+            "let A as Int = \"3\"\n",
+            "let A as Int = 3\n",
+        ),
+        "E0062" => (
+            "The type argument does not implement the interface the generic parameter requires. Implement it with `extend`, or use another type.",
+            "Аргумент типа не реализует интерфейс, которого требует обобщённый параметр. Реализуйте его через `extend` или используйте другой тип.",
+            "struct P:\n    x as Int\n\nfunction f(a as P, b as P) returns P:\n    return max(a, b)\n",
+            "function f(a as Int, b as Int) returns Int:\n    return max(a, b)\n",
+        ),
+        "E0063" => (
+            "A struct value names every field that has no default, and only declared fields. Add the missing field or remove the unknown one.",
+            "Значение структуры называет каждое поле без значения по умолчанию и только объявленные поля. Добавьте недостающее поле или уберите лишнее.",
+            "struct P:\n    x as Int\n    y as Int\n\nlet A as P = P(x = 1)\n",
+            "struct P:\n    x as Int\n    y as Int\n\nlet A as P = P(x = 1, y = 2)\n",
+        ),
+        "E0064" => (
+            "The arguments do not match the parameters: their number, a name that does not exist, or a name given twice. Compare the call with the signature.",
+            "Аргументы не соответствуют параметрам: их число, несуществующее имя или имя, указанное дважды. Сверьте вызов с сигнатурой.",
+            "function f(n as Int) returns Int:\n    return n\n\nlet A as Int = f(1, 2)\n",
+            "function f(n as Int) returns Int:\n    return n\n\nlet A as Int = f(1)\n",
+        ),
+        "E0065" => (
+            "The operator is not defined for these types; both operands have one type, and `+` on Text joins two texts. Use interpolation to put a number into text: \"count: {n}\".",
+            "Оператор не определён для этих типов; оба операнда одного типа, а `+` для Text соединяет два текста. Чтобы вставить число в текст, используйте интерполяцию: \"count: {n}\".",
+            "function f(n as Int) returns Text:\n    return \"count: \" + n\n",
+            "function f(n as Int) returns Text:\n    return \"count: {n}\"\n",
+        ),
+        "E0066" => (
+            "Resources have identity, not content, so `==` is not defined for them. Use `is_same(a, b)` to ask whether two names hold the same resource.",
+            "У ресурсов есть тождественность, а не содержимое, поэтому `==` для них не определено. Чтобы узнать, один ли это ресурс, используйте `is_same(a, b)`.",
+            "import std.files\n\nfunction f(a as files.AtomicFile, b as files.AtomicFile) returns Bool:\n    return a == b\n",
+            "import std.files\n\nfunction f(a as files.AtomicFile, b as files.AtomicFile) returns Bool:\n    return is_same(a, b)\n",
+        ),
+        "E0067" => (
+            "Only values of types that implement Display can be put into text. Implement Display for the type, or interpolate one of its fields.",
+            "В текст можно подставить только значение типа, реализующего Display. Реализуйте Display для типа или подставьте одно из его полей.",
+            "struct P:\n    x as Int\n\nfunction f(p as P) returns Text:\n    return \"{p}\"\n",
+            "struct P:\n    x as Int\n\nfunction f(p as P) returns Text:\n    return \"{p.x}\"\n",
+        ),
+        "E0069" => (
+            "An implementation defines every method of the interface that has no default, with the signature of the interface. Add the method or correct its signature.",
+            "Реализация определяет каждый метод интерфейса без реализации по умолчанию, с сигнатурой из интерфейса. Добавьте метод или исправьте его сигнатуру.",
+            "struct P:\n    x as Int\n\nextend P with Display:\n    function show(self) returns Text:\n        return \"p\"\n",
+            "struct P:\n    x as Int\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"p\"\n",
+        ),
+        "E0071" => (
+            "An interface whose method uses Self outside the receiver, or has type parameters, cannot hold values of different types (L-6b). Use a generic parameter `[T with I]` instead.",
+            "Интерфейс, метод которого использует Self вне получателя или имеет параметры типа, не может хранить значения разных типов (Я-6b). Используйте обобщённый параметр `[T with I]`.",
+            "function f(items as List[Equal]) returns Int:\n    return items.length()\n",
+            "function f[T with Equal](items as List[T]) returns Int:\n    return items.length()\n",
+        ),
+        "E0072" => (
+            "A variant whose name is also a visible type, function, or another variant must be written with its enum name (L-6a). Write `Enum.Variant`.",
+            "Вариант, имя которого совпадает с видимым типом, функцией или другим вариантом, пишется с именем перечисления (Я-6a). Пишите `Enum.Variant`.",
+            "enum C:\n    List\n    Show\n\nlet A as C = List\n",
+            "enum C:\n    List\n    Show\n\nlet A as C = C.List\n",
+        ),
+        _ => return None,
+    })
+}
+
+pub fn duplicate(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is declared twice; rename one of them"),
+        format!("'{name}' объявлено дважды; переименуйте одно из объявлений"),
+    )
+}
+
+pub fn import_collision(name: &str) -> Msg {
+    Msg::new(format!("the import '{name}' repeats another name of the module; import it with 'as' under another name"), format!("импорт '{name}' повторяет другое имя модуля; импортируйте его через 'as' под другим именем"))
+}
+
+pub fn module_not_found(name: &str) -> Msg {
+    Msg::new(
+        format!("module '{name}' not found in the standard library or the package"),
+        format!("модуль '{name}' не найден ни в стандартной библиотеке, ни в пакете"),
+    )
+}
+
+pub fn name_not_in_module(name: &str, module: &str) -> Msg {
+    Msg::new(
+        format!("module '{module}' has no public '{name}'"),
+        format!("в модуле '{module}' нет публичного '{name}'"),
+    )
+}
+
+pub fn import_cycle(chain: &str) -> Msg {
+    Msg::new(format!("modules import each other in a cycle: {chain}; move what they share into another module"), format!("модули импортируют друг друга по кругу: {chain}; вынесите общее в другой модуль"))
+}
+
+pub fn type_arity(name: &str, expected: usize, found: usize) -> Msg {
+    Msg::new(
+        format!("'{name}' takes {expected} type argument(s), not {found}"),
+        format!("'{name}' принимает аргументов типа: {expected}, а не {found}"),
+    )
+}
+
+pub fn private_used(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is private to its module; use a public function of that module"),
+        format!("'{name}' приватно для своего модуля; используйте публичную функцию этого модуля"),
+    )
+}
+
+pub fn private_fields(name: &str) -> Msg {
+    Msg::new(format!("'{name}' has private fields and is built only in its module; use one of its public functions"), format!("у '{name}' есть приватные поля, и строится оно только в своём модуле; используйте одну из его публичных функций"))
+}
+
+pub fn did_you_mean(name: &str) -> Msg {
+    Msg::new(
+        format!("replace with '{name}'"),
+        format!("заменить на '{name}'"),
+    )
+}
+
+pub fn unknown_type(name: &str) -> Msg {
+    Msg::new(
+        format!("unknown type '{name}'"),
+        format!("неизвестный тип '{name}'"),
+    )
+}
+
+pub fn unknown_name(name: &str) -> Msg {
+    Msg::new(
+        format!("unknown name '{name}'"),
+        format!("неизвестное имя '{name}'"),
+    )
+}
+
+pub fn not_object_safe(interface: &str, method: &str) -> Msg {
+    Msg::new(format!("interface '{interface}' cannot be a type because of its method '{method}'; use a generic parameter [T with {interface}]"), format!("интерфейс '{interface}' не может быть типом из-за метода '{method}'; используйте обобщённый параметр [T with {interface}]"))
+}
+
+pub fn parameter_grouping() -> Msg {
+    Msg::new("parameters given by name follow the others, and parameters with defaults come last in each group", "параметры по имени идут после остальных, а параметры со значениями по умолчанию — последними в каждой группе")
+}
+
+pub fn local_repeats(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is already a visible local name; choose another name"),
+        format!("'{name}' уже видимое локальное имя; выберите другое имя"),
+    )
+}
+
+pub fn second_implementation(interface: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{ty}' already implements '{interface}'; remove this implementation"),
+        format!("'{ty}' уже реализует '{interface}'; удалите эту реализацию"),
+    )
+}
+
+pub fn foreign_implementation(interface: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!(
+            "'{ty}' can implement '{interface}' only in the module of the type or of the interface"
+        ),
+        format!("'{ty}' может реализовать '{interface}' только в модуле типа или интерфейса"),
+    )
+}
+
+pub fn missing_method(interface: &str, method: &str) -> Msg {
+    Msg::new(
+        format!("the implementation of '{interface}' lacks the method '{method}'"),
+        format!("в реализации '{interface}' нет метода '{method}'"),
+    )
+}
+
+pub fn signature_differs(method: &str) -> Msg {
+    Msg::new(format!("'{method}' has another signature than in the interface; write it as the interface declares it"), format!("у '{method}' другая сигнатура, чем в интерфейсе; запишите её так, как объявляет интерфейс"))
+}
+
+pub fn cannot_infer() -> Msg {
+    Msg::new("the type cannot be inferred from this value; write it, as in 'let items as List[Int] = []'", "тип нельзя вывести из этого значения; запишите его, как в 'let items as List[Int] = []'")
+}
+
+pub fn returns_nothing() -> Msg {
+    Msg::new(
+        "this function returns nothing; remove the value or declare 'returns'",
+        "эта функция ничего не возвращает; уберите значение или объявите 'returns'",
+    )
+}
+
+pub fn missing_return_value(ty: &str) -> Msg {
+    Msg::new(
+        format!("'return' needs a value of type {ty}"),
+        format!("'return' нужно значение типа {ty}"),
+    )
+}
+
+pub fn cannot_destructure(ty: &str, count: usize) -> Msg {
+    Msg::new(
+        format!("a value of type {ty} cannot be split into {count} names"),
+        format!("значение типа {ty} нельзя разложить на имена: {count}"),
+    )
+}
+
+pub fn not_iterable(ty: &str) -> Msg {
+    Msg::new(
+        format!("'for' cannot go through a value of type {ty}"),
+        format!("'for' не может пройти по значению типа {ty}"),
+    )
+}
+
+pub fn type_mismatch(expected: &str, found: &str) -> Msg {
+    Msg::new(
+        format!("expected {expected}, found {found}"),
+        format!("ожидался {expected}, найден {found}"),
+    )
+}
+
+pub fn missing_label(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is given only by name: write '{name} = ...'"),
+        format!("'{name}' передаётся только по имени: пишите '{name} = ...'"),
+    )
+}
+
+pub fn too_many_arguments(count: usize) -> Msg {
+    Msg::new(
+        format!("too many arguments; the function takes {count}"),
+        format!("слишком много аргументов; функция принимает {count}"),
+    )
+}
+
+pub fn argument_twice(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is given twice"),
+        format!("'{name}' передано дважды"),
+    )
+}
+
+pub fn unknown_argument(name: &str) -> Msg {
+    Msg::new(
+        format!("no parameter named '{name}'"),
+        format!("нет параметра с именем '{name}'"),
+    )
+}
+
+pub fn missing_argument(name: &str) -> Msg {
+    Msg::new(
+        format!("the argument '{name}' is missing"),
+        format!("не хватает аргумента '{name}'"),
+    )
+}
+
+pub fn constraint_not_met(ty: &str, interface: &str) -> Msg {
+    Msg::new(
+        format!("the function requires {interface}, which {ty} does not implement"),
+        format!("функция требует {interface}, которого не реализует {ty}"),
+    )
+}
+
+pub fn fields_are_named(ty: &str) -> Msg {
+    Msg::new(
+        format!("fields of '{ty}' are given by name: field = value"),
+        format!("поля '{ty}' передаются по имени: поле = значение"),
+    )
+}
+
+pub fn unknown_field(field: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{ty}' has no field '{field}'"),
+        format!("у '{ty}' нет поля '{field}'"),
+    )
+}
+
+pub fn missing_field(field: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("the field '{field}' of '{ty}' is missing"),
+        format!("не хватает поля '{field}' у '{ty}'"),
+    )
+}
+
+pub fn variant_fields(variant: &str, count: usize) -> Msg {
+    Msg::new(
+        format!("variant '{variant}' has {count} field(s)"),
+        format!("у варианта '{variant}' полей: {count}"),
+    )
+}
+
+pub fn variant_collision(variant: &str, enum_name: &str) -> Msg {
+    Msg::new(
+        format!("'{variant}' is also another visible name; write '{enum_name}.{variant}'"),
+        format!("'{variant}' — ещё и другое видимое имя; пишите '{enum_name}.{variant}'"),
+    )
+}
+
+pub fn is_name_not_bound(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is bound by 'is' only in the branch it guards"),
+        format!("'{name}' связано через 'is' только в охраняемой ветке"),
+    )
+}
+
+pub fn type_is_not_a_value(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is a type, not a value"),
+        format!("'{name}' — тип, а не значение"),
+    )
+}
+
+pub fn module_is_not_a_value(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is a module, not a value; use one of its members"),
+        format!("'{name}' — модуль, а не значение; используйте один из его членов"),
+    )
+}
+
+pub fn operator_not_defined(op: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{op}' is not defined for {ty}"),
+        format!("'{op}' не определён для {ty}"),
+    )
+}
+
+pub fn operands_differ(op: &str, left: &str, right: &str) -> Msg {
+    Msg::new(
+        format!("'{op}' needs operands of one type, found {left} and {right}"),
+        format!("'{op}' требует операндов одного типа, найдены {left} и {right}"),
+    )
+}
+
+pub fn text_plus(right: &str) -> Msg {
+    Msg::new(format!("'+' joins two texts, found Text and {right}; use interpolation: \"text {{value}}\""), format!("'+' соединяет два текста, найдены Text и {right}; используйте интерполяцию: \"text {{value}}\""))
+}
+
+pub fn resource_equality() -> Msg {
+    Msg::new(
+        "resources have no '=='; use is_same(a, b)",
+        "у ресурсов нет '=='; используйте is_same(a, b)",
+    )
+}
+
+pub fn not_indexable(ty: &str) -> Msg {
+    Msg::new(
+        format!("a value of type {ty} cannot be indexed"),
+        format!("значение типа {ty} нельзя индексировать"),
+    )
+}
+
+pub fn not_display(ty: &str) -> Msg {
+    Msg::new(
+        format!("a value of type {ty} cannot be put into text: it does not implement Display"),
+        format!("значение типа {ty} нельзя подставить в текст: оно не реализует Display"),
+    )
+}
+
+pub fn lambda_needs_types(name: &str) -> Msg {
+    Msg::new(
+        format!("write the type of '{name}': no function type is expected here"),
+        format!("запишите тип '{name}': здесь не ожидается тип функции"),
+    )
+}
+
+pub fn no_membership(ty: &str) -> Msg {
+    Msg::new(
+        format!("'in' needs a contains method, which {ty} does not have"),
+        format!("'in' требует метода contains, которого нет у {ty}"),
+    )
+}
+
+pub fn no_field(field: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("no field '{field}' in {ty}"),
+        format!("нет поля '{field}' у {ty}"),
+    )
+}
+
+pub fn not_in_module(name: &str, module: &str) -> Msg {
+    Msg::new(
+        format!("module '{module}' has no '{name}'"),
+        format!("в модуле '{module}' нет '{name}'"),
+    )
+}
+
+pub fn no_member(name: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{ty}' has no variant or function '{name}'"),
+        format!("у '{ty}' нет варианта или функции '{name}'"),
+    )
+}
+
+pub fn no_method(name: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("no method '{name}' for {ty}"),
+        format!("нет метода '{name}' у {ty}"),
+    )
+}
+
+pub fn not_callable(ty: &str) -> Msg {
+    Msg::new(
+        format!("a value of type {ty} cannot be called"),
+        format!("значение типа {ty} нельзя вызвать"),
+    )
 }

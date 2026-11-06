@@ -301,7 +301,9 @@ public function self_check(language as Grammar) returns List[Text]:
     for word in words.sorted():
         if word not in language.keywords and word not in language.contextual:
             problems.append("terminal '{word}' is not in the keyword list")
-    for keyword in (language.keywords + language.contextual).sorted():
+    var all_keywords = language.keywords
+    all_keywords.append_all(language.contextual)
+    for keyword in all_keywords.sorted():
         if keyword not in words: problems.append("keyword '{keyword}' is not used by any rule")
     if language.keywords.find(
         function (keyword as Text) returns Bool: keyword in language.contextual,

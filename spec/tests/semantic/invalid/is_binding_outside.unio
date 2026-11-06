@@ -1,0 +1,5 @@
+# expect-error: 5 E0050
+function first(items as List[Int]) returns Int:
+    if items.first() is some(value):
+        return value
+    return value

@@ -1,0 +1,6 @@
+# expect-error: 6 E0062
+struct Point:
+    x as Float
+
+function largest(points as List[Point]) returns Point:
+    return max(points[0], points[1])

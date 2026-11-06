@@ -1,0 +1,11 @@
+# expect-error: 9 E0044
+struct Point:
+    x as Int
+
+extend Point with Display:
+    function to_text(self) returns Text:
+        return "point"
+
+extend Point with Display:
+    function to_text(self) returns Text:
+        return "another point"

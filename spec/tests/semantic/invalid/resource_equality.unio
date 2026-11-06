@@ -1,0 +1,5 @@
+# expect-error: 5 E0066
+import std.files
+
+function same(a as files.AtomicFile, b as files.AtomicFile) returns Bool:
+    return a == b

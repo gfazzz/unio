@@ -1,0 +1,10 @@
+# expect-error: 9 E0051
+struct Box:
+    size as Int
+
+extend Box:
+    function size_twice(self) returns Int:
+        return self.size * 2
+
+    function size_twice(self) returns Int:
+        return self.size + self.size

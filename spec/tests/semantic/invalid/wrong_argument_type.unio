@@ -1,0 +1,5 @@
+# expect-error: 5 E0061
+function double(n as Int) returns Int:
+    return n * 2
+
+let X as Int = double("2")

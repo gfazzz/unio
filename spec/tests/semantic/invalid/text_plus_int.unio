@@ -1,0 +1,3 @@
+# expect-error: 3 E0065
+function label(count as Int) returns Text:
+    return "count: " + count

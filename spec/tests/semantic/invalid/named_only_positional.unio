@@ -1,0 +1,5 @@
+# expect-error: 5 E0040
+function connect(host as Text, named port as Int = 8080) returns Text:
+    return "{host}:{port}"
+
+let ADDRESS as Text = connect("localhost", 9000)

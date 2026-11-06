@@ -1,0 +1,7 @@
+# expect-error: 7 E0072
+enum Command:
+    Show
+    List
+
+function parse(word as Text) returns Command:
+    return List if word == "list" else Command.Show

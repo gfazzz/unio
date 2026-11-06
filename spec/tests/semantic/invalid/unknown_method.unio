@@ -1,0 +1,3 @@
+# expect-error: 3 E0056
+function size(text as Text) returns Int:
+    return text.size()

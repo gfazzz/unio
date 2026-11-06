@@ -1,0 +1,5 @@
+# expect-error: 2 E0052
+import std.files
+
+function files() returns Int:
+    return 1

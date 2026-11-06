@@ -1,0 +1,8 @@
+# expect-error: 6 E0069
+struct Point:
+    x as Int
+
+## Point does not define to_text.
+extend Point with Display:
+    function describe(self) returns Text:
+        return "point"

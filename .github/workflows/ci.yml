@@ -78,3 +78,7 @@ jobs:
         run: |
           cargo build --release --manifest-path compiler/Cargo.toml
           compiler/target/release/unio fmt --check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio
+      - name: Unio sources pass name and type checks (docs/semantics.md)
+        shell: bash
+        working-directory: .
+        run: compiler/target/release/unio check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/semantic/valid/*.unio

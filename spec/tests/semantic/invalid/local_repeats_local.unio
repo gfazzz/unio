@@ -1,0 +1,6 @@
+# expect-error: 4 E0055
+function total(items as List[Int]) returns Int:
+    var sum = 0
+    for sum in items:
+        pass
+    return sum

@@ -11,6 +11,7 @@
 
 import std.args
 import std.files
+from std.files import IoErrorKind
 
 let CHECKED_EXTENSIONS as List[Text] = ["md", "unio", "ebnf", "py", "yml", "json", "toml"]
 

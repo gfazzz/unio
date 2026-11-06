@@ -30,7 +30,7 @@ test "transport data passes through the validating constructor":
         assert_fail(e.to_text())
     assert port.number() == 8080
     try:
-        let port = try port_from_json("\{\"number\":0\}")
+        let rejected = try port_from_json("\{\"number\":0\}")
         assert_fail("expected PortError")
     on PortError as e: assert e.number == 0
     on Error as e: assert_fail(e.to_text())

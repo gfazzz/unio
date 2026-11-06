@@ -1,0 +1,4 @@
+# expect-error: 3 E0061
+function check(n as Int) returns Bool:
+    if n: return true
+    return false

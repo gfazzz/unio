@@ -1,0 +1,6 @@
+# expect-error: 6 E0063
+struct Point:
+    x as Int
+    y as Int
+
+let ORIGIN as Point = Point(x = 0)

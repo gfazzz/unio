@@ -1,0 +1,5 @@
+# expect-error: 5 E0064
+function square(n as Int) returns Int:
+    return n * n
+
+let X as Int = square(2, 3)

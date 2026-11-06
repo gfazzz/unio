@@ -1,0 +1,6 @@
+# expect-error: 5 E0051
+function area() returns Int:
+    return 1
+
+function area() returns Int:
+    return 2

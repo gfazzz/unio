@@ -1,0 +1,70 @@
+## Interfaces with defaults and values, enums, patterns, is, and functions of a type.
+
+interface Shape:
+    function area(self) returns Float
+    function name(self) returns Text
+
+    function describe(self) returns Text:
+        return "{self.name()} {self.area()}"
+
+struct Circle:
+    radius as Float
+
+struct Square:
+    side as Float
+
+extend Circle with Shape:
+    function area(self) returns Float:
+        return 3.0 * self.radius * self.radius
+
+    function name(self) returns Text:
+        return "circle"
+
+extend Square with Shape:
+    function area(self) returns Float:
+        return self.side * self.side
+
+    function name(self) returns Text:
+        return "square"
+
+extend Square:
+    public function unit() returns Square:
+        return Square(side = 1.0)
+
+enum Command:
+    Add(title as Text)
+    Done(id as Int)
+    Show
+
+function total(shapes as List[Shape]) returns Float:
+    var sum = 0.0
+    for shape in shapes:
+        sum = sum + shape.area()
+    return sum
+
+function describe(command as Command) returns Text:
+    match command:
+        case Add(title): return "add {title}"
+        case Done(id) if id > 0: return "done {id}"
+        case Done(_): return "done"
+        case Show: return "show"
+
+function first_word(line as Text) returns Text:
+    if line.split_whitespace().first() is some(word) and not word.is_empty(): return word
+    return ""
+
+function head(items as List[Text]) returns Text:
+    match items:
+        case [first, rest...]: return "{first} and {rest.length()} more"
+        case []: return "nothing"
+
+function label(value as Option[Int]) returns Int:
+    return value or 0
+
+test "interface values and functions of a type":
+    let shapes as List[Shape] = [Circle(radius = 1.0), Square.unit()]
+    assert total(shapes) > 3.0
+    assert describe(Add(title = "x")) == "add x"
+    assert first_word("hello world") == "hello"
+    assert head(["a", "b"]) == "a and 1 more"
+    assert label(none) == 0

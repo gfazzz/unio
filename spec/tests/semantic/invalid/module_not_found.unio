@@ -1,0 +1,2 @@
+# expect-error: 2 E0053
+import std.no_such_module

@@ -1,0 +1,3 @@
+# expect-error: 2 E0056
+function count(items as List[Itme]) returns Int:
+    return items.length()

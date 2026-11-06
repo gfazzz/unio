@@ -1,15 +1,19 @@
 //! The Unio compiler front end: lexer, parser, syntax tree, diagnostics and their catalog
-//! (requirements C-1, C-2, C-6 to C-10, R-12), the formatter (T-1 to T-3) and the outline
-//! (C-12). Type checking and code generation are later stages of the plan.
+//! (requirements C-1, C-2, C-6 to C-10, R-12), the formatter (T-1 to T-3), the outline
+//! (C-12), and name and type checks (docs/semantics.md, sections 1–4). Errors, resources,
+//! and code generation are later stages of the plan.
 
 pub mod ast;
 pub mod catalog;
+pub mod check;
 pub mod diag;
 pub mod format;
 pub mod lexer;
 pub mod outline;
 pub mod parser;
+pub mod program;
 pub mod sexpr;
+pub mod types;
 
 pub use diag::{explanation, Diagnostic, Lang, Msg, Severity, Span};
 
@@ -46,6 +50,48 @@ impl Analysis {
             .iter()
             .any(|d| d.severity == Severity::Error)
     }
+}
+
+/// Checks the files and the modules they import: syntax, then names and types. Returns one
+/// analysis for every given file and every imported module of the same packages; the
+/// standard library is checked but reported only when it is given.
+pub fn check_files(files: &[std::path::PathBuf]) -> Vec<Analysis> {
+    let files = files.to_vec();
+    on_front_end_stack(move || {
+        let mut program = program::Program::load(&files);
+        let syntax_ok: Vec<bool> = program
+            .modules
+            .iter()
+            .map(|m| !m.analysis.has_errors())
+            .collect();
+        if syntax_ok.iter().all(|ok| *ok) {
+            check::check_program(&mut program);
+        } else {
+            // Names and types are checked only when every module parses; otherwise the
+            // syntax errors come first.
+            program.diagnostics.clear();
+        }
+        let semantic = std::mem::take(&mut program.diagnostics);
+        let mut modules = std::mem::take(&mut program.modules);
+        for (module, diagnostic) in semantic {
+            let list = &mut modules[module].analysis.diagnostics;
+            if !list.contains(&diagnostic) {
+                list.push(diagnostic);
+            }
+        }
+        modules
+            .into_iter()
+            .filter(|m| m.report)
+            .map(|mut m| {
+                let lexical_or_syntax = m.analysis.has_errors();
+                let _ = lexical_or_syntax;
+                m.analysis
+                    .diagnostics
+                    .sort_by_key(|d| (d.span.start.line, d.span.start.column));
+                m.analysis
+            })
+            .collect()
+    })
 }
 
 /// The stack of the thread that runs the front end. Parsing recurses once per nesting

@@ -1,0 +1,2 @@
+# expect-error: 2 E0054
+from std.text import no_such_function

@@ -1,0 +1,2 @@
+# expect-error: 2 E0049
+let DOUBLE = function (x): x * 2

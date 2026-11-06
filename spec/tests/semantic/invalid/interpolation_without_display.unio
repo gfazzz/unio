@@ -1,0 +1,6 @@
+# expect-error: 6 E0067
+struct Point:
+    x as Int
+
+function show(point as Point) returns Text:
+    return "point {point}"

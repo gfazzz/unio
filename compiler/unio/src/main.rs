@@ -89,14 +89,13 @@ fn check(files: &[String], json: bool, lang: Lang) -> ExitCode {
     let mut failed = false;
     let mut all_json = Vec::new();
     for path in files {
-        let source = match read(path) {
-            Ok(source) => source,
-            Err(message) => {
-                eprintln!("{message}");
-                return ExitCode::from(2);
-            }
-        };
-        let analysis = unio::check_source(path, &source);
+        if let Err(message) = read(path) {
+            eprintln!("{message}");
+            return ExitCode::from(2);
+        }
+    }
+    let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+    for analysis in unio::check_files(&paths) {
         failed |= analysis.has_errors();
         if json {
             all_json.push(analysis.render_json(lang));
