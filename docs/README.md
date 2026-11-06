@@ -10,6 +10,7 @@
 | [../spec/README.md](../spec/README.md) | EBNF grammar, its reference checker, and the specification test corpus |
 | [stdlib.md](stdlib.md) | Standard library: overview of its Unio sources in `stdlib/` |
 | [style.md](style.md) | The one style of Unio sources that `unio fmt` writes: layout, blank lines, spaces, line breaking, branches, comments |
+| [semantics.md](semantics.md) | Static semantics of 0.1: names, types, calls, operators, errors, mutability, resources, layers and effects, with diagnostics E0051–E0085 |
 | [../examples](../examples) | Reference utilities checked against the grammar |
 | [../tools](../tools) | Project tools written in Unio |
 | [rfcs/README.md](rfcs/README.md) | RFC process for language changes |

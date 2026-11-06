@@ -41,6 +41,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Example program](docs/examples/todo.unio)
 - [Grammar and specification tests](spec/README.md)
 - [The Unio style](docs/style.md): the one form that `unio fmt` writes
+- [Static semantics](docs/semantics.md): names, types, errors, values, resources, and layers that `unio check` verifies
 - [Standard library](docs/stdlib.md), written in Unio in [stdlib/](stdlib) in the layers `core`, `alloc`, and `std`
 - [Reference utilities](examples)
 - [Project tools in Unio](tools)
