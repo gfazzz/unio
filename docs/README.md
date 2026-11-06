@@ -15,6 +15,9 @@
 | [influences.md](influences.md) | What Unio takes from Zig, Odin, Gleam, Mojo, and Unison, and what it declines |
 | [contributing.md](contributing.md) | Accepting contributions: threat model, trust levels, layers of defense against bad and malicious code |
 | [../SECURITY.md](../SECURITY.md) | How to report a vulnerability and what happens next |
-| [os.md](os.md) | UnioS: a site about Unio, in Unio, on an operating system written in Unio; architecture, stages, risks |
+| [os.md](os.md) | UniOS: a site about Unio, in Unio, on an operating system written in Unio; architecture, stages, risks |
 | [customers.md](customers.md) | Reference customer tanstaafl: its scenarios by release and the gaps they find |
 | [ru/](ru/README.md) | Russian localization |
+
+- [Comparative-review contracts](language-contracts.md): semantics, library, tooling and acceptance.
+- [RFC 0001](rfcs/0001-language-contracts.md): accepted language changes.

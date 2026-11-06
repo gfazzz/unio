@@ -21,4 +21,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 
 | Number | Title | Status |
 |---|---|---|
-| — | No RFCs yet | — |
+| [0001](0001-language-contracts.md) | Precise language and library contracts | accepted |

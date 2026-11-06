@@ -48,6 +48,94 @@ extend[T] List[T]:
     public function map[U](self, change as Function[(T) -> U]) returns List[U]:
         return [change(item) for item in self]
 
+    ## Like map, propagating the first callback error; later items are not visited.
+    public function try_map[U, E with Error](self, change as Function[(T) -> U fails with E]) returns List[U] fails with E:
+        var result as List[U] = []
+        for item in self:
+            result.append(try change(item))
+        return result
+
+    ## Like filter, propagating the first callback error.
+    public function try_filter[E with Error](self, predicate as Function[(T) -> Bool fails with E]) returns List[T] fails with E:
+        var result as List[T] = []
+        for item in self:
+            if try predicate(item):
+                result.append(item)
+        return result
+
+    ## Left fold in input order; an empty list returns initial without calling combine.
+    public function fold[U](self, initial as U, combine as Function[(U, T) -> U]) returns U:
+        var result = initial
+        for item in self:
+            result = combine(result, item)
+        return result
+
+    ## Left fold, stopping at the first callback error.
+    public function try_fold[U, E with Error](self, initial as U, combine as Function[(U, T) -> U fails with E]) returns U fails with E:
+        var result = initial
+        for item in self:
+            result = try combine(result, item)
+        return result
+
+    ## Matching items, then nonmatching items; each list keeps input order.
+    public function partition(self, predicate as Function[(T) -> Bool]) returns Tuple[List[T], List[T]]:
+        var yes as List[T] = []
+        var no as List[T] = []
+        for item in self:
+            if predicate(item):
+                yes.append(item)
+            else:
+                no.append(item)
+        return (yes, no)
+
+    ## Groups and their items keep first-occurrence order; key is called once per item.
+    public function group_by[K with Hash and Equal](self, key as Function[(T) -> K]) returns Map[K, List[T]]:
+        var indices as Map[K, Int] = {}
+        var groups as List[List[T]] = []
+        for item in self:
+            let group_key = key(item)
+            match indices.get(group_key):
+                case some(index):
+                    groups[index].append(item)
+                case none:
+                    indices.put(group_key, groups.length())
+                    groups.append([item])
+        var result as Map[K, List[T]] = {}
+        for group_key, index in indices.entries():
+            result.put(group_key, groups[index])
+        return result
+
+    ## Equal-length lists paired in order; none for different lengths, never silent truncation.
+    public function zip[U](self, other as List[U]) returns Option[List[Tuple[T, U]]]:
+        if self.length() != other.length():
+            return none
+        var pairs as List[Tuple[T, U]] = []
+        for index in range(0, self.length()):
+            pairs.append((self[index], other[index]))
+        return some(pairs)
+
+    ## Consecutive nonempty blocks, with a possibly shorter last block; none unless size > 0.
+    public function chunks(self, size as Int) returns Option[List[List[T]]]:
+        if size <= 0:
+            return none
+        var result as List[List[T]] = []
+        var start = 0
+        while start < self.length():
+            let end = start + min(size, self.length() - start)
+            result.append(self.slice(start, end))
+            start = end
+        return some(result)
+
+    ## Overlapping complete windows, advancing by one; none unless size > 0.
+    public function windows(self, size as Int) returns Option[List[List[T]]]:
+        if size <= 0:
+            return none
+        var result as List[List[T]] = []
+        if size <= self.length():
+            for start in range(0, self.length() - size + 1):
+                result.append(self.slice(start, start + size))
+        return some(result)
+
     ## Pairs of a position, counted from start, and an item.
     public function enumerate(self, start as Int = 0) returns List[Tuple[Int, T]]:
         var pairs as List[Tuple[Int, T]] = []
@@ -70,9 +158,33 @@ extend[T] List[T]:
         let right = self.slice(middle, self.length()).sorted_with(comes_before)
         return merge(left, right, comes_before)
 
-    ## A list sorted by a key of each item, for example names.sorted_by(function (name as Text) returns Int: name.length()).
+    ## Stable sorting; key is evaluated exactly once per item, in input order, even for a singleton.
+    ## O(n) additional key storage. Example: names.sorted_by(function (name as Text) returns Int: name.length()).
     public function sorted_by[K with Order](self, key as Function[(T) -> K]) returns List[T]:
-        return self.sorted_with(function (a as T, b as T) returns Bool: key(a) < key(b))
+        let keyed = [Keyed[K, T](key = key(item), value = item) for item in self]
+        let ordered = keyed.sorted_with(function (a as Keyed[K, T], b as Keyed[K, T]) returns Bool: a.key < b.key)
+        return [item.value for item in ordered]
+
+struct Keyed[K, T]:
+    key as K
+    value as T
+
+## A value snapshot: later changes to the original list do not change the traversal.
+public struct ListIterator[T]:
+    items as List[T]
+    var position as Int = 0
+
+extend[T] List[T]:
+    public function iterator(self) returns ListIterator[T]:
+        return ListIterator[T](items = self)
+
+extend[T] ListIterator[T] with Iterator[T]:
+    function next(var self) returns Option[T]:
+        if self.position >= self.items.length():
+            return none
+        let value = self.items[self.position]
+        self.position = self.position + 1
+        return some(value)
 
 extend[T with Equal] List[T]:
     ## Used by "item in list".
@@ -110,3 +222,94 @@ function merge[T](left as List[T], right as List[T], comes_before as Function[(T
     result.append_all(left.slice(left_index, left.length()))
     result.append_all(right.slice(right_index, right.length()))
     return result
+
+
+test "sorting by key is stable and does not change the input":
+    let items = ["bb", "a", "cc", "d"]
+    assert items.sorted_by(function (item as Text) returns Int: item.length()) == ["a", "d", "bb", "cc"]
+    assert items == ["bb", "a", "cc", "d"]
+    let empty as List[Text] = []
+    assert empty.sorted_by(function (item as Text) returns Int: item.length()) == []
+
+function sort_singleton_with_faulting_key():
+    let result = [1].sorted_by(function (item as Int) returns Int: 1 / (item - 1))
+
+test "a singleton still evaluates its sorting key":
+    expect_fault(sort_singleton_with_faulting_key)
+
+test "fold, partition and grouping preserve input order":
+    let items = [1, 2, 3, 4]
+    assert items.fold(10, function (sum as Int, item as Int) returns Int: sum + item) == 20
+    assert items.partition(function (item as Int) returns Bool: item % 2 == 0) == ([2, 4], [1, 3])
+    let groups = items.group_by(function (item as Int) returns Int: item % 2)
+    assert groups.keys() == [1, 0]
+    assert groups.get(1) == some([1, 3])
+    assert groups.get(0) == some([2, 4])
+    let empty as List[Int] = []
+    assert empty.fold(10, function (sum as Int, item as Int) returns Int: sum + item) == 10
+
+test "zip requires equal lengths and chunks and windows have explicit boundaries":
+    assert [1, 2].zip(["a", "b"]) == some([(1, "a"), (2, "b")])
+    assert [1].zip(["a", "b"]) == none
+    assert [1, 2, 3, 4, 5].chunks(2) == some([[1, 2], [3, 4], [5]])
+    assert [1, 2, 3].windows(2) == some([[1, 2], [2, 3]])
+    assert [1].windows(2) == some([])
+    assert [1].chunks(0) == none
+    assert [1].windows(-1) == none
+    assert [1].chunks(MAXIMUM_INT) == some([[1]])
+
+error ItemError:
+    item as Int
+
+function positive(item as Int) returns Int fails with ItemError:
+    if item < 0:
+        fail ItemError(item = item)
+    return item * 2
+
+test "fallible mapping stops at the first error":
+    try:
+        let result = try [1, -2, MINIMUM_INT].try_map(positive)
+        assert_fail("expected ItemError")
+    on ItemError as e:
+        assert e.item == -2
+
+test "fallible mapping returns all successful results":
+    let result = try [1, 2].try_map(positive) on ItemError as e:
+        assert_fail("unexpected error {e.item}")
+    assert result == [2, 4]
+
+function positive_even(item as Int) returns Bool fails with ItemError:
+    let checked = try positive(item)
+    return item % 2 == 0
+
+function add_positive(sum as Int, item as Int) returns Int fails with ItemError:
+    return sum + try positive(item)
+
+test "fallible filtering and folding preserve order and error type":
+    try:
+        let filtered = try [1, 2, 3, 4].try_filter(positive_even)
+        assert filtered == [2, 4]
+        let sum = try [1, 2].try_fold(10, add_positive)
+        assert sum == 16
+    on ItemError as e:
+        assert_fail("unexpected error {e.item}")
+    try:
+        let result = try [1, -2, MINIMUM_INT].try_filter(positive_even)
+        assert_fail("expected ItemError")
+    on ItemError as e:
+        assert e.item == -2
+    try:
+        let result = try [1, -2, MINIMUM_INT].try_fold(0, add_positive)
+        assert_fail("expected ItemError")
+    on ItemError as e:
+        assert e.item == -2
+
+test "list cursors see a snapshot and remain exhausted":
+    var items = [1, 2]
+    var cursor = items.iterator()
+    items[0] = 3
+    items.append(4)
+    assert cursor.next() == some(1)
+    assert cursor.next() == some(2)
+    assert cursor.next() == none
+    assert cursor.next() == none

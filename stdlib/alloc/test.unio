@@ -1,0 +1,79 @@
+## Deterministic property testing. Generators and predicates must be pure for replay.
+## This generator is for tests, never for cryptography. Scheme: unio-property-v1.
+
+public struct Counterexample[T]:
+    public seed as Int
+    public case_index as Int
+    public sample_seed as Int
+    public original as T
+    public minimal as T
+    public shrink_attempts as Int
+
+public error PropertyError:
+    message as Text
+
+## Returns the first counterexample, reduced in shrinker order within a finite attempt budget.
+## Reproduce the original with generate(result.sample_seed); "minimal" is local, not a proof of global minimality.
+public function check_property[T](generate as Function[(Int) -> T], shrink as Function[(T) -> List[T]], holds as Function[(T) -> Bool], named seed as Int = 1, named cases as Int = 100, named max_shrinks as Int = 1000) returns Option[Counterexample[T]] fails with PropertyError:
+    if cases < 0 or max_shrinks < 0:
+        fail PropertyError(message = "cases and max_shrinks must be nonnegative")
+    var state = seed % 2147483646
+    if state < 0:
+        state = state + 2147483646
+    state = state + 1
+    for index in range(0, cases):
+        state = (state * 48271) % 2147483647
+        let value = generate(state)
+        if not holds(value):
+            var best = value
+            var attempts = 0
+            var improved = true
+            while improved and attempts < max_shrinks:
+                improved = false
+                for candidate in shrink(best):
+                    if attempts >= max_shrinks:
+                        break
+                    attempts = attempts + 1
+                    if not holds(candidate):
+                        best = candidate
+                        improved = true
+                        break
+            return some(Counterexample[T](seed = seed, case_index = index, sample_seed = state, original = value, minimal = best, shrink_attempts = attempts))
+    return none
+
+function sample(seed as Int) returns Int:
+    return seed % 100 + 5
+
+function smaller(value as Int) returns List[Int]:
+    return [value / 2, value - 1] if value > 0 else []
+
+test "a property failure can be replayed and shrunk":
+    let result = try check_property(sample, smaller, function (value as Int) returns Bool: value < 3, seed = 7) on PropertyError as e:
+        assert_fail(e.message)
+    match result:
+        case some(problem):
+            assert problem.original == sample(problem.sample_seed)
+            assert problem.minimal == 3
+            assert problem.case_index == 0
+        case none:
+            assert_fail("expected a counterexample")
+
+test "a cyclic shrinker cannot exceed its attempt budget":
+    let result = try check_property(sample, function (value as Int) returns List[Int]: [value], function (value as Int) returns Bool: false, max_shrinks = 4) on PropertyError as e:
+        assert_fail(e.message)
+    match result:
+        case some(problem):
+            assert problem.shrink_attempts == 4
+        case none:
+            assert_fail("expected a counterexample")
+
+test "zero cases do not invoke callbacks":
+    let result = try check_property(sample, smaller, function (value as Int) returns Bool: false, cases = 0) on PropertyError as e:
+        assert_fail(e.message)
+    assert result.is_none()
+
+test "extreme and negative seeds never enter the zero generator state":
+    for seed in [MINIMUM_INT, -2147483646, -1, 0, MAXIMUM_INT]:
+        let result = try check_property(function (value as Int) returns Int: value, smaller, function (value as Int) returns Bool: value > 0, seed = seed, cases = 10) on PropertyError as e:
+            assert_fail(e.message)
+        assert result.is_none()

@@ -1,0 +1,3 @@
+# expect-error: 2
+function connect(named port = 8080):
+    pass

@@ -1,45 +1,38 @@
-## Paths of files and directories. Both "/" and the separator of the platform separate components.
-## An absolute path starts with the component "/"; on Windows a drive such as "C:" is the first component.
+## Lexical paths. "/" is accepted on every platform; "\\" separates components only on Windows.
+## Anchors preserve POSIX roots, Windows drive-relative/rooted paths and UNC server/share roots.
 unsafe module
 
-from std.text import join
+from std.text import join, split
 
 public external function Path(text as Text) returns Path
 
 extend Path with Display:
     external function to_text(self) returns Text
 
+struct PathParts:
+    anchor as Text
+    items as List[Text]
+
 extend Path:
-    ## The components without separators.
+    ## The anchor, if present, then names. Examples: ["/", "a"], ["C:", "a"], ["C:/", "a"].
+    ## UNC roots are one anchor such as "//server/share/", never ordinary directory names.
     public function components(self) returns List[Text]:
-        let text = self.to_text()
-        var parts as List[Text] = []
-        if not text.is_empty() and is_separator(text.slice(0, 1)):
-            parts.append("/")
-        var current = ""
-        for character in text.chars():
-            if is_separator(character):
-                if not current.is_empty():
-                    parts.append(current)
-                    current = ""
-            else:
-                current = current + character
-        if not current.is_empty():
-            parts.append(current)
-        return parts
+        let parsed = parse_parts(self.to_text(), separator() == "\\")
+        var result as List[Text] = []
+        if not parsed.anchor.is_empty():
+            result.append(parsed.anchor)
+        result.append_all(parsed.items)
+        return result
 
     public function is_absolute(self) returns Bool:
-        let parts = self.components()
-        return not parts.is_empty() and (parts[0] == "/" or parts[0].ends_with(":"))
+        let windows = separator() == "\\"
+        return absolute_parts(parse_parts(self.to_text(), windows), windows)
 
-    ## The last component, or "" for an empty path or the root.
+    ## The last name; "" for an empty path, a drive anchor or a root.
     public function name(self) returns Text:
-        let parts = self.components()
-        if parts.is_empty() or parts == ["/"]:
-            return ""
-        return parts[parts.length() - 1]
+        return parse_parts(self.to_text(), separator() == "\\").items.last() or ""
 
-    ## The part of the name after its last ".", or "" if there is none; a leading "." does not count.
+    ## Text after the last dot; a leading dot alone does not introduce an extension.
     public function extension(self) returns Text:
         let name = self.name()
         var position = -1
@@ -50,44 +43,90 @@ extend Path:
             return ""
         return name.slice(position + 1, name.length())
 
-    ## The path without its last component; none for an empty path or the root.
+    ## Remove the last name; none at a root/drive anchor. UNC parents never leave the share.
     public function parent(self) returns Option[Path]:
-        let parts = self.components()
-        if parts.is_empty() or parts == ["/"]:
+        let parsed = parse_parts(self.to_text(), separator() == "\\")
+        if parsed.items.is_empty():
             return none
-        return some(from_components(parts.slice(0, parts.length() - 1)))
+        return some(Path(render_parts(PathParts(anchor = parsed.anchor, items = parsed.items.slice(0, parsed.items.length() - 1)))))
 
-    ## The path with one more component.
+    ## Append text without changing the anchor. This is not a sandbox containment check.
     public function join(self, part as Text) returns Path:
         let text = self.to_text()
-        if text.is_empty():
-            return Path(part)
-        if is_separator(text.slice(text.length() - 1, text.length())):
+        let parsed = parse_parts(text, separator() == "\\")
+        if text.is_empty() or text.ends_with("/") or (separator() == "\\" and text.ends_with("\\")):
+            return Path(text + part)
+        if parsed.items.is_empty() and parsed.anchor.ends_with(":"):
             return Path(text + part)
         return Path(text + separator() + part)
 
-    ## The path with "." removed and "name/.." collapsed; leading ".." of a relative path are kept.
+    ## Remove "." and redundant separators, preserving ".." and the anchor.
+    ## This does not resolve symlinks or prove filesystem equivalence; use files.resolve for resolution.
     public function normalize(self) returns Path:
-        var parts as List[Text] = []
-        for part in self.components():
-            if part == ".":
-                continue
-            if part == ".." and not parts.is_empty() and parts[parts.length() - 1] != "..":
-                if parts[parts.length() - 1] != "/":
-                    parts.remove_last()
-                continue
-            parts.append(part)
-        return from_components(parts)
+        let parsed = parse_parts(self.to_text(), separator() == "\\")
+        let names = [part for part in parsed.items if part != "."]
+        return Path(render_parts(PathParts(anchor = parsed.anchor, items = names)))
 
-function from_components(parts as List[Text]) returns Path:
-    if parts.is_empty():
-        return Path(".")
-    if parts[0] == "/":
-        return Path(separator() + join(parts.slice(1, parts.length()), separator()))
-    return Path(join(parts, separator()))
+function parse_parts(source as Text, windows as Bool) returns PathParts:
+    let text = source.replace("\\", "/") if windows else source
+    var anchor = ""
+    var start = 0
+    if windows and text.length() >= 2 and text.slice(1, 2) == ":" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(text.slice(0, 1)):
+        anchor = text.slice(0, 2)
+        start = 2
+        if text.length() > 2 and text.slice(2, 3) == "/":
+            anchor = anchor + "/"
+            start = 3
+    else if text.starts_with("//") and not text.starts_with("///"):
+        let names = [name for name in split(text.slice(2, text.length()), "/") if not name.is_empty()]
+        if windows and names.length() >= 2:
+            return PathParts(anchor = "//{names[0]}/{names[1]}/", items = names.slice(2, names.length()))
+        return PathParts(anchor = "//", items = names)
+    else if text.starts_with("/"):
+        anchor = "/"
+        start = 1
+    return PathParts(anchor = anchor, items = [name for name in split(text.slice(start, text.length()), "/") if not name.is_empty()])
 
-function is_separator(character as Text) returns Bool:
-    return character == "/" or character == separator()
+function absolute_parts(parsed as PathParts, windows as Bool) returns Bool:
+    if not windows:
+        return parsed.anchor.starts_with("/")
+    return parsed.anchor.ends_with(":/") or (parsed.anchor.starts_with("//") and parsed.anchor.length() > 2)
 
-## "/" on Linux and macOS, "\" on Windows.
+function render_parts(parsed as PathParts) returns Text:
+    let text = parsed.anchor + join(parsed.items, "/")
+    return "." if text.is_empty() else text
+
+## "/" on Linux and macOS, "\\" on Windows.
 external function separator() returns Text
+
+test "lexical normalization preserves a possible symlink traversal":
+    assert Path("link/../file").normalize().components() == ["link", "..", "file"]
+    assert Path("a/./b").normalize().components() == ["a", "b"]
+
+test "Windows drive-relative, drive-rooted and UNC anchors remain distinct":
+    let relative = parse_parts("C:folder/../file", true)
+    assert relative.anchor == "C:"
+    assert not absolute_parts(relative, true)
+    assert render_parts(relative) == "C:folder/../file"
+    let rooted = parse_parts("C:\\folder\\file", true)
+    assert rooted.anchor == "C:/"
+    assert absolute_parts(rooted, true)
+    let share = parse_parts("\\\\server\\share\\folder", true)
+    assert share.anchor == "//server/share/"
+    assert share.items == ["folder"]
+    assert absolute_parts(share, true)
+    assert render_parts(share) == "//server/share/folder"
+    assert not absolute_parts(parse_parts("/folder", true), true)
+    assert not absolute_parts(parse_parts("//server", true), true)
+
+test "POSIX preserves backslashes as names and exactly two leading slashes":
+    let path = parse_parts("/a\\b/../c", false)
+    assert path.items == ["a\\b", "..", "c"]
+    assert absolute_parts(path, false)
+    assert parse_parts("//host/path", false).anchor == "//"
+    assert parse_parts("///host/path", false).anchor == "/"
+
+test "root and ordinary relative parents":
+    assert Path("/").parent() == none
+    assert Path("/").name() == ""
+    assert Path("name").parent() == some(Path("."))

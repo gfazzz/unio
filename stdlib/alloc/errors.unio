@@ -1,0 +1,20 @@
+## Explicit error context. The cause stays an Error value; it is never downcast.
+## Handle concrete error kinds before wrapping when recovery depends on them.
+
+public error ContextError:
+    operation as Text
+    cause as Error
+
+## Attach an operation to an error without flattening its cause to text.
+public function context(operation as Text, cause as Error) returns ContextError:
+    return ContextError(operation = operation, cause = cause)
+
+error ExampleError:
+    message as Text
+
+test "context preserves a structured cause":
+    let original = ExampleError(message = "missing field")
+    let wrapped = context("reading configuration", original)
+    assert wrapped.operation == "reading configuration"
+    assert wrapped.cause.to_text() == original.to_text()
+    assert wrapped.cause.diagnostic_code() == original.diagnostic_code()

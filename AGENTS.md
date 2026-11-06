@@ -21,7 +21,7 @@ Read the relevant sources before changing language behavior:
 - [docs/influences.md](docs/influences.md): what was taken from other
   languages and what was declined, with reasons. Read it before proposing a
   feature seen elsewhere; a declined feature needs an RFC, not a new proposal.
-- [docs/os.md](docs/os.md): UnioS, the operating system track. It uses the
+- [docs/os.md](docs/os.md): UniOS, the operating system track. It uses the
   language as specified and adds nothing to it; a need it discovers goes to
   the language as an RFC.
 - [docs/stdlib.md](docs/stdlib.md): the standard library overview, kept in

@@ -1,0 +1,3 @@
+# expect-error: 2
+function apply(callback as Function[(named as Int) -> Int]):
+    pass

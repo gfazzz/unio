@@ -21,20 +21,20 @@ import std.json as json
 from std.text import join
 
 struct Finding:
-    id as Text
-    system as Text
-    norm as Text
-    clause as Text
-    summary as Text
-    per_century as Int
-    per_century_after as Int
-    loss as Int
-    fix_cost as Int
-    approved_by as Option[Text] = none
+    public id as Text
+    public system as Text
+    public norm as Text
+    public clause as Text
+    public summary as Text
+    public per_century as Int
+    public per_century_after as Int
+    public loss as Int
+    public fix_cost as Int
+    public approved_by as Option[Text] = none
 
 struct Audit:
-    site as Text
-    findings as List[Finding]
+    public site as Text
+    public findings as List[Finding]
 
 ## A finding with its money: ale and ale_after are rubles per year; rosi is in percent and is
 ## none when the fix costs nothing.

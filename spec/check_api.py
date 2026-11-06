@@ -214,7 +214,9 @@ def check_program(path, grammar, api, problems):
     own_functions, own_types, own_variants = declarations(tree)
     locals_ = set()
     for rule, kids in walk(tree):
-        if rule in ("param", "let_statement"):
+        if rule == "param":
+            locals_ |= set(names_in(kids)[-1:])  # contextual "named" precedes the binding
+        elif rule == "let_statement":
             locals_ |= set(names_in(kids)[:1])
     for tok in unqualified_variant_clashes(tree, own_types, own_variants):
         enum = next(e for e, vs in own_variants.items() if tok.value in vs)

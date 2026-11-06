@@ -202,7 +202,9 @@ function check_program(path as Path, language as grammar.Grammar, api as Api, va
     var locals as List[Text] = []
     for rule, children in walk(tree):
         if rule in ["param", "let_statement"]:
-            match names_in(children).first():
+            let names = names_in(children)
+            let binding = names.last() if rule == "param" else names.first()
+            match binding:
                 case some(local):
                     add_unique(locals, local)
                 case none:

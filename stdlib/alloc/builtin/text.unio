@@ -1,9 +1,20 @@
-## Methods of Text: a sequence of Unicode characters stored as UTF-8.
-## Positions and lengths count characters; byte_length counts bytes.
+## Methods of Text: a sequence of Unicode scalar values stored as valid UTF-8.
+## Positions and lengths count scalars, not grapheme clusters; byte_length counts bytes.
+## Equality and hashing compare the exact scalar sequence; no implicit normalization.
 ## Equality, order, hashing and + are built into the compiler; "part in text" calls text.contains(part).
 unsafe module
 
 from std.text import split
+
+test "text positions are scalars without implicit normalization":
+    let composed = "\u{E9}"
+    let decomposed = "e\u{301}"
+    assert composed.length() == 1
+    assert decomposed.length() == 2
+    assert composed != decomposed
+    assert decomposed.slice(1, 2).code_points() == [0x301]
+    assert "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}".length() == 7
+    assert "\u{DF}".to_upper() == "SS"
 
 let DECIMAL_DIGITS as Text = "0123456789"
 
@@ -22,7 +33,8 @@ extend Text:
     ## The Unicode code points of the characters.
     public external function code_points(self) returns List[Int]
 
-    ## Characters from start up to, but not including, end; a fault outside 0..length(). Constant time.
+    ## Scalars from start up to, but not including, end; a fault outside 0..length().
+    ## O(1) after the shared O(n)-time, O(n)-space scalar index is constructed; slicing shares storage.
     public external function slice(self, start as Int, end as Int) returns Text
 
     ## Position of the first occurrence of part at or after start. An empty part is found at start.
@@ -38,7 +50,7 @@ extend Text:
     public external function to_float(self) returns Option[Float]
 
     ## The character at the position as a Text of length 1; a fault outside 0..length().
-    ## Text keeps an index of character positions, so this takes constant time.
+    ## O(1) after the scalar index is constructed, as for slice.
     public function char_at(self, index as Int) returns Text:
         return self.slice(index, index + 1)
 

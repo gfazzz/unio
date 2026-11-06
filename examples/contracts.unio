@@ -1,0 +1,94 @@
+## Executable acceptance examples for RFC 0001, awaiting the stage-3 interpreter.
+## Public transport data is validated before constructing a private domain value.
+
+import std.json as json
+
+struct PortData:
+    public number as Int
+
+struct Port:
+    value as Int
+
+error PortError:
+    number as Int
+
+extend Port:
+    function open(number as Int) returns Port fails with PortError:
+        if number < 1 or number > 65535:
+            fail PortError(number = number)
+        return Port(value = number)
+
+    function number(self) returns Int:
+        return self.value
+
+function port_from_json(text as Text) returns Port fails with ParseError, DecodeError, PortError:
+    let value = try json.parse(text)
+    let data = try json.decode[PortData](value)
+    return try Port.open(data.number)
+
+test "transport data passes through the validating constructor":
+    let port = try port_from_json("\{\"number\":8080\}") on Error as e:
+        assert_fail(e.to_text())
+    assert port.number() == 8080
+    try:
+        let port = try port_from_json("\{\"number\":0\}")
+        assert_fail("expected PortError")
+    on PortError as e:
+        assert e.number == 0
+    on Error as e:
+        assert_fail(e.to_text())
+
+test "unknown JSON fields and explicit null are distinct from missing defaults":
+    for text in ["\{\"number\":8080,\"extra\":true\}", "\{\"number\":null\}", "\{\}"]:
+        try:
+            let port = try port_from_json(text)
+            assert_fail("expected DecodeError")
+        on DecodeError as e:
+            assert not e.message.is_empty()
+        on Error as e:
+            assert_fail(e.to_text())
+
+struct Trace:
+    var items as List[Int] = []
+
+extend Trace:
+    function mark(var self, value as Int) returns Int:
+        self.items.append(value)
+        return value
+
+function pair(left as Int, right as Int) returns Tuple[Int, Int]:
+    return (left, right)
+
+function default_after(value as Int, named next as Int = value + 1) returns Int:
+    return next
+
+function apply_named(named callback as Function[(Int) -> Int]) returns Int:
+    return callback(3)
+
+test "named arguments execute in source order and defaults see earlier parameters":
+    var trace = Trace()
+    assert pair(right = trace.mark(2), left = trace.mark(1)) == (1, 2)
+    assert trace.items == [2, 1]
+    assert default_after(5) == 6
+    assert default_after(10) == 11
+    assert default_after(5, next = 20) == 20
+    assert apply_named(callback = function (value as Int) returns Int: value + 1) == 4
+
+test "short circuit and optional fallback do not evaluate skipped calls":
+    var trace = Trace()
+    assert not (false and trace.mark(1) == 1)
+    assert true or trace.mark(2) == 2
+    let present as Option[Int] = some(7)
+    assert (present or trace.mark(3)) == 7
+    assert (trace.mark(4) if false else 9) == 9
+    assert trace.items == []
+
+test "assignment resolves its index before evaluating the right hand side":
+    var trace = Trace()
+    var values = [0, 0]
+    values[trace.mark(1)] = trace.mark(2)
+    assert trace.items == [1, 2]
+    assert values == [0, 2]
+
+public function main() returns Int:
+    return 0

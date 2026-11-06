@@ -1,6 +1,6 @@
 # What Unio takes from other languages, and what it declines
 
-Version: 0.1. Status: decisions recorded in `docs/concept.md` 0.11 and `docs/requirements.md` 0.10. This document keeps the reasoning in one place so that the same proposals are not re-argued.
+Version: 0.2. Changes from 0.1: RFC 0001 and precise cache contracts. Status: decisions recorded in `docs/concept.md` 0.13 and `docs/requirements.md` 0.12. This document keeps the reasoning in one place so that the same proposals are not re-argued.
 
 The test for every borrowing is the principle of the concept: clear code, explicit behavior, controlled resources. A feature is taken only if it strengthens readability, explicitness, verifiability before execution, or fitness for AI. A feature that is powerful but gives a second way to write the same thing is declined.
 
@@ -38,7 +38,7 @@ The test for every borrowing is the principle of the concept: clear code, explic
 
 | Idea | Decision | Where |
 |---|---|---|
-| Content-addressed code | Accepted as a tool feature, not as language semantics. `unio symbol` reports a content hash for every function and type: a hash of the normalized declaration and body together with the hashes of everything it references. The hash is the key of the incremental build and test cache and the way an AI agent names an exact version of a function. Source code keeps ordinary names; nothing in the language depends on hashes. | requirements C-11a |
+| Content-addressed code | Accepted as a tool feature, not as language semantics. `unio symbol` reports a content hash for every function and type: a hash of the normalized declaration and body together with the hashes of everything it references. The hash is an input to the composite build and test cache keys (C-11b) and the way an AI agent names an exact version of a function. Source code keeps ordinary names; nothing in the language depends on hashes. | requirements C-11a |
 
 ## 6. Declined on purpose
 
@@ -48,3 +48,7 @@ The test for every borrowing is the principle of the concept: clear code, explic
 | Macros and a heavy metaprogramming system | A second way to write everything, code that cannot be read without expanding it, and a violation of SB-14. |
 | C interop out of the box | FFI for user code is outside 0.1; `external function` exists only in the standard library and in `unsafe module` files of the `system` profile. |
 | Classes and implementation inheritance | Declined from the start: structs, interfaces, and composition. |
+
+## 7. Accepted findings from the extended review
+
+Python: required labels and sorting keys; Ruby: a small complete collection API; JS/TS: task ownership and external-data validation; Swift/Rust: exclusive access and implementation coherence; Go/Unison: exact semantics, dependencies and caches; C#/Kotlin/Java/OTP: iteration, cancellation and supervision. Accepted in [RFC 0001](rfcs/0001-language-contracts.md), the [contracts](language-contracts.md), requirements L-27–L-32, C-11b, S-13–S-20, T-12–T-15 and plan §11. Concept 0.13, requirements 0.12. Earlier declined features stay declined; later features are explicitly release-bound.

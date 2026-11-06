@@ -70,3 +70,7 @@ E0004 is not used: because indentation grows one level at a time, a dedent alway
 - A file in `tests/valid/` must parse completely.
 - A file in `tests/invalid/` starts with `# expect-error: LINE` or `# expect-error: LINE CODE`. The checker must report the first error on that line, with that code when one is given. The checker reports codes for lexical errors only; every other syntax error is reported as `syntax`.
 - One file tests one thing. A new grammar rule comes with at least one valid and one invalid file.
+
+## RFC 0001
+
+The EBNF supports contextual `named` and labels in function shapes; `named_parameters.unio` and negative fixtures are in the corpus. Both API checkers extract the actual parameter binding. Group/default ordering, required labels at calls and E0040–E0048 belong to the future compiler, not these scripts. Normative rules: [contracts](../docs/language-contracts.md), [RFC](../docs/rfcs/0001-language-contracts.md).

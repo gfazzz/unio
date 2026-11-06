@@ -25,3 +25,7 @@ Scenario programs of tanstaafl, a product written with AI ([../docs/customers.md
 | `event-journal` | [event_journal.unio](event_journal.unio) | Event journal of a site agent: pending, acknowledgement, compaction with the 72-hour autonomy window | `files.read`, `files.write` for the journal |
 
 All these programs use only the standard library in [stdlib/](../stdlib) and the `application` profile. `spec/check_grammar.py` and `spec/check_api.py` check them in CI; once the interpreter of stage 3 runs, their tests run as well.
+
+## Contract acceptance examples
+
+[contracts.unio](contracts.unio) exercises RFC 0001: named arguments, evaluation order, lazy branches and validation of public JSON transport data before constructing private domain values. These tests await the stage-3 interpreter; they are statically checked with the other programs.

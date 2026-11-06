@@ -2,8 +2,8 @@
 ##
 ## parse reads a number without a fraction or an exponent that fits in Int as Value.Int and any
 ## other number as Value.Float. encode and decode work for Value, Int, Float, Bool, Text, Path,
-## Option, List, Map with Text keys, and structs and enums built from them; the compiler checks
-## this at the call (requirement S-5). A struct is an object with its field names, and a field
+## Option, List, Map with Text keys, and public-field transport structs/enums built from them; the compiler checks
+## this at the call (requirements S-5, S-17); private fields are never converted automatically. A struct is an object with its field names, and a field
 ## with a default may be missing on decoding. A variant without fields is its name as text; a
 ## variant with fields is an object {"Variant": {fields}}.
 unsafe module
@@ -26,8 +26,12 @@ public error ParseError:
     column as Int
     message as Text
 
-## path is the dotted path to the value that did not match, for example "2.title".
+## path is a JSON Pointer to the mismatching value, for example "/2/title"; "" denotes the root.
 public error DecodeError:
+    path as Text
+    message as Text
+
+public error EncodeError:
     path as Text
     message as Text
 
@@ -39,6 +43,27 @@ let HEX_DIGITS as Text = "0123456789abcdef"
 ## A Float that is NaN or infinite is written as null, because JSON has no such numbers.
 public function encode[T](value as T, pretty as Bool = false) returns Text:
     return write_value(to_value(value), pretty, 0)
+
+## Strict encoding for protocols and configuration: reject non-finite numbers instead of losing data.
+public function encode_checked[T](value as T, named pretty as Bool = false) returns Text fails with EncodeError:
+    let document = to_value(value)
+    try validate_finite(document, "")
+    return write_value(document, pretty, 0)
+
+function validate_finite(value as Value, path as Text) fails with EncodeError:
+    match value:
+        case Value.Float(number):
+            if not number.is_finite():
+                fail EncodeError(path = path, message = "non-finite number")
+        case Value.Array(items):
+            for index, item in items.enumerate():
+                try validate_finite(item, "{path}/{index}")
+        case Value.Object(fields):
+            for key, item in fields.entries():
+                let segment = key.replace("~", "~0").replace("/", "~1")
+                try validate_finite(item, "{path}/{segment}")
+        case _:
+            pass
 
 public function decode[T](value as Value) returns T fails with DecodeError:
     return try from_value[T](value)
@@ -74,9 +99,15 @@ struct Reader:
     var position as Int = 0
     var line as Int = 1
     var column as Int = 1
+    var depth as Int = 0
+    max_depth as Int = 128
 
-public function parse(text as Text) returns Value fails with ParseError:
-    var reader = Reader(characters = text.chars())
+## Bounded strict parsing: duplicate keys fail. Limits are checked before constructing the character list.
+## Depth counts values along a nesting path, including the root; max_bytes counts UTF-8 bytes.
+public function parse(text as Text, named max_depth as Int = 128, named max_bytes as Int = 16777216) returns Value fails with ParseError:
+    if max_depth <= 0 or max_bytes <= 0 or text.byte_length() > max_bytes:
+        fail ParseError(line = 1, column = 1, message = "invalid or exceeded JSON size limit")
+    var reader = Reader(characters = text.chars(), max_depth = max_depth)
     let value = try read_value(reader)
     skip_space(reader)
     if not at_end(reader):
@@ -116,6 +147,14 @@ function expect(var reader as Reader, word as Text) fails with ParseError:
             fail error_at(reader, "expected \"{word}\"")
 
 function read_value(var reader as Reader) returns Value fails with ParseError:
+    if reader.depth >= reader.max_depth:
+        fail error_at(reader, "JSON depth limit exceeded")
+    reader.depth = reader.depth + 1
+    let value = try read_nested_value(reader)
+    reader.depth = reader.depth - 1
+    return value
+
+function read_nested_value(var reader as Reader) returns Value fails with ParseError:
     skip_space(reader)
     let character = peek(reader)
     if character == "\{":
@@ -151,6 +190,8 @@ function read_object(var reader as Reader) returns Value fails with ParseError:
         if peek(reader) != "\"":
             fail error_at(reader, "expected a key in quotes")
         let key = try read_text(reader)
+        if fields.contains(key):
+            fail error_at(reader, "duplicate object key: {key}")
         skip_space(reader)
         try expect(reader, ":")
         fields.put(key, try read_value(reader))
@@ -284,6 +325,8 @@ function read_number(var reader as Reader) returns Value fails with ParseError:
                 is_float = true
     match text.to_float():
         case some(number):
+            if not number.is_finite():
+                fail ParseError(line = line, column = column, message = "number outside finite Float range")
             return Value.Float(number)
         case none:
             fail ParseError(line = line, column = column, message = "invalid number {text}")
@@ -376,3 +419,33 @@ test "an error names the line":
         assert_fail("expected a parse error")
     on ParseError as e:
         assert e.line == 2
+
+test "duplicate keys, including escaped spellings, are rejected":
+    for source in ["\{\"a\":1,\"a\":2\}", "\{\"a\":1,\"\\u0061\":2\}"]:
+        try:
+            let value = try parse(source)
+            assert_fail("expected duplicate key error")
+        on ParseError as e:
+            assert e.message == "duplicate object key: a"
+
+test "JSON limits reject deep and oversized inputs":
+    try:
+        let value = try parse("[[0]]", max_depth = 2)
+        assert_fail("expected depth limit")
+    on ParseError as e:
+        assert e.message == "JSON depth limit exceeded"
+    try:
+        let value = try parse("null", max_bytes = 3)
+        assert_fail("expected size limit")
+    on ParseError as e:
+        assert e.line == 1
+    let scalar = try parse("0", max_depth = 1, max_bytes = 1) on ParseError as e:
+        assert_fail(e.message)
+    assert scalar == Value.Int(0)
+
+test "overflowing JSON exponents do not silently become infinity":
+    try:
+        let value = try parse("1e9999")
+        assert_fail("expected numeric range error")
+    on ParseError as e:
+        assert e.line == 1

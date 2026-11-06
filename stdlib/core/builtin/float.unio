@@ -6,3 +6,32 @@ extend Float:
 
     ## True unless the number is infinite or NaN.
     public external function is_finite(self) returns Bool
+
+    ## An explicit total-order key: numeric order, both zeros equal, all NaNs equal and last.
+    public function total_order(self) returns OrderedFloat:
+        return OrderedFloat(key = total_order_key(self))
+
+## Equality is derived from the private canonical integer key, not IEEE Float equality.
+public struct OrderedFloat:
+    key as Int
+
+extend OrderedFloat with Order:
+    function compare(self, other as Self) returns Int:
+        if self.key < other.key:
+            return -1
+        return 0 if self.key == other.key else 1
+
+extend OrderedFloat with Hash:
+    function hash(self) returns Int:
+        return self.key
+
+## Representation primitive: for non-NaN raw binary64 bits, magnitude is bits with the sign bit cleared;
+## the key is -magnitude for negative numbers, magnitude otherwise. Both zeros give 0.
+## All NaN encodings give MAXIMUM_INT. No arithmetic conversion of Float to Int is performed.
+external function total_order_key(value as Float) returns Int
+
+test "ordered Float keys agree on zeros and numerical order":
+    assert (-0.0).total_order() == 0.0.total_order()
+    assert (-1.0).total_order() < 0.0.total_order()
+    assert 0.0.total_order() < 1.0.total_order()
+    assert (-0.0).total_order().hash() == 0.0.total_order().hash()

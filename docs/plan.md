@@ -2,9 +2,9 @@
 
 Version: 0.1 (draft). Basis: `docs/requirements.md`. Russian localization: `docs/ru/plan.md`. Durations are given in weeks from the start of work and assume a team of 3–4 engineers. With a different team the durations scale; the order of stages stays.
 
-Changes from the initial 0.1 draft: UnioS requires human- and AI-accessible administration and an integrated base system (section 9; `docs/os.md`, sections 1.1–1.2).
+Changes from the initial 0.1 draft: UniOS requires human- and AI-accessible administration and an integrated base system (section 9; `docs/os.md`, sections 1.1–1.2).
 
-Changes from the initial 0.1 draft: post-quantum signing is required for 0.1 distribution; network and UnioS profiles follow `docs/cryptography.md` (requirements T-8a, R-6a to R-6c, OS-7).
+Changes from the initial 0.1 draft: post-quantum signing is required for 0.1 distribution; network and UniOS profiles follow `docs/cryptography.md` (requirements T-8a, R-6a to R-6c, OS-7).
 
 ## 1. Project principles
 
@@ -30,7 +30,7 @@ unio/
   examples/        reference utilities
   bench/           performance tests
   editors/vscode/  extension
-  unios/           UnioS kernel, services, and the project site (track of section 9, after 0.5)
+  unios/           UniOS kernel, services, and the project site (track of section 9, after 0.5)
 ```
 
 ## 3. Stages of release 0.1
@@ -206,13 +206,13 @@ Tracked in CI and published with every release:
 | 0.4 "Quantum" | Circuits as values, simulator, hardware interface with capability description | Backend interface from 0.3 |
 | 0.5 "System" | The `system` profile: memory without a GC and code without copy-on-write, control of representation, pointers, memory-mapped devices and assembly in `unsafe module`, interrupts, atomic operations and a memory model, checked constraints on effects; the prototype kernel of concept section 8.1 in a virtual machine | Layers `core`, `alloc`, `std`; derived effects; the memory model must agree with the concurrency of 0.2 |
 | 1.0 | Language stabilization, compatibility guarantee, self-hosted compiler in Unio | All of the above |
-| UnioS (separate track, with 0.5) | The operating system written in Unio and the proof of concept: the project site, in Unio, served on UnioS on a VM over HTTPS. See section 9 and `docs/os.md` | Native code (stage 4), concurrency and `std.net` from 0.2, the `system` profile and prototype kernel from 0.5 |
+| UniOS (separate track, with 0.5) | The operating system written in Unio and the proof of concept: the project site, in Unio, served on UniOS on a VM over HTTPS. See section 9 and `docs/os.md` | Native code (stage 4), concurrency and `std.net` from 0.2, the `system` profile and prototype kernel from 0.5 |
 
 Each later release starts with its own specification modeled on `docs/requirements.md` and does not change core syntax without an RFC and an automatic migration.
 
-## 9. UnioS track
+## 9. UniOS track
 
-UnioS is the operating system written in Unio. Concept section 8.1 keeps a general-purpose operating system off the language roadmap, so UnioS is a separate project with its own specification and team. Its first deliverable is the proof of concept: the project site, written in Unio, served by a web server and framework in Unio, on UnioS, on a VM of the class 8 GB RAM / 4 cores / 80 GB, reachable over HTTPS. Design, architecture, and risks are in `docs/os.md`; this section fixes the track's place in the schedule and what the language owes it.
+UniOS is the operating system written in Unio. Concept section 8.1 keeps a general-purpose operating system off the language roadmap, so UniOS is a separate project with its own specification and team. Its first deliverable is the proof of concept: the project site, written in Unio, served by a web server and framework in Unio, on UniOS, on a VM of the class 8 GB RAM / 4 cores / 80 GB, reachable over HTTPS. Design, architecture, and risks are in `docs/os.md`; this section fixes the track's place in the schedule and what the language owes it.
 
 The OS inherits the language's requirements for human and AI understanding, explicit behavior, and controlled resources. Its base system follows the FreeBSD approach: kernel, libraries, essential services, and administrative tools are developed and released together, with a documented inventory and common conventions. Additional applications extend that base. Local and remote management, including SSH, share documented CLI/API contracts, structured diagnostics, and permission checks. These are baseline requirements of `docs/os.md`, sections 1.1–1.2, with acceptance scenarios; model serving is a later capability.
 
@@ -222,21 +222,21 @@ The track starts with release 0.5 "System": the prototype kernel of that release
 
 | Stage | Weeks | Result | Exit criterion |
 |---|---|---|---|
-| U-0 Design | 1–6, during 0.5 | UnioS specification, virtio device model, capabilities mapped from manifest permissions, system-call interface, service protocol | Specification accepted; the 0.5 prototype kernel boots under QEMU with the UnioS system-call table |
+| U-0 Design | 1–6, during 0.5 | UniOS specification, virtio device model, capabilities mapped from manifest permissions, system-call interface, service protocol | Specification accepted; the 0.5 prototype kernel boots under QEMU with the UniOS system-call table |
 | U-1 Kernel | 6–16 | Virtio transport, interrupts, memory regions for processes, process creation and capabilities, serial console, driver processes | A driver process receives interrupts and reads a virtio device; memory and timer tests green |
-| U-2 Network and site | 14–28 | virtio-net driver, TCP/IP and DNS service, `std` over UnioS system calls, HTTP/1.1 server, web framework, site over HTTP on a local VM | Site serves from a local VM; 24 h of network fuzzing survived |
+| U-2 Network and site | 14–28 | virtio-net driver, TCP/IP and DNS service, `std` over UniOS system calls, HTTP/1.1 server, web framework, site over HTTP on a local VM | Site serves from a local VM; 24 h of network fuzzing survived |
 | U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store with the S-9 guarantees, TLS 1.3 subset on `std.crypto`, ACME client for the certificate, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable over HTTPS for 30 days with recorded uptime |
 | U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator and QPU device models, model-serving service | Own specification, outside the language roadmap |
 
-The proof of concept (U-0 to U-3) is the UnioS 0.1 milestone and is announced on the site it serves. U-0 fixes the base-system inventory per release and the administration acceptance scenarios. U-2 must pass the local scenarios for site services. Before public deployment, U-3 must also pass them over authenticated SSH with a standard client, including permission denial and recovery after a disconnected request, and demonstrate the site's update and recovery path. These requirements apply to both the CLI and agent workflows described in `docs/os.md`. The minimal management CLI precedes the general-purpose shell and application package manager in U-4. The draft estimates must be reassessed in U-0 against this scope.
+The proof of concept (U-0 to U-3) is the UniOS 0.1 milestone and is announced on the site it serves. U-0 fixes the base-system inventory per release and the administration acceptance scenarios. U-2 must pass the local scenarios for site services. Before public deployment, U-3 must also pass them over authenticated SSH with a standard client, including permission denial and recovery after a disconnected request, and demonstrate the site's update and recovery path. These requirements apply to both the CLI and agent workflows described in `docs/os.md`. The minimal management CLI precedes the general-purpose shell and application package manager in U-4. The draft estimates must be reassessed in U-0 against this scope.
 
 ### 9.2 What the language owes the track
 
 Already planned: the `core`, `alloc`, and `std` layers and `unio check --profile=core` in 0.1; task-based concurrency and `std.net` as interfaces without POSIX assumptions in 0.2; the `system` profile, the memory model, and the freestanding prototype in stage 4 and release 0.5. The following consequences are recorded here so that they are not lost:
 
-- `std` has one interface and two backends, a host operating system and UnioS; the specification test corpus and the reference utilities must run on both.
+- `std` has one interface and two backends, a host operating system and UniOS; the specification test corpus and the reference utilities must run on both.
 - An HTTPS server in Unio needs cryptography, which the roadmap did not contain: `std.crypto` (hashes, authenticated encryption, key exchange, signatures for certificates) with constant-time primitives in reviewed `unsafe module` files (S-7, R-5) that allocate nothing and do not touch the GC, and a cryptographically secure random source, kept separate from the fast generator of `std.random`. This is new work for release 0.2, where the HTTP server is, and goes through an RFC.
-- The networking RFC applies `docs/cryptography.md`: ML-KEM hybrid key establishment, post-quantum identity authentication, versioned algorithm profiles, and explicit compatibility endpoints. UnioS U-0 defines trust enrollment and recovery; U-3 must pass OS-7 for transport and image/update signatures. A public HTTPS/ACME compatibility endpoint cannot establish strict-profile readiness. Account for key, signature, and message sizes in the resource estimates.
+- The networking RFC applies `docs/cryptography.md`: ML-KEM hybrid key establishment, post-quantum identity authentication, versioned algorithm profiles, and explicit compatibility endpoints. UniOS U-0 defines trust enrollment and recovery; U-3 must pass OS-7 for transport and image/update signatures. A public HTTPS/ACME compatibility endpoint cannot establish strict-profile readiness. Account for key, signature, and message sizes in the resource estimates.
 - The sandbox requirements (SB-1 onward) are stated so that a kernel capability model satisfies them without a host sandbox.
 
 Any further need the track discovers goes to the language as an RFC.
@@ -245,11 +245,11 @@ Any further need the track discovers goes to the language as an RFC.
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| UnioS pulls engineers from the language before 0.5 is stable | high | Separate team; U-1 starts only when the 0.5 prototype kernel boots |
+| UniOS pulls engineers from the language before 0.5 is stable | high | Separate team; U-1 starts only when the 0.5 prototype kernel boots |
 | TLS written from scratch has protocol defects | medium | TLS 1.3 with explicitly selected profiles under `docs/cryptography.md`, RFC test vectors, interoperability with three existing clients, external review before public exposure |
-| `std` over UnioS diverges from `std` over Linux | medium | One interface, two backends, one test corpus |
+| `std` over UniOS diverges from `std` over Linux | medium | One interface, two backends, one test corpus |
 | "AI in the kernel" remains a slogan | medium | U-4 ships a measurable model-serving service with memory and latency visible in the profiler |
-| Expectation that UnioS runs on quantum hardware | medium | A QPU is a coprocessor device model; stated plainly in `docs/os.md` |
+| Expectation that UniOS runs on quantum hardware | medium | A QPU is a coprocessor device model; stated plainly in `docs/os.md` |
 | Timing side channels in cryptography written in Unio | medium | Constant-time primitives in reviewed `unsafe module` files without allocation or GC; statistical timing tests in CI; external review before public exposure |
 
 ## 10. Immediate actions
@@ -258,4 +258,21 @@ Any further need the track discovers goes to the language as an RFC.
 2. Fix the EBNF grammar (`spec/grammar.ebnf`) and a small set of reference programs (`spec/tests/`) checked against it automatically.
 3. Create the repository layout of section 2 and CI with document formatting checks and the grammar check.
 4. The ten reference utilities of requirements section 9.1 are written in Unio with their tests (`examples/README.md`); they grow with the language.
-5. Keep the `std` interface free of host assumptions so the UnioS backend of section 9.2 stays possible; record it in the standard library review checklist.
+5. Keep the `std` interface free of host assumptions so the UniOS backend of section 9.2 stays possible; record it in the standard library review checklist.
+
+## 11. Acceptance of comparative-review findings
+
+Changes from the initial 0.1 draft: [RFC 0001](rfcs/0001-language-contracts.md) is accepted; the [contracts](language-contracts.md) are mandatory at these gates. This is work within the existing stages; estimates must be reassessed against its scope.
+
+| Stage | Additional deliverable and acceptance |
+|---|---|
+| 0–1 | Named-parameter/function-shape grammar, positive/negative corpus, RFC and synchronized localization |
+| 2 | E0040–E0048: labels, exclusivity, required results, implementation ownership, Float, JSON privacy, Range migration and packages. Callback effects; SCC hashes and distinct target/toolchain keys |
+| 3 | Execute all new test blocks; evaluation/laziness/defaults, key-call counts, NaN, Unicode, JSON boundaries, streaming EOF/errors/release, property shrinking. REPL with ordinary semantics and sandbox |
+| 4 | Same semantic scenarios in native code on four platforms; bounded streaming memory; core-only Range; actual descriptor and Windows/UNC tests |
+| 5 | Strict decoding and explicit Unicode APIs; property-test JSON replay; locked install versus update, dependency conflicts, API compatibility; documented domain wrappers |
+| 6 | Expected types for incomplete code, revision-bound fixes and rechecking after application; executable documentation examples |
+| 0.2 / UniOS | Owned task scopes, cancellation/cleanup, bounded queues, restart budgets/process-isolated supervision; parameterized database queries; local and SSH scenarios |
+| 0.3 / 0.5 | Typed compute kernels and buffers; ABI/layout/operation costs and cross-target tests |
+
+Accepting the document and passing static scripts does not complete stage 2 or 3. The delivery table in the contracts identifies mechanisms that are still design-only. Multi-statement lambdas, general yield, dimensional algebra and dynamic downcasts are outside this change.

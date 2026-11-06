@@ -1,0 +1,19 @@
+function connect(host as Text, named port as Int = 8080) returns Text:
+    return "{host}:{port}"
+
+function apply(callback as Function[(Text, named port as Int) -> Text]) returns Text:
+    return callback("localhost", port = 8080)
+
+function ordinary(named as Int) returns Int:
+    return named
+
+function named_callback(named transform_only as Function[(Int) -> Int]) returns Int:
+    return transform_only(3)
+
+test "named is contextual and function values keep labels":
+    assert connect("localhost", port = 9090) == "localhost:9090"
+    assert apply(connect) == "localhost:8080"
+    assert ordinary(3) == 3
+    assert named_callback(transform_only = function (value as Int) returns Int: value + 1) == 4
+    let named_lambda as Function[(named value as Int) -> Int] = function (named value as Int) returns Int: value
+    assert named_lambda(value = 7) == 7

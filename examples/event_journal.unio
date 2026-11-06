@@ -25,11 +25,11 @@ import std.json as json
 let AUTONOMY_SECONDS as Int = 72 * 60 * 60
 
 struct Event:
-    sequence as Int
-    time as Int
-    device as Text
-    kind as Text
-    var sent as Bool = false
+    public sequence as Int
+    public time as Int
+    public device as Text
+    public kind as Text
+    public var sent as Bool = false
 
 enum Command:
     Pending(journal as Path)

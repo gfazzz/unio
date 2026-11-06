@@ -1,10 +1,17 @@
-## The alloc prelude: functions that need an allocator.
+## Explicit materialization belongs to alloc; range itself belongs to core.
 
-## The integers from start up to, but not including, end.
-public function range(start as Int, end as Int) returns List[Int]:
-    var numbers as List[Int] = []
-    var current = start
-    while current < end:
-        numbers.append(current)
-        current = current + 1
-    return numbers
+extend Range:
+    ## Allocates a list containing every integer of the range.
+    public function to_list(self) returns List[Int]:
+        var numbers as List[Int] = []
+        var cursor = self.iterator()
+        while true:
+            match cursor.next():
+                case some(value):
+                    numbers.append(value)
+                case none:
+                    return numbers
+
+test "range materialization is explicit":
+    assert range(2, 5).to_list() == [2, 3, 4]
+    assert range(5, 2).to_list() == []

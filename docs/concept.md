@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.12. Changes from 0.11: post-quantum cryptography policy for distribution, connections, and UnioS (section 6; `docs/cryptography.md`).
+Version: 0.13. Changes from 0.12: accepted comparative findings, precise contracts and RFC 0001 (`docs/language-contracts.md`).
+
+Changes from 0.11: post-quantum cryptography policy for distribution, connections, and UniOS (section 6; `docs/cryptography.md`).
 
 Changes from 0.10: allocator lifetimes in the `system` profile (section 8.1).
 
@@ -105,7 +107,7 @@ function log(message as Text):        # no returns: returns nothing
 ```
 
 - Parameters are always annotated with a type. The result type is always stated when a function returns something. Only local value types are inferred.
-- Arguments are passed positionally or by name: `connect(host, port = 8080)`. Default values are allowed only for trailing parameters.
+- Arguments are passed positionally or by name: `connect(host, port = 8080)`. `named port as Int` requires a label at the call. Ordinary parameters precede named-only ones; defaults trail within each group and are evaluated per call (L-27, L-28).
 - Functions are first-class values. Function type: `Function[(Int, Text) -> Bool]`. Anonymous function: `function (x as Int) returns Int: x * 2`, single-line form.
 
 ### 2.4 Text and operators
@@ -115,7 +117,7 @@ function log(message as Text):        # no returns: returns nothing
 - Arithmetic: `+ - * / %` and `**`. `/` on `Int` gives `Int` with truncation; on `Float` gives `Float`. `Int` overflow is a fault (see 3.3), not silent wraparound.
 - Comparisons `== != < <= > >=`; logic `and or not`. Logical operators are words so code reads as text.
 - Membership: `item in collection`, which calls `collection.contains(item)`.
-- Operators are bound to standard interfaces: `+` to `Add`, `-` to `Subtract`, `*` to `Multiply`, `/` to `Divide`, `==` to `Equal`, `<` and the other comparisons to `Order`. Built-in numbers and `Text` implement them. A user-defined type gets an operator only through an explicit declaration `extend Money with Add`; there are no hidden implementations and no implicit conversions. Operators cannot be redefined for types that already implement them.
+- Operators are bound to standard interfaces: `+` to `Add`, `-` to `Subtract`, `*` to `Multiply`, `/` to `Divide`, `==` to `Equal`, `<` and the other comparisons to `Order`. `Int` and `Text` implement the corresponding interfaces; IEEE Float comparisons are intrinsic and separate from total `Order` (L-32). A user-defined type gets an operator only through an explicit declaration `extend Money with Add`; there are no hidden implementations and no implicit conversions. Operators cannot be redefined for types that already implement them.
 
 ### 2.5 Control flow
 
@@ -211,7 +213,7 @@ Enum variants are written `Command.Add(...)`. The short form `Add(...)` is allow
 Equality:
 
 - `struct` and `enum` compare by content when all fields implement `Equal`; the implementation is derived automatically and may be replaced by an explicit one.
-- `Float` implements `Equal` and `Order` per IEEE 754: `nan == nan` is `false`, and comparisons with `nan` are `false`. `Float` does not implement `Hash`, so it cannot be a `Map` key, a `Set` element, or a `match` pattern. For sorting and keys there is `float.total_order()`; for checks, `float.is_nan()`.
+- `Float` implements `Equal` and intrinsic partial comparisons per IEEE 754: `nan == nan` is false and ordered comparisons with NaN are false. It has neither `Order` nor `Hash`. `total_order()` returns `OrderedFloat` with consistent `Equal`, `Order`, `Hash`: both zeros equal, all NaNs equal and last. See L-32 and RFC 0001.
 - Resources (section 4) do not implement `Equal`: `==` on them is a compile error. Identity is checked with the function `is_same(a, b)`. This keeps a reader from confusing comparison of file contents with comparison of handles.
 - `Decimal` (exact decimal arithmetic for money) is not a built-in type but a struct in `std.decimal` that implements `Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, and `Hash`. It is created explicitly: `Decimal("19.99")`; the core has no literal for it. This keeps the core vocabulary small while preserving the familiar notation `price * quantity`.
 
@@ -395,7 +397,7 @@ What an AI agent gets from the tooling:
 3. **Check without build**: `unio check` fast enough for the loop "generate, check, fix".
 4. **One style**: `unio fmt` makes generated code indistinguishable from hand-written code, so review looks at meaning, not layout.
 5. **Tests next to code, written first**: `test "description":` blocks in the same file, run with `unio test --json`. A test that does not compile yet is reported as a failing test, so an agent can write the test before the function (section 1.2).
-6. **Content hashes**: `unio symbol` reports for every function and type a hash of its normalized declaration and body together with the hashes of everything it references. An agent can name the exact version of a function it read or changed, and the build and test cache uses the same key. Source code keeps ordinary names; the language does not depend on hashes.
+6. **Content hashes**: `unio symbol` reports for every function and type a hash of its normalized declaration and body together with the hashes of everything it references. An agent can name the exact version of a function it read or changed, and that hash contributes to the composite cache keys of C-11b. Source code keeps ordinary names; the language does not depend on hashes.
 
 What is required from the AI: describe intent in documentation comments, express it as tests before writing the code, and change the code until the tests pass; the code stays unambiguous, and the tests show the reviewer what was intended.
 
@@ -482,6 +484,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Implicit context parameter | No. The allocator, permissions, and logging are passed or derived visibly |
 | Content-addressed code | As a tool feature: `unio symbol` reports content hashes used by the cache and by agents; no hashes in source or semantics |
 | Ownership and borrowing | No. GC plus `Resource`; the only ownership analysis is the `using` escape check |
+| Comparative-review contracts | RFC 0001; `docs/language-contracts.md`, L-27–L-32, S-13–S-20, T-12–T-15, C-11b |
 
 ## 11. Rationale for the latest decisions
 
@@ -505,3 +508,5 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 16. **Visibility inside types.** A type that keeps an invariant, such as an atomic file that must not be committed twice, needs fields that only its own module can touch; that is the default. Errors and variants are the opposite case: their fields exist to be read by whoever handles them, so requiring `public` on each would only add noise. Functions of a type give named constructors without a separate constructor syntax.
 17. **No classes.** Inheritance of implementation spreads the behavior of a type over a chain of parents and overrides, which is exactly what a reader of unfamiliar code cannot follow; it also assumes shared mutable objects, which the value model of section 2.7 excludes. What classes are used for is kept: methods through `extend`, encapsulation through private fields and functions of a type, open polymorphism through interface values, closed polymorphism through `enum`, and shared code through default methods. Object graphs with identity, such as observers or caches shared by several parts of a program, are represented by identifiers and maps in 0.1; an explicit shared mutable type belongs with the concurrency model of release 0.2, where sharing has to be designed anyway.
 18. **Borrow what strengthens the principle, decline the rest.** Zig's errors and Gleam's diagnostics are already the direction of the language; explicit allocators and content hashes add visibility without syntax; `comptime`, an implicit context, macros, and borrowing each add a second way to write or read code, so they are declined even where they are powerful. `docs/influences.md` keeps the reasoning.
+
+19. **Precise contracts instead of implicit assumptions.** [RFC 0001](rfcs/0001-language-contracts.md) and the [normative contracts](language-contracts.md) adopt findings from Python/Ruby/JS/TS, Swift/Rust/Go, C#/Kotlin/Java and OTP: evaluation, implementation ownership, required results, named parameters, streams, JSON boundaries, Unicode, reproducible tests and caches. Later releases receive explicit concurrency/supervision criteria. This refines the design; the delivery table separates sources from future implementation.

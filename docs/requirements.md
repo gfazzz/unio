@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.11 (draft). Changes from 0.10: post-quantum distribution and cryptography policy (T-8a, R-6a to R-6c; `docs/cryptography.md`).
+Specification version: 0.12 (draft). Changes from 0.11: L-27–L-32, C-11b, S-13–S-20, T-12–T-15 and RFC 0001; refined L-22 and S-5.
+
+Changes from 0.10: post-quantum distribution and cryptography policy (T-8a, R-6a to R-6c; `docs/cryptography.md`).
 
 Basis: `README.md`, `docs/concept.md`. Work plan: `docs/plan.md`. Russian localization: `docs/ru/requirements.md`.
 
@@ -55,7 +57,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - Library and runtime layers `core`, `alloc`, `std` and the check of a package against the `core` layer (S-11, S-12, C-21).
 - Sandbox: enforcement of manifest permissions and of an external policy by operating-system mechanisms (section 4.6).
 - Standard library for CLI (section 5).
-- Tools: `unio build`, `run`, `check`, `fmt`, `test`, `add`, `remove`, `update`, `doc`, `symbol`, `explain`.
+- Tools: `unio build`, `run`, `check`, `fmt`, `test`, `add`, `remove`, `update`, `install`, `repl`, `api-diff`, `doc`, `symbol`, `explain`.
 - Package manager with manifest, lock file, and registry.
 - Language server (LSP) and a VS Code extension.
 - Documentation: language reference, guide, standard library reference.
@@ -70,7 +72,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - Self-hosted compiler written in Unio.
 - Profiler (ships in 0.2; 0.1 only defines the event format).
 - System programming: the `system` profile, memory without a GC, control of data representation, pointers and assembly, interrupts, atomic operations and a memory model, constraints on effects (concept, section 8.1; a later release).
-- UnioS, the operating system written in Unio, and its proof of concept (`docs/os.md`; a separate track with release 0.5).
+- UniOS, the operating system written in Unio, and its proof of concept (`docs/os.md`; a separate track with release 0.5).
 
 ## 3. Language requirements
 
@@ -78,6 +80,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - L-1. A file is UTF-8 with the `.unio` extension; blocks by 4-space indentation; tabs and mixed indentation are errors.
 - L-2. The keyword set is fixed and published in the grammar (`spec/grammar.ebnf`, section L); adding a keyword after 0.1 requires an RFC. The words `error`, `external`, `module`, `test`, and `unsafe` are contextual keywords: they have their meaning only at the start of a top-level item or a declaration and are ordinary names everywhere else.
+  Contextual `named` marks a named-only parameter in a signature or function shape (RFC 0001, L-28).
 - L-2a. `pass` is the statement that does nothing; it is the only way to write a block with no effect, because an empty block is a syntax error.
 - L-3. Comments `#`, documentation comments `##`. A documentation comment attaches to the next declaration and is available to `unio doc` and `unio symbol`.
 
@@ -122,7 +125,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 3.6 Modules and visibility
 
-- L-22. A module is a file; a package is a directory with `unio.toml`. Import: `import a.b`, `import a.b as c`, `from a.b import x, y`. A name that starts with `std.` refers to the standard library; any other name refers to a module of the same package, `a.b` to the file `a/b.unio` relative to the package root.
+- L-22. A module is a file; a package is a directory with `unio.toml`. Import: `import a.b`, `import a.b as c`, `from a.b import x, y`. A name that starts with `std.` refers to the standard library; `deps.<alias>.<module>` refers to a manifest/lock dependency under T-14; other names refer to modules of the same package, `a.b` to the file `a/b.unio` relative to the package root.
 - L-23. Everything is private by default; `public` exports. Private means visible only in the same module (file).
 - L-23a. A struct field is private unless it is marked `public` (`public var balance as Int`). A struct with at least one private field can be constructed and changed through that field only in its module; other modules use its public functions.
 - L-23b. The fields of an `error` and of `enum` variants are visible wherever their type is visible: they are data that callers must handle in `on` and `match`. `public` on them is redundant and the formatter removes it.
@@ -134,6 +137,16 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - L-25. A top-level `test "description":` block. `assert`, `assert_fail`, and `expect_fault` are available. Tests are excluded from `build` output.
 - L-26. A build profile chooses the available library layers (S-11): `application` has `core`, `alloc`, and `std`; the `system` profile is defined by a later release. A profile only removes capabilities: a construct means the same in every profile, and a program that uses an unavailable layer is rejected with the chain of calls that leads to it.
+
+
+### 3.8 Refined contracts
+
+- L-27. Evaluation order, short circuit and fresh per-call defaults: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
+- L-28. Named-only parameters and function shapes: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
+- L-29. Exclusive mutable access and value snapshots: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
+- L-30. Required use of Result and process.Output with explicit discard: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
+- L-31. Interface implementation ownership and nonoverlap: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
+- L-32. Total Order, IEEE Float and OrderedFloat: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
 
 ## 4. Compiler and runtime requirements
 
@@ -156,7 +169,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 4.3 Symbol context
 
 - C-11. `unio symbol <full name>` returns (text and JSON): signature, documentation, declaration site, usage list, and for functions the error set, derived effects (`files`, `network`, `process`, `env`, `allocates`), the lowest library layer the function needs, and the list of called functions.
-- C-11a. `unio symbol --json` reports for every function and type a content hash. The hash is computed over the canonical AST of the declaration after `unio fmt` normalization, with comments removed, together with the content hashes of every declaration it references. Formatting, comments, and the order of declarations in a module do not change it; names of the declaration, its parameters, fields, and local variables are part of it, so a rename changes the hash. The hash carries a version of the hashing scheme, so a change to normalization is detectable and never silently invalidates a cache. The incremental build and test cache is keyed by this hash, and `unio test --json` reports it for every test. Source code and the language do not use hashes.
+- C-11a. `unio symbol --json` reports for every function and type a content hash. The hash is computed over the canonical AST of the declaration after `unio fmt` normalization, with comments removed, together with the content hashes of every declaration it references. Formatting, comments, and the order of declarations in a module do not change it; names of the declaration, its parameters, fields, and local variables are part of it, so a rename changes the hash. The hash carries a version of the hashing scheme, so a change to normalization is detectable and never silently invalidates a cache. The incremental build and test cache includes this hash in the composite keys of C-11b, and `unio test --json` reports it for every test. Source code and the language do not use hashes.
+- C-11b. Recursive symbol, artifact and test-result hashes are distinct; full keys and external inputs follow [language-contracts.md](language-contracts.md), section 6.
 - C-12. `unio outline <file>` returns the file's declarations with signatures.
 
 ### 4.4 Runtime
@@ -194,12 +208,12 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ## 5. Standard library requirements
 
-- S-1. Modules: `std.text`, `std.collections`, `std.math`, `std.decimal`, `std.files`, `std.path`, `std.env`, `std.args`, `std.process`, `std.json`, `std.time`, `std.random`, `std.log`, `std.test`.
+- S-1. Modules: `std.text`, `std.collections`, `std.math`, `std.decimal`, `std.files`, `std.path`, `std.env`, `std.args`, `std.process`, `std.json`, `std.time`, `std.random`, `std.log`, `std.test`, `std.errors`.
 - S-1a. `std.decimal.Decimal` provides exact decimal arithmetic, implements all operator interfaces and `Hash`; constructed from text and `Int`; conversion from `Float` is explicit only, with a stated rounding mode.
 - S-2. Every function that can fail declares concrete error types; `fails with Error` is forbidden in the standard library.
 - S-3. Every module is documented; every public function has an example.
 - S-4. `std.args`: positional arguments, flags, defaults, automatic help.
-- S-5. `std.json`: parse to a value, encode and decode structs from their declaration, without annotations.
+- S-5. `std.json`: parse to a value, convert public transport structs from declarations without annotations; never bypass private fields. Strict rules and limits are in S-17.
 - S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
 - S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
 - S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6). A function that reports absence instead of an error (`files.exists`, `env.get`) reports a blocked object as absent.
@@ -216,6 +230,15 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-11. The standard library is divided into layers: `core` needs neither an allocator, nor a GC, nor an operating system; `alloc` needs an allocator, in 0.1 the GC heap; `std` needs the operating system. A module may use only its own layer and the layers before it. The layer is given by the directory (`stdlib/core/`, `stdlib/alloc/`, `stdlib/std/`) and is not part of the module name. Checked by `spec/check_api.py` in stage 0 and by the compiler from stage 2.
 - S-12. The runtime is divided the same way: the `core` runtime (program entry, fault reporting through a hook, checked arithmetic) makes no calls to the operating system; the allocator and the GC form the `alloc` runtime; files, processes, standard output, and the sandbox form the `std` runtime. The `core` runtime reaches the others only through hooks that the `application` profile provides.
 
+- S-13. Collection order/cost and once-per-element sorting keys: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-14. Concrete callback errors and effect derivation: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-15. Compact Range and repeatable sources/single-pass cursors: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-16. Bounded stream reading and resource scopes: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-17. Strict JSON and private constructor invariants: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-18. Unicode scalars, explicit normalization and index cost: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-19. Lexical paths and separate filesystem resolution: [language-contracts.md](language-contracts.md), sections 3–4.
+- S-20. Stable error codes and structured context: [language-contracts.md](language-contracts.md), sections 3–4.
+
 ## 6. Tooling requirements
 
 ### 6.1 Commands
@@ -229,6 +252,9 @@ Release 0.1 is intended for writing command-line utilities and automation script
 | `unio fmt` | Format | `--check` for CI |
 | `unio test` | Run tests | `--json`, name filter, `--policy` |
 | `unio add/remove/update` | Manage dependencies | version, `--unsafe-ok` |
+| `unio install` | Install exact locked dependencies | `--offline` |
+| `unio repl` | Checked interactive session after stage 3 | `--policy` |
+| `unio api-diff` | Compare public APIs of two package versions | `--json` |
 | `unio doc` | Build package documentation | `--open` |
 | `unio symbol`, `unio outline`, `unio explain` | Context for people and AI | `--json` |
 
@@ -265,6 +291,13 @@ env = ["TODO_FILE", "HOME"]
 - T-10. Language server over LSP: diagnostics, go to definition, type hints, completion, formatting, rename.
 - T-11. VS Code extension with highlighting and test running.
 
+### 6.6 Additional tool contracts
+
+- T-12. Deterministic property tests, shrinking and replay: [language-contracts.md](language-contracts.md), sections 5–6.
+- T-13. REPL with ordinary checks, documentation tests and revision-bound fixes: [language-contracts.md](language-contracts.md), sections 5–6.
+- T-14. Dependency identity, resolution and exact locked installation: [language-contracts.md](language-contracts.md), sections 5–6.
+- T-15. Public API compatibility checking and migrations: [language-contracts.md](language-contracts.md), sections 5–6.
+
 ## 7. Non-functional requirements
 
 ### 7.1 Performance
@@ -293,7 +326,7 @@ Universal C-level speed is not promised and is not measured as a requirement.
 - R-5. All `external function` code in the standard library is reviewed by two people and tested with memory sanitizers.
 - R-6. The release build is reproducible, artifacts are signed, an SBOM is published.
 - R-6a. Release artifacts and their authenticated manifests require ML-DSA-65 signatures and an independently provisioned post-quantum trust anchor under the cryptography policy. Verification includes payload digests, version and purpose binding, key lifecycle, and rollback protection. A classical compatibility signature must not replace a required post-quantum signature.
-- R-6b. Project-controlled cryptographic components follow `docs/cryptography.md` as they are introduced. The 0.1 release and package tooling implement its signature policy before publication; 0.2 networking and UnioS additionally implement the specified transport and identity profiles. Compatibility exceptions are explicit, scoped, observable, and never authorize weaker artifact verification. This requirement does not add networking or a public cryptography API to application code in 0.1.
+- R-6b. Project-controlled cryptographic components follow `docs/cryptography.md` as they are introduced. The 0.1 release and package tooling implement its signature policy before publication; 0.2 networking and UniOS additionally implement the specified transport and identity profiles. Compatibility exceptions are explicit, scoped, observable, and never authorize weaker artifact verification. This requirement does not add networking or a public cryptography API to application code in 0.1.
 - R-6c. A component claims post-quantum compliance only after the inventory, standard vectors, independent interoperability, downgrade and tampering tests, key lifecycle tests, resource measurements, and security review in the policy pass. Missing protocol support or a failed check blocks the affected claim; no fallback may disable verification.
 - R-7. The compiler and package manager do not execute dependency code during a build.
 - R-7a. The sandbox (section 4.6) passes the SB-8 and SB-15 suites on every platform; a release with a failing test of either suite is not published.

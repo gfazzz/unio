@@ -10,11 +10,16 @@ public interface Display:
 public interface Error:
     function to_text(self) returns Text
 
+    ## Stable fully qualified error identifier, generated with to_text for every error declaration.
+    ## Independent of the language of messages; not a dynamic cast or a recovery mechanism.
+    function diagnostic_code(self) returns Text
+
 ## Equality used by == and !=. Derived for structs and enums whose fields implement it.
 public interface Equal:
     function equals(self, other as Self) returns Bool
 
-## Order used by <, <=, > and >=: negative if self comes first, zero if equal, positive otherwise.
+## Total order: negative if self comes first, zero if equal, positive otherwise.
+## Antisymmetric and transitive, consistent with Equal. IEEE Float comparisons are separate.
 public interface Order:
     function compare(self, other as Self) returns Int
 
@@ -68,3 +73,49 @@ public function min[T with Order](a as T, b as T) returns T:
 ## The larger of two values; a when they are equal.
 public function max[T with Order](a as T, b as T) returns T:
     return b if b > a else a
+
+## A single-pass cursor. none is permanent; next never produces another item after it.
+public interface Iterator[T]:
+    function next(var self) returns Option[T]
+
+## A compact half-open integer range. Construction and iteration need no allocation.
+public struct Range:
+    start as Int
+    end as Int
+
+public struct RangeIterator:
+    var current as Int
+    end as Int
+
+## start >= end gives an empty range; no subtraction of the bounds is required.
+public function range(start as Int, end as Int) returns Range:
+    return Range(start = start, end = end)
+
+extend Range:
+    ## Each traversal has an independent cursor.
+    public function iterator(self) returns RangeIterator:
+        return RangeIterator(current = self.start, end = self.end)
+
+extend RangeIterator with Iterator[Int]:
+    function next(var self) returns Option[Int]:
+        if self.current >= self.end:
+            return none
+        let value = self.current
+        self.current = self.current + 1
+        return some(value)
+
+test "range cursors are independent and exhaustion is permanent":
+    var first = range(3, 5).iterator()
+    var second = range(3, 5).iterator()
+    assert first.next() == some(3)
+    assert first.next() == some(4)
+    assert first.next() == none
+    assert first.next() == none
+    assert second.next() == some(3)
+
+test "range reaches the largest endpoint without overflow":
+    var cursor = range(MAXIMUM_INT - 1, MAXIMUM_INT).iterator()
+    assert cursor.next() == some(MAXIMUM_INT - 1)
+    assert cursor.next() == none
+    var empty = range(MAXIMUM_INT, MINIMUM_INT).iterator()
+    assert empty.next() == none

@@ -1,4 +1,5 @@
 (* Unio core grammar, version 0.1-draft.
+   Changes from the initial draft: named parameters and function-shape labels (RFC 0001).
 
    Notation (ISO 14977 style):
      =  definition      ,  concatenation is written by juxtaposition
@@ -63,12 +64,12 @@ interpolation   = "{" expression "}" ;     (* may contain nested TEXT *)
 
    Contextual keywords (ordinary names except where a rule uses them):
 
-     error external module test unsafe
+     error external module named test unsafe
 
    A contextual keyword is lexed as NAME; a terminal such as "test" in a
-   rule matches a NAME with that spelling. All their positions are at the
-   top level or start a declaration, where no expression can stand, so
-   they stay usable as names of fields, variables and parameters.
+   rule matches a NAME with that spelling. "named" marks a parameter or a
+   function-shape parameter; "named as Int" still declares an ordinary
+   parameter called named. Other contextual positions start declarations.
 
    Reserved for later releases (using them is E0032): uses
 
@@ -103,7 +104,11 @@ generic_params  = "[" generic_param { "," generic_param } "]" ;
 generic_param   = NAME [ "with" type { "and" type } ] ;
 params          = param { "," param } [ "," ] ;
 param           = [ "var" ] "self"
+                | "named" NAME "as" type [ "=" expression ]
                 | [ "var" ] NAME "as" type [ "=" expression ] ;
+                  (* Named-only parameters follow positional parameters. Defaults
+                     trail within each group. Binding is checked by the compiler.
+                     RFC 0001; a named-only parameter cannot be var in 0.1. *)
 
 struct_decl     = "struct" NAME [ generic_params ] ( ":" field_block | NEWLINE ) ;
 error_decl      = "error" NAME ( ":" field_block | NEWLINE ) ;
@@ -259,6 +264,7 @@ tuple_pattern   = "(" pattern "," [ pattern { "," pattern } ] ")" ;
 type            = type_name [ "[" type_argument { "," type_argument } "]" ] ;
 type_name       = NAME { "." NAME } ;
 type_argument   = type | function_shape ;
-function_shape  = "(" [ type { "," type } ] ")" [ "->" type ]
+function_shape  = "(" [ shape_parameter { "," shape_parameter } ] ")" [ "->" type ]
                   [ "fails" "with" type_list ] ;
+shape_parameter = "named" NAME "as" type | type ;
 type_list       = type { "," type } ;

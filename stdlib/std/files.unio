@@ -34,6 +34,132 @@ public external function is_directory(path as Path) returns Bool
 ## The whole file as text; kind InvalidData if it is not UTF-8. Permission: files.read.
 public external function read_text(path as Path) returns Text fails with IoError
 
+enum ReaderState:
+    Open
+    End
+    Failed(problem as IoError)
+    Closed
+
+## An owned descriptor with private state; created by open_reader inside using.
+public struct FileReader:
+    path as Path
+    descriptor as Int
+    var state as ReaderState = ReaderState.Open
+    var read_step as Function[(Int, Path, Int) -> ReadStep] = system_read_chunk
+    close_step as Function[(Int) fails with IoError] = system_close
+
+## A native read may deliver bytes and a terminal status together; never lose those bytes.
+struct ReadStep:
+    data as Bytes
+    end as Bool
+    problem as Option[IoError] = none
+
+## Opens a byte stream. Permission: files.read. No file content is read ahead of the first read.
+public function open_reader(path as Path) returns FileReader fails with IoError:
+    let descriptor = try system_open_read(path)
+    return FileReader(path = path, descriptor = descriptor)
+
+extend FileReader with Resource:
+    function release(var self):
+        match self.state:
+            case ReaderState.Closed:
+                return
+            case _:
+                pass
+        self.state = ReaderState.Closed
+        let close = self.close_step
+        try:
+            try close(self.descriptor)
+        on IoError:
+            pass
+
+extend FileReader:
+    ## some(nonempty bytes) up to max_bytes, or permanent none at EOF. max_bytes must be positive;
+    ## otherwise InvalidData. Buffered bytes are returned before a pending error on the next call.
+    ## An error makes further reads return that error. Memory is O(max_bytes), independent of file size.
+    public function read_bytes(var self, named max_bytes as Int = 65536) returns Option[Bytes] fails with IoError:
+        match self.state:
+            case ReaderState.Failed(problem):
+                fail problem
+            case ReaderState.Closed:
+                fail IoError(path = self.path, kind = IoErrorKind.InvalidData, reason = "reader is closed")
+            case _:
+                pass
+        if max_bytes <= 0:
+            let problem = IoError(path = self.path, kind = IoErrorKind.InvalidData, reason = "max_bytes must be positive")
+            self.state = ReaderState.Failed(problem)
+            fail problem
+        match self.state:
+            case ReaderState.End:
+                return none
+            case _:
+                pass
+        let read = self.read_step
+        let step = read(self.descriptor, self.path, max_bytes)
+        assert step.data.length() <= max_bytes
+        assert not step.data.is_empty() or step.end or step.problem.is_some()
+        match step.problem:
+            case some(problem):
+                self.state = ReaderState.Failed(problem)
+            case none:
+                if step.end:
+                    self.state = ReaderState.End
+        if not step.data.is_empty():
+            return some(step.data)
+        match step.problem:
+            case some(problem):
+                fail problem
+            case none:
+                return none
+
+external function system_open_read(path as Path) returns Int fails with IoError
+
+## Blocks until data, EOF or error; retries interrupted reads. data.length() <= max_bytes.
+external function system_read_chunk(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep
+
+function end_read(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
+    return ReadStep(data = Bytes(), end = true)
+
+function failed_read(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
+    return ReadStep(data = Bytes(), end = false, problem = some(IoError(path = path, kind = IoErrorKind.Other, reason = "injected read failure")))
+
+function unexpected_read(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
+    assert_fail("terminal reader called the OS again")
+
+function no_close(descriptor as Int) fails with IoError:
+    pass
+
+test "EOF is permanent until release, without extra native reads":
+    using reader = FileReader(path = Path("test"), descriptor = 1, read_step = end_read, close_step = no_close):
+        try:
+            assert (try reader.read_bytes()) == none
+            reader.read_step = unexpected_read
+            assert (try reader.read_bytes()) == none
+        on IoError as e:
+            assert_fail(e.reason)
+
+test "a read failure is retained without retrying native I/O":
+    using reader = FileReader(path = Path("test"), descriptor = 1, read_step = failed_read, close_step = no_close):
+        for attempt in range(0, 2):
+            try:
+                let data = try reader.read_bytes()
+                assert_fail("expected injected error")
+            on IoError as e:
+                assert e.reason == "injected read failure"
+            reader.read_step = unexpected_read
+
+test "invalid read size fails before any native I/O":
+    using reader = FileReader(path = Path("test"), descriptor = 1, read_step = unexpected_read, close_step = no_close):
+        try:
+            let data = try reader.read_bytes(max_bytes = 0)
+            assert_fail("expected size error")
+        on IoError as e:
+            assert e.kind == IoErrorKind.InvalidData
+
+## Resolve an existing path through the filesystem, including links. Permission: files.read.
+## This is not an authorization token; sandbox enforcement still applies at the eventual open.
+public external function resolve(path as Path) returns Path fails with IoError
+
 ## The entries of a directory, sorted by name, without "." and "..". Permission: files.read.
 public external function list_directory(path as Path) returns List[Path] fails with IoError
 

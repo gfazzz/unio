@@ -52,7 +52,7 @@ Scenarios A and B fit the scope of 0.1: command-line programs over files and JSO
 | RC-10 | No long-running service: no wait, no timer, no orderly stop on a termination signal | B, D | The agent and the event core run for days and must stop without losing a write | 0.2, tasks |
 | RC-11 | No supervision: a failed task is not restarted by a stated strategy | D | The event core is planned in OTP for exactly this | RFC for 0.2, together with tasks |
 | RC-12 | No database access, and FFI is closed to user code (requirements, section 2.2) | E | The portal keeps its data in PostgreSQL | 0.2: the PostgreSQL protocol written in Unio over `std.net`, with SCRAM from `std.crypto`; to be decided when 0.2 is specified |
-| RC-13 | No HTTP server, routing, templates with escaping, sessions, or localization | E | The whole portal | 0.2 and the web framework of UnioS stage U-2 ([os.md](os.md)); one framework for both |
+| RC-13 | No HTTP server, routing, templates with escaping, sessions, or localization | E | The whole portal | 0.2 and the web framework of UniOS stage U-2 ([os.md](os.md)); one framework for both |
 | RC-14 | Untrusted text has the same type as any other text | F, E | Text of a site document must not reach an LLM prompt, a shell, SQL, or HTML without an explicit, visible conversion | RFC; candidate for 0.2 |
 | RC-15 | No signatures | A | The approval of a finding is a name today; it has to be a signature a third party can check | 0.2: `std.crypto` with the signatures of [cryptography.md](cryptography.md) |
 

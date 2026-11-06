@@ -12,9 +12,9 @@ import std.env
 from std.text import join
 
 struct Task:
-    id as Int
-    title as Text
-    var done as Bool = false
+    public id as Int
+    public title as Text
+    public var done as Bool = false
 
 enum Command:
     Add(title as Text)
@@ -48,7 +48,8 @@ function load_tasks(path as Path) returns List[Task] fails with StorageError:
         fail StorageError(path = path, reason = e.message)
 
 function save_tasks(path as Path, tasks as List[Task]) fails with StorageError:
-    let text = json.encode(tasks, pretty = true)
+    let text = try json.encode_checked(tasks, pretty = true) on EncodeError as e:
+        fail StorageError(path = path, reason = e.message)
     try files.write_text(path, text) on IoError as e:
         fail StorageError(path = path, reason = e.reason)
 

@@ -2,11 +2,11 @@
 
 Version: 0.1 (draft). Initial policy: post-quantum protection by default, with explicit compatibility boundaries. Russian localization: [docs/ru/cryptography.md](ru/cryptography.md).
 
-This policy refines [concept section 6](concept.md), requirements T-8a and R-6a to R-6c in [the 0.1 specification](requirements.md), and OS-7 in [UnioS](os.md). It is a design requirement, not a claim that cryptography is implemented or audited. It does not change language syntax or require quantum hardware.
+This policy refines [concept section 6](concept.md), requirements T-8a and R-6a to R-6c in [the 0.1 specification](requirements.md), and OS-7 in [UniOS](os.md). It is a design requirement, not a claim that cryptography is implemented or audited. It does not change language syntax or require quantum hardware.
 
 ## 1. Scope and threat model
 
-Protection covers recorded traffic that could be decrypted later by a quantum adversary, and future forgery of identities, packages, releases, updates, and trust metadata. It applies to project-controlled cryptographic interfaces and delivery paths as they are introduced: distribution in 0.1, networking in 0.2, and the UnioS track. External Git hosting and CI infrastructure have their own security properties; this policy does not certify them.
+Protection covers recorded traffic that could be decrypted later by a quantum adversary, and future forgery of identities, packages, releases, updates, and trust metadata. It applies to project-controlled cryptographic interfaces and delivery paths as they are introduced: distribution in 0.1, networking in 0.2, and the UniOS track. External Git hosting and CI infrastructure have their own security properties; this policy does not certify them.
 
 Post-quantum confidentiality and post-quantum authentication are separate properties. A connection is called fully post-quantum protected only when both hold, including the authentication chain to its configured trust anchor. TLS 1.3, SSH, HTTPS, a content hash, or a signed file alone establishes neither property.
 
@@ -52,7 +52,7 @@ Before a component claims compliance, its release evidence includes:
 5. Review of secret-dependent timing and memory access, compiler effects, key handling, and protocol composition; independent security review before public exposure. Timing tests alone are not proof of constant-time behavior.
 6. Measured key, signature, and message sizes; latency, memory, and denial-of-service limits on supported targets. Update resource estimates from measurements.
 
-The 0.1 distribution and package work must meet the signature requirements before publication; the 0.2 networking RFC must define strict and compatibility profiles; UnioS U-0 specifies trust provisioning and recovery, and U-3 verifies transport, administration, and update paths before public deployment. Acceptance failures remain blockers for the affected security claim, not grounds to disable verification.
+The 0.1 distribution and package work must meet the signature requirements before publication; the 0.2 networking RFC must define strict and compatibility profiles; UniOS U-0 specifies trust provisioning and recovery, and U-3 verifies transport, administration, and update paths before public deployment. Acceptance failures remain blockers for the affected security claim, not grounds to disable verification.
 
 ## 6. Standards
 
