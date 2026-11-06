@@ -32,14 +32,11 @@ error UsageError:
 ## Путь к файлу хранения: $TODO_FILE, иначе ~/.todo.json, а без домашнего каталога ./.todo.json.
 function storage_path() returns Path:
     match env.get("TODO_FILE"):
-        case some(value):
-            return Path(value)
-        case none:
-            return (env.home_dir() or Path(".")).join(".todo.json")
+        case some(value): return Path(value)
+        case none: return (env.home_dir() or Path(".")).join(".todo.json")
 
 function load_tasks(path as Path) returns List[Task] fails with StorageError:
-    if not files.exists(path):
-        return []
+    if not files.exists(path): return []
     let text = try files.read_text(path) on IoError as e:
         fail StorageError(path = path, reason = e.reason)
     let value = try json.parse(text) on ParseError as e:
@@ -55,23 +52,16 @@ function save_tasks(path as Path, tasks as List[Task]) fails with StorageError:
 
 function parse_command(arguments as List[Text]) returns Command fails with UsageError:
     match arguments:
-        case ["add", rest...] if not rest.is_empty():
-            return Add(title = join(rest, " "))
+        case ["add", rest...] if not rest.is_empty(): return Add(title = join(rest, " "))
         case ["done", id_text]:
-            match id_text.to_int():
-                case some(id):
-                    return Done(id = id)
-                case none:
-                    fail UsageError(message = "номер задачи должен быть числом: {id_text}")
-        case ["list"]:
-            return Show
-        case ["help"] | []:
-            return Help
-        case _:
-            fail UsageError(message = "неизвестная команда: {join(arguments, " ")}")
+            if id_text.to_int() is some(id): return Done(id = id)
+            fail UsageError(message = "номер задачи должен быть числом: {id_text}")
+        case ["list"]: return Show
+        case ["help"] | []: return Help
+        case _: fail UsageError(message = "неизвестная команда: {join(arguments, " ")}")
 
 function next_id(tasks as List[Task]) returns Int:
-    return (tasks.map(function (task as Task) returns Int: task.id).max() or 0) + 1
+    return (tasks.map(function (task): task.id).max() or 0) + 1
 
 function run(command as Command, path as Path) fails with StorageError, UsageError:
     var tasks = try load_tasks(path)
@@ -81,21 +71,18 @@ function run(command as Command, path as Path) fails with StorageError, UsageErr
             try save_tasks(path, tasks)
             print("Добавлено: {title}")
         case Done(id):
-            match tasks.find_index(function (task as Task) returns Bool: task.id == id):
+            match tasks.find_index(function (task): task.id == id):
                 case some(index):
                     tasks[index].done = true
                     try save_tasks(path, tasks)
                     print("Выполнено: {tasks[index].title}")
-                case none:
-                    fail UsageError(message = "нет задачи с номером {id}")
+                case none: fail UsageError(message = "нет задачи с номером {id}")
         case Show:
-            if tasks.is_empty():
-                print("Задач нет")
+            if tasks.is_empty(): print("Задач нет")
             for task in tasks:
                 let mark = "x" if task.done else " "
                 print("[{mark}] {task.id}. {task.title}")
-        case Help:
-            print("Команды: add <текст>, done <номер>, list, help")
+        case Help: print("Команды: add <текст>, done <номер>, list, help")
 
 public function main() returns Int:
     try:

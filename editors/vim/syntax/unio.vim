@@ -4,7 +4,7 @@ if exists("b:current_syntax")
 endif
 
 syn keyword unioControl if else for in while match case return fail try on using break continue pass assert
-syn keyword unioOperator and or not
+syn keyword unioOperator and or not is
 syn keyword unioStorage function struct enum interface extend let
 syn keyword unioModifier public var
 syn keyword unioKeyword as returns fails with import from

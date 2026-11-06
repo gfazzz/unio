@@ -1,6 +1,6 @@
 # What Unio takes from other languages, and what it declines
 
-Version: 0.2. Changes from 0.1: RFC 0001 and precise cache contracts. Status: decisions recorded in `docs/concept.md` 0.13 and `docs/requirements.md` 0.12. This document keeps the reasoning in one place so that the same proposals are not re-argued.
+Version: 0.3. Changes from 0.2: Ruby and Python brevity, RFC 0002. Changes from 0.1: RFC 0001 and precise cache contracts. Status: decisions recorded in `docs/concept.md` 0.14 and `docs/requirements.md` 0.13. This document keeps the reasoning in one place so that the same proposals are not re-argued.
 
 The test for every borrowing is the principle of the concept: clear code, explicit behavior, controlled resources. A feature is taken only if it strengthens readability, explicitness, verifiability before execution, or fitness for AI. A feature that is powerful but gives a second way to write the same thing is declined.
 
@@ -52,3 +52,14 @@ The test for every borrowing is the principle of the concept: clear code, explic
 ## 7. Accepted findings from the extended review
 
 Python: required labels and sorting keys; Ruby: a small complete collection API; JS/TS: task ownership and external-data validation; Swift/Rust: exclusive access and implementation coherence; Go/Unison: exact semantics, dependencies and caches; C#/Kotlin/Java/OTP: iteration, cancellation and supervision. Accepted in [RFC 0001](rfcs/0001-language-contracts.md), the [contracts](language-contracts.md), requirements L-27–L-32, C-11b, S-13–S-20, T-12–T-15 and plan §11. Concept 0.13, requirements 0.12. Earlier declined features stay declined; later features are explicitly release-bound.
+
+## 8. Ruby and Python: brevity
+
+| Idea | Decision | Where |
+|---|---|---|
+| Ruby blocks and short lambdas | Accepted in Unio form: a lambda keeps `function`, and its types come from the expected function type. A second lambda syntax (`{ \|x\| ... }`, `=>`) is declined. | RFC 0002, L-8a |
+| One-line bodies (`if x: return y` in Python) | Accepted for branches only, and the formatter decides the form, so each branch has one written form. | RFC 0002, T-1a |
+| Ruby 3 `case ... in` and Rust `if let` | Accepted as `expr is pattern` with names bound in the guarded branch; `match` stays the way to handle several variants. | RFC 0002, L-33 |
+| Implicit return, optional parentheses, `unless`, `until`, statement modifiers | Declined: several written forms for one meaning, and control flow that is easy to miss in review. | concept 1, rationale 20 |
+| `name: Text` instead of `name as Text` | Not proposed: the gain is smaller than the cost of changing every source and document. | RFC 0002, alternatives |
+

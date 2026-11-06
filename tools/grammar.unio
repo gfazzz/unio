@@ -435,6 +435,8 @@ extend Lexer:
 
     function logical_line(var self, var out as List[Token]) fails with LexError:
         var depth as List[Bracket] = []
+        var end_line = 0
+        var end_column = 0
         while true:
             let character = self.peek()
             if character == "":
@@ -454,12 +456,19 @@ extend Lexer:
                     self.advance()
                 continue
             if character == "\n":
-                self.advance()
                 if not depth.is_empty():
+                    self.advance()
                     continue
+                # NEWLINE belongs to the line it ends, so errors there name that line.
+                end_line = self.line
+                end_column = self.column
+                self.advance()
                 break
             out.append(try self.token(depth))
-        out.append(Token(kind = "NEWLINE", value = "", line = self.line, column = self.column))
+        if end_line == 0:
+            end_line = self.line
+            end_column = self.column
+        out.append(Token(kind = "NEWLINE", value = "", line = end_line, column = end_column))
 
     function token(var self, var depth as List[Bracket]) returns Token fails with LexError:
         let line = self.line

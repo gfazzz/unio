@@ -201,14 +201,10 @@ function check_program(path as Path, language as grammar.Grammar, api as Api, va
     let layer = program_layer(path)
     var locals as List[Text] = []
     for rule, children in walk(tree):
-        if rule in ["param", "let_statement"]:
+        if rule in ["param", "lambda_param", "let_statement"]:
             let names = names_in(children)
-            let binding = names.last() if rule == "param" else names.first()
-            match binding:
-                case some(local):
-                    add_unique(locals, local)
-                case none:
-                    pass
+            let binding = names.first() if rule == "let_statement" else names.last()
+            if binding is some(local): add_unique(locals, local)
     var known_modules = api.modules
     var local_types as List[Text] = []
     var local_variants as Map[Text, List[Text]] = {}

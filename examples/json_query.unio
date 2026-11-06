@@ -21,23 +21,15 @@ error QueryError:
 function step(value as Value, key as Text) returns Value fails with QueryError:
     match value:
         case Value.Object(fields):
-            match fields.get(key):
-                case some(child):
-                    return child
-                case none:
-                    fail QueryError(message = "no key \"{key}\"")
+            if fields.get(key) is some(child): return child
+            fail QueryError(message = "no key \"{key}\"")
         case Value.Array(items):
             match key.to_int():
                 case some(index):
-                    match items.get(index):
-                        case some(child):
-                            return child
-                        case none:
-                            fail QueryError(message = "index {index} is out of range 0..{items.length()}")
-                case none:
-                    fail QueryError(message = "an array index must be an integer: {key}")
-        case _:
-            fail QueryError(message = "cannot select \"{key}\" from a {json.kind_name(value)}")
+                    if items.get(index) is some(child): return child
+                    fail QueryError(message = "index {index} is out of range 0..{items.length()}")
+                case none: fail QueryError(message = "an array index must be an integer: {key}")
+        case _: fail QueryError(message = "cannot select \"{key}\" from a {json.kind_name(value)}")
 
 function select(document as Value, path as Text) returns Value fails with QueryError:
     if path == ".":

@@ -22,3 +22,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 | Number | Title | Status |
 |---|---|---|
 | [0001](0001-language-contracts.md) | Precise language and library contracts | accepted |
+| [0002](0002-brevity-without-implicitness.md) | Brevity without implicitness: lambda parameter types, one-line branches, `is` | accepted |

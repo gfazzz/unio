@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.12 (draft). Changes from 0.11: L-27–L-32, C-11b, S-13–S-20, T-12–T-15 and RFC 0001; refined L-22 and S-5.
+Specification version: 0.13 (draft). Changes from 0.12: L-8a, L-33, T-1a and RFC 0002; diagnostics E0049 and E0050 reserved.
+
+Changes from 0.11: L-27–L-32, C-11b, S-13–S-20, T-12–T-15 and RFC 0001; refined L-22 and S-5.
 
 Changes from 0.10: post-quantum distribution and cryptography policy (T-8a, R-6a to R-6c; `docs/cryptography.md`).
 
@@ -94,6 +96,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - L-6c. A method of an interface with a block has a default implementation. The block may reach the value only through the methods of the interface. A type that implements the interface may replace the default in its `extend ... with` block with the same signature; `unio symbol` shows which implementation a type uses. Defaults are the way to share code between types without inheritance of implementation.
 - L-7. Generic functions and types with parameters and interface constraints.
 - L-8. Type inference only for local `let`/`var`. Parameters, results, fields, and exported constants must be annotated.
+- L-8a. The parameter and result types of a lambda may be left out when the lambda is an argument, an initializer of a declared type, or a returned value whose function type is known; they are taken from that type. Elsewhere they are required (E0049). RFC 0002.
 - L-9. Equality of structs and enums is by content; the `Equal` implementation is derived automatically. `Float` compares per IEEE 754 and does not implement `Hash`: it cannot be a `Map` key, a `Set` element, or a `match` pattern. Resources do not implement `Equal`; `==` on them is a compile error with the hint `is_same`.
 - L-9a. Operators are bound to standard interfaces (`Add`, `Subtract`, `Multiply`, `Divide`, `Equal`, `Order`, `Hash`). A user-defined type implements them only explicitly through `extend`; redefining existing implementations is forbidden. `item in collection` calls `collection.contains(item)`.
 - L-9b. Function effects are not declared in signatures. The compiler derives them from the call graph and shows them in `unio symbol` and `unio doc` (C-11). The word `uses` is reserved.
@@ -147,6 +150,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - L-30. Required use of Result and process.Output with explicit discard: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
 - L-31. Interface implementation ownership and nonoverlap: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
 - L-32. Total Order, IEEE Float and OrderedFloat: [language-contracts.md](language-contracts.md), sections 1–2. Mandatory for 0.1.
+- L-33. `expr is pattern` is a `Bool` that tests a pattern. Its names are bound in the branch it guards: the body of `if` or `else if`, the body of `while`, and the right operand of an `and` that follows it; not under `or` or `not` and not after the branch (E0050). RFC 0002.
 
 ## 4. Compiler and runtime requirements
 
@@ -261,6 +265,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 ### 6.2 Formatter
 
 - T-1. One style, no settings. Formatting is idempotent.
+- T-1a. A branch of `if`, `else if`, `else`, `case`, or `on` that holds one simple statement is written on its header line when the line fits 100 characters, and on the next line otherwise; functions, loops, `using`, `test`, and `try:` always have a block. RFC 0002.
 - T-2. The formatter preserves comments and does not change semantics; verified by an "AST before = AST after" test.
 - T-3. Formatting a 1,000-line file takes at most 50 ms.
 

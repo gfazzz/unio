@@ -1,0 +1,4 @@
+# expect-error: 3
+function f(path as Path) returns Text fails with IoError:
+    let text = try read_text(path) on IoError as e
+    return text

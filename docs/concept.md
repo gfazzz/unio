@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.13. Changes from 0.12: accepted comparative findings, precise contracts and RFC 0001 (`docs/language-contracts.md`).
+Version: 0.14. Changes from 0.13: brevity without implicitness, RFC 0002 (sections 2.3, 2.5, 10, rationale 20).
+
+Changes from 0.12: accepted comparative findings, precise contracts and RFC 0001 (`docs/language-contracts.md`).
 
 Changes from 0.11: post-quantum cryptography policy for distribution, connections, and UniOS (section 6; `docs/cryptography.md`).
 
@@ -108,7 +110,7 @@ function log(message as Text):        # no returns: returns nothing
 
 - Parameters are always annotated with a type. The result type is always stated when a function returns something. Only local value types are inferred.
 - Arguments are passed positionally or by name: `connect(host, port = 8080)`. `named port as Int` requires a label at the call. Ordinary parameters precede named-only ones; defaults trail within each group and are evaluated per call (L-27, L-28).
-- Functions are first-class values. Function type: `Function[(Int, Text) -> Bool]`. Anonymous function: `function (x as Int) returns Int: x * 2`, single-line form.
+- Functions are first-class values. Function type: `Function[(Int, Text) -> Bool]`. Anonymous function: `function (x as Int) returns Int: x * 2`, single-line form. Where the expected function type is known, the types of a lambda are taken from it: `tasks.map(function (task): task.id)` (RFC 0002).
 
 ### 2.4 Text and operators
 
@@ -148,6 +150,16 @@ match command:
 ```
 
 `match` must be exhaustive: the compiler checks that all variants are listed or that there is a `case _`. A branch that deliberately does nothing says so with `pass`; an empty block is an error.
+
+A branch of one simple statement is written on its header line, and a single variant is tested with `is`, whose names are bound in the branch it guards (RFC 0002):
+
+```unio
+match env.get("TODO_FILE"):
+    case some(value): return Path(value)
+    case none: return home.join(".todo.json")
+
+if fields.get(key) is some(child): return child
+```
 
 ### 2.6 Data types
 
@@ -485,6 +497,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Content-addressed code | As a tool feature: `unio symbol` reports content hashes used by the cache and by agents; no hashes in source or semantics |
 | Ownership and borrowing | No. GC plus `Resource`; the only ownership analysis is the `using` escape check |
 | Comparative-review contracts | RFC 0001; `docs/language-contracts.md`, L-27–L-32, S-13–S-20, T-12–T-15, C-11b |
+| Brevity of everyday code | RFC 0002: lambda types from the expected function type, one-line branches, the pattern test `is`; no second syntax for lambdas, no implicit return, no statement modifiers |
 
 ## 11. Rationale for the latest decisions
 
@@ -510,3 +523,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 18. **Borrow what strengthens the principle, decline the rest.** Zig's errors and Gleam's diagnostics are already the direction of the language; explicit allocators and content hashes add visibility without syntax; `comptime`, an implicit context, macros, and borrowing each add a second way to write or read code, so they are declined even where they are powerful. `docs/influences.md` keeps the reasoning.
 
 19. **Precise contracts instead of implicit assumptions.** [RFC 0001](rfcs/0001-language-contracts.md) and the [normative contracts](language-contracts.md) adopt findings from Python/Ruby/JS/TS, Swift/Rust/Go, C#/Kotlin/Java and OTP: evaluation, implementation ownership, required results, named parameters, streams, JSON boundaries, Unicode, reproducible tests and caches. Later releases receive explicit concurrency/supervision criteria. This refines the design; the delivery table separates sources from future implementation.
+20. **Brevity without implicitness.** A review of the code written in Unio so far showed that most of its length came from three patterns: lambdas that repeat types the call already fixes, branches that need a line of their own for one statement, and full `match` statements that test a single variant. Removing them keeps every behavior visible: the lambda still says `function`, the branch still has its header, and `is` names the variant it tests. Ruby's expressiveness was the benchmark; what Ruby gets through implicit return, optional parentheses, and modifiers would add second ways to write the same thing and was declined.

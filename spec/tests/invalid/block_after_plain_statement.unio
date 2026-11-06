@@ -1,0 +1,5 @@
+# expect-error: 3
+function f(x as Int) returns Int:
+    x > 0:
+        return 1
+    return 0

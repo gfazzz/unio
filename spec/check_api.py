@@ -214,7 +214,7 @@ def check_program(path, grammar, api, problems):
     own_functions, own_types, own_variants = declarations(tree)
     locals_ = set()
     for rule, kids in walk(tree):
-        if rule == "param":
+        if rule in ("param", "lambda_param"):
             locals_ |= set(names_in(kids)[-1:])  # contextual "named" precedes the binding
         elif rule == "let_statement":
             locals_ |= set(names_in(kids)[:1])

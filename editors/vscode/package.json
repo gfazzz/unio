@@ -2,7 +2,7 @@
   "name": "unio",
   "displayName": "Unio",
   "description": "Syntax highlighting for the Unio programming language, in .unio files and in ```unio blocks of Markdown.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "unio",
   "license": "SEE LICENSE IN README.md",
   "repository": {
@@ -19,9 +19,18 @@
     "languages": [
       {
         "id": "unio",
-        "aliases": ["Unio", "unio"],
-        "extensions": [".unio"],
-        "configuration": "./language-configuration.json"
+        "aliases": [
+          "Unio",
+          "unio"
+        ],
+        "extensions": [
+          ".unio"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/unio-light.svg",
+          "dark": "./icons/unio-dark.svg"
+        }
       }
     ],
     "grammars": [
@@ -33,7 +42,9 @@
       {
         "scopeName": "markdown.unio.codeblock",
         "path": "./syntaxes/unio.markdown.tmLanguage.json",
-        "injectTo": ["text.html.markdown"],
+        "injectTo": [
+          "text.html.markdown"
+        ],
         "embeddedLanguages": {
           "meta.embedded.block.unio": "unio"
         }

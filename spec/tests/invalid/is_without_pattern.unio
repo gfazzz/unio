@@ -1,0 +1,3 @@
+# expect-error: 3
+function h(x as Option[Int]) returns Bool:
+    return x is + 1

@@ -1,5 +1,6 @@
 (* Unio core grammar, version 0.1-draft.
-   Changes from the initial draft: named parameters and function-shape labels (RFC 0001).
+   Changes from the initial draft: named parameters and function-shape labels (RFC 0001);
+   lambda parameter types, one-line branches, and the pattern test is (RFC 0002).
 
    Notation (ISO 14977 style):
      =  definition      ,  concatenation is written by juxtaposition
@@ -59,7 +60,7 @@ interpolation   = "{" expression "}" ;     (* may contain nested TEXT *)
 (* Keywords (fixed for 0.1; adding one requires an RFC):
 
      and as assert break case continue else enum extend fail fails false
-     for from function if import in interface let match not on or pass
+     for from function if import in interface is let match not on or pass
      public return returns self struct true try using var while with
 
    Contextual keywords (ordinary names except where a rule uses them):
@@ -160,10 +161,12 @@ simple_statement = let_statement
                  | "pass"                     (* does nothing; a block may not be empty *)
                  | expression ;
 
-(* A simple statement whose last element is an inline handler
-   ("try X on E as e") takes the handler body as an indented block.
-   At most one inline handler is allowed per statement (E0024). *)
-handled_statement = simple_statement ":" block ;
+(* A statement that ends with an inline handler ("try X on E as e") takes the
+   handler body as an indented block; the handler must follow a try expression
+   that ends the statement, and at most one is allowed (E0024). *)
+handled_statement = handled_head inline_handler ":" block ;
+handled_head    = let_statement | assignment | return_statement | expression ;
+inline_handler  = "on" type [ "as" NAME ] ;
 
 let_statement   = ( "let" | "var" ) NAME [ "as" type ] "=" expression ;
 assignment      = place "=" expression ;
@@ -172,15 +175,20 @@ return_statement = "return" [ expression ] ;
 fail_statement  = "fail" expression ;
 assert_statement = "assert" expression ;
 
-if_statement    = "if" expression ":" block
-                  { "else" "if" expression ":" block }
-                  [ "else" ":" block ] ;
+if_statement    = "if" expression ":" branch_block
+                  { "else" "if" expression ":" branch_block }
+                  [ "else" ":" branch_block ] ;
 for_statement   = "for" NAME { "," NAME } "in" expression ":" block ;
 while_statement = "while" expression ":" block ;
 match_statement = "match" expression ":" NEWLINE INDENT case { case } DEDENT ;
-case            = "case" pattern [ "if" expression ] ":" block ;
+case            = "case" pattern [ "if" expression ] ":" branch_block ;
 try_statement   = "try" ":" block handler { handler } ;
-handler         = "on" type [ "as" NAME ] ":" block ;
+handler         = "on" type [ "as" NAME ] ":" branch_block ;
+(* A branch may hold one simple statement on its header line (RFC 0002). The
+   formatter writes it there when the line fits 100 characters and otherwise
+   on its own line, so each branch still has one written form (T-1a).
+   Functions, loops, using, test, try: and handled statements keep a block. *)
+branch_block    = simple_statement NEWLINE | block ;
 using_statement = "using" NAME "=" expression ":" block ;
 
 
@@ -199,20 +207,24 @@ using_statement = "using" NAME "=" expression ":" block ;
      call, index, generic call, . , ?.    postfix                        *)
 
 expression      = lambda | conditional ;
-lambda          = "function" "(" [ params ] ")" [ "returns" type ]
-                  [ "fails" "with" type_list ] ":" expression ;
+lambda          = "function" "(" [ lambda_param { "," lambda_param } [ "," ] ] ")"
+                  [ "returns" type ] [ "fails" "with" type_list ] ":" expression ;
+lambda_param    = "named" NAME [ "as" type ] | NAME [ "as" type ] ;
+                  (* types may be left out only where an expected function type
+                     gives them, L-8a; otherwise E0049 *)
 conditional     = or_expr [ "if" or_expr "else" expression ] ;
 or_expr         = and_expr { "or" and_expr } ;
 and_expr        = not_expr { "and" not_expr } ;
 not_expr        = "not" not_expr | comparison ;
-comparison      = additive [ comparison_op additive ] ;
+comparison      = additive [ comparison_op additive | "is" pattern ] ;
+                  (* "x is some(v)" tests a pattern; its names are bound in the
+                     branch it guards, L-33; elsewhere E0050 *)
 comparison_op   = "==" | "!=" | "<" | "<=" | ">" | ">=" | "in" | "not" "in" ;
 additive        = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
 unary           = "-" unary
-                | "try" unary [ inline_handler ]
+                | "try" unary
                 | power ;
-inline_handler  = "on" type [ "as" NAME ] ;     (* body: see handled_statement *)
 power           = postfix [ "**" unary ] ;
 
 postfix         = primary { call | generic_call | index | field_access | safe_access } ;

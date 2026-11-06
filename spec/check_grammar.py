@@ -292,6 +292,7 @@ class Lexer:
 
     def logical_line(self, out):
         depth = []
+        end = None
         while True:
             c = self.peek()
             if c == "":
@@ -309,13 +310,16 @@ class Lexer:
                     self.advance()
                 continue
             if c == "\n":
-                self.advance()
                 if depth:
+                    self.advance()
                     continue
+                # NEWLINE belongs to the line it ends, so errors there name that line.
+                end = (self.line, self.col)
+                self.advance()
                 break
             tok = self.token(depth)
             out.append(tok)
-        out.append(Token("NEWLINE", "", self.line, self.col))
+        out.append(Token("NEWLINE", "", *end) if end else Token("NEWLINE", "", self.line, self.col))
 
     def token(self, depth):
         line, col = self.line, self.col

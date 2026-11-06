@@ -1,0 +1,35 @@
+## RFC 0002: lambda types from the expected function type, one-line branches, pattern tests with is.
+
+function ids(tasks as List[Task]) returns List[Int]:
+    return tasks.map(function (task): task.id)
+
+function total(tasks as List[Task]) returns Int:
+    return tasks.map(function (task as Task) returns Int: task.id).sum()
+
+function storage_path() returns Path:
+    match env.get("TODO_FILE"):
+        case some(value): return Path(value)
+        case none: return (env.home_dir() or Path(".")).join(".todo.json")
+
+function step(fields as Map[Text, Value], key as Text) returns Value fails with QueryError:
+    if fields.get(key) is some(child):
+        return child
+    fail QueryError(message = "no key \"{key}\"")
+
+function sign(n as Int) returns Text:
+    if n > 0: return "positive"
+    else if n < 0: return "negative"
+    else: return "zero"
+
+function load(path as Path) returns Text:
+    try:
+        return read(path)
+    on IoError: return ""
+
+function first_word(line as Text) returns Option[Text]:
+    if line.split_whitespace().first() is some(word) and not word.is_empty():
+        return some(word)
+    return none
+
+function is_ok(result as Result[Int, ParseError]) returns Bool:
+    return result is ok(_)

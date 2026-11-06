@@ -1,0 +1,4 @@
+# expect-error: 3
+function f() returns Int:
+    for x in items: return x
+    return 0

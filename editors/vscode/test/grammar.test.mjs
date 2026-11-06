@@ -144,6 +144,15 @@ test("contextual keywords are keywords only in their positions", () => {
     hasScope(source, "named", "storage.modifier");
 });
 
+test("one-line branches, pattern tests and lambdas without types", () => {
+    const source = "if fields.get(key) is some(child): return child\nlet ids = tasks.map(function (task): task.id)";
+    hasScope(source, "is", "keyword.operator.logical");
+    hasScope(source, "some", "support.function");
+    hasScope(source, "return", "keyword.control");
+    hasScope(source, "function", "storage.type.function");
+    hasScope(source, "task", "variable.other", 0);
+});
+
 test("calls and methods", () => {
     const source = "let x = items.map(change)\nlet y = Account.open(\"Anna\")\nprint(x)";
     hasScope(source, "map", "entity.name.function.call");
@@ -165,7 +174,8 @@ test("every keyword of spec/grammar.ebnf is highlighted", () => {
     const missing = [];
     for (const word of [...keywords, ...reserved]) {
         const scopes = scopesOf(`${word} `, word);
-        if (scopes.length < 2) missing.push(word);
+        const keywordLike = /^(keyword|storage|constant\.language|variable\.language)\./;
+        if (!scopes.some((s) => keywordLike.test(s))) missing.push(word);
     }
     assert.deepEqual(missing, [], `keywords without highlighting: ${missing.join(", ")}`);
 });
@@ -196,4 +206,13 @@ test("unio blocks in Markdown are highlighted as Unio", async () => {
     const raw = JSON.parse(text);
     assert.equal(raw.injectionSelector, "L:text.html.markdown");
     assert.match(JSON.stringify(raw), /source\.unio/);
+});
+
+test("the language has a file icon for light and dark themes", () => {
+    const manifest = JSON.parse(readFileSync(join(extension, "package.json"), "utf8"));
+    const icon = manifest.contributes.languages[0].icon;
+    for (const theme of ["light", "dark"]) {
+        const svg = readFileSync(join(extension, icon[theme]), "utf8");
+        assert.match(svg, /^<svg[^>]*viewBox="0 0 16 16"/);
+    }
 });

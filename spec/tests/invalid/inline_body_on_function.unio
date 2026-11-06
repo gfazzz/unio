@@ -1,0 +1,2 @@
+# expect-error: 2
+function g() returns Int: return 1
