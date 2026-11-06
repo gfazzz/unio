@@ -1,0 +1,6 @@
+# expect-error: 6 E0074
+error Bad:
+    reason as Text
+
+function f() returns Int:
+    fail Bad(reason = "x")

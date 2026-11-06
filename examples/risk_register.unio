@@ -167,18 +167,25 @@ public function main() returns Int:
         print(line)
     return 0
 
-function sample(id as Text, per_century as Int, loss as Int) returns Finding:
+function sample(
+    id as Text,
+    per_century as Int,
+    loss as Int,
+    clause as Text = "6.2.1",
+    per_century_after as Int = 0,
+    approved_by as Option[Text] = some("auditor"),
+) returns Finding:
     return Finding(
         id = id,
         system = "fire alarm",
         norm = "SP 484.1311500.2020",
-        clause = "6.2.1",
+        clause = clause,
         summary = "sample",
         per_century = per_century,
-        per_century_after = 0,
+        per_century_after = per_century_after,
         loss = loss,
         fix_cost = 100000,
-        approved_by = some("auditor"),
+        approved_by = approved_by,
     )
 
 test "the annual loss is the loss times the yearly frequency, rounded down":
@@ -187,8 +194,7 @@ test "the annual loss is the loss times the yearly frequency, rounded down":
     assert annual_loss(9000000000000000000, 2) == none
 
 test "a finding without a norm reference is rejected":
-    var finding = sample("F-1", 5, 1000000)
-    finding.clause = " "
+    let finding = sample("F-1", 5, 1000000, clause = " ")
     try:
         assess(finding)
         assert_fail("expected an audit error")
@@ -197,8 +203,7 @@ test "a finding without a norm reference is rejected":
         assert e.message.contains("no norm reference")
 
 test "a fix that makes incidents more frequent is rejected":
-    var finding = sample("F-2", 1, 1000)
-    finding.per_century_after = 2
+    let finding = sample("F-2", 1, 1000, per_century_after = 2)
     try:
         validate(finding)
         assert_fail("expected an audit error")
@@ -224,8 +229,7 @@ test "findings are ranked by the annual loss and must be unique":
     on AuditError as e: assert e.message.contains("twice")
 
 test "drafts are printed but left out of the totals":
-    var draft = sample("draft", 10, 1000000)
-    draft.approved_by = none
+    let draft = sample("draft", 10, 1000000, approved_by = none)
     let audit = Audit(site = "office", findings = [draft, sample("approved", 1, 1000000)])
     let risks = try rank(audit) on AuditError as e:
         assert_fail(e.message)

@@ -1,0 +1,5 @@
+# expect-error: 4 E0077
+function f() returns Int:
+    let count = 1
+    count = 2
+    return count

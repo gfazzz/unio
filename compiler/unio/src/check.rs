@@ -1,13 +1,15 @@
 //! Checks of function bodies: names, types, calls, generics, methods, operators and patterns
-//! (docs/semantics.md, sections 1–4). Errors, mutability, resources and exhaustiveness are
-//! sprint S4 and are not reported here.
+//! (docs/semantics.md, sections 1–4, sprint S3), and errors, values, control flow, `match`,
+//! resources and layers (sections 5–8, sprint S4).
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ExprKind, PatternKind, StatementKind};
 use crate::catalog;
 use crate::diag::{Diagnostic, Fix, Span};
-use crate::program::{closest, ConstId, DefKind, FnId, ModId, Owner, Program, Symbol};
+use crate::program::{
+    closest, CallEdge, ConstId, DefKind, FnId, ModId, Owner, Program, Symbol, LAYER_NAMES,
+};
 use crate::types::{DefId, FnTy, ParamId, Prim, Ty};
 
 /// Prelude declarations the rules refer to by name.
@@ -27,11 +29,93 @@ struct ParamSpec {
     ty: Ty,
     named_only: bool,
     has_default: bool,
+    var: bool,
+}
+
+/// How a local name was introduced: it decides whether the name can change (L-10, L-11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalKind {
+    Let,
+    Var,
+    Param,
+    VarParam,
+    Using,
 }
 
 struct Local {
     name: String,
     ty: Ty,
+    kind: LocalKind,
+    span: Span,
+    /// Set when an expression names the local; a `let` of a required result that is never
+    /// read is E0043 (L-30).
+    read: std::cell::Cell<bool>,
+}
+
+/// Where a place that is changed starts (L-11).
+enum Root {
+    Local(String, LocalKind),
+    SelfValue(bool),
+    Other,
+}
+
+/// A pattern as the exhaustiveness check sees it (docs/semantics.md 6.5).
+#[derive(Clone, Debug)]
+enum Pat {
+    Wild,
+    Variant(DefId, usize, Vec<Pat>),
+    Bool(bool),
+    Tuple(Vec<Pat>),
+    List(Vec<Pat>, bool),
+    Literal,
+}
+
+/// Errors collected while checking the operand of one `try`.
+#[derive(Default)]
+struct Frame {
+    errors: Vec<Ty>,
+    uncertain: bool,
+}
+
+fn span_key(s: Span) -> (usize, usize) {
+    (s.start.offset, s.end.offset)
+}
+
+fn strip(e: &ast::Expr) -> &ast::Expr {
+    match &e.kind {
+        ExprKind::Paren(inner) => strip(inner),
+        _ => e,
+    }
+}
+
+/// Whether a loop body has a `break` of its own loop (not of a nested one).
+fn has_break(block: &ast::Block) -> bool {
+    block.iter().any(|s| match &s.kind {
+        StatementKind::Simple { statement, handler } => {
+            matches!(statement, ast::Simple::Break) || handler.as_ref().is_some_and(has_break)
+        }
+        StatementKind::If {
+            branches,
+            otherwise,
+        } => {
+            branches.iter().any(|(_, b)| has_break(b)) || otherwise.as_ref().is_some_and(has_break)
+        }
+        StatementKind::Match { cases, .. } => cases.iter().any(|c| has_break(&c.body)),
+        StatementKind::Try { body, handlers } => {
+            has_break(body) || handlers.iter().any(|h| has_break(&h.body))
+        }
+        StatementKind::Using { body, .. } => has_break(body),
+        StatementKind::For { .. } | StatementKind::While { .. } => false,
+    })
+}
+
+/// Whether an expression statement is a call, whose result must not be dropped (E0043).
+fn is_call(e: &ast::Expr) -> bool {
+    match &strip(e).kind {
+        ExprKind::Call { .. } | ExprKind::GenericCall { .. } => true,
+        ExprKind::Try { operand, .. } => is_call(operand),
+        _ => false,
+    }
 }
 
 pub fn check_program(program: &mut Program) {
@@ -146,6 +230,26 @@ struct Checker<'a> {
     generics: HashMap<String, ParamId>,
     vars: Vec<Option<Ty>>,
     interface: Option<DefId>,
+    // Sprint S4.
+    current_fn: Option<FnId>,
+    /// The errors the current function, lambda or test may fail with.
+    fn_fails: Vec<Ty>,
+    /// The signature of the current function, for the fix of E0074.
+    signature: Option<(Span, bool)>,
+    try_frames: Vec<Frame>,
+    /// The error types handled by enclosing `try:` blocks.
+    handlers: Vec<Vec<Ty>>,
+    in_try_block: usize,
+    loops: usize,
+    /// The first scope of the current lambda: names below it are captured.
+    lambda_floor: usize,
+    self_var: bool,
+    /// Expressions where a resource may be created (E0080).
+    creation_ok: HashSet<(usize, usize)>,
+    /// Names of resources used where they do not leave their block (E0081).
+    use_ok: HashSet<(usize, usize)>,
+    /// While positive, checks run again for their types only and report nothing.
+    silent: usize,
 }
 
 impl<'a> Checker<'a> {
@@ -167,10 +271,25 @@ impl<'a> Checker<'a> {
             generics: HashMap::new(),
             vars: Vec::new(),
             interface: None,
+            current_fn: None,
+            fn_fails: Vec::new(),
+            signature: None,
+            try_frames: Vec::new(),
+            handlers: Vec::new(),
+            in_try_block: 0,
+            loops: 0,
+            lambda_floor: 0,
+            self_var: false,
+            creation_ok: HashSet::new(),
+            use_ok: HashSet::new(),
+            silent: 0,
         }
     }
 
     fn err(&mut self, code: &'static str, span: Span, message: crate::diag::Msg) {
+        if self.silent > 0 {
+            return;
+        }
         self.p
             .error(self.module, Diagnostic::error(code, span, message));
     }
@@ -182,11 +301,16 @@ impl<'a> Checker<'a> {
         let mut generics: Vec<ParamId> = def.generics.clone();
         let owner = def.owner;
         let ret = def.ret.clone();
-        let params: Vec<(String, Ty, Span)> = def
+        let fails = def.fails.clone();
+        let name_span = def.span;
+        self.self_var = def.self_param == Some(true);
+        let params: Vec<(String, Ty, Span, bool)> = def
             .params
             .iter()
-            .map(|p| (p.name.clone(), p.ty.clone(), p.span))
+            .map(|p| (p.name.clone(), p.ty.clone(), p.span, p.var))
             .collect();
+        self.current_fn = Some(f);
+        self.signature = self.signature_span(f).map(|sp| (sp, !fails.is_empty()));
         match owner {
             Owner::Impl(i) => {
                 let target = self.p.impls[i].target.clone();
@@ -209,26 +333,66 @@ impl<'a> Checker<'a> {
             _ => t.clone(),
         };
         self.ret = subst(&ret);
+        self.fn_fails = fails.iter().map(&subst).collect();
         self.scopes.push(Vec::new());
-        for (name, ty, _) in params {
+        for (name, ty, _, var) in params {
             let ty = subst(&ty);
-            self.scopes.last_mut().unwrap().push(Local { name, ty });
+            let kind = if var {
+                LocalKind::VarParam
+            } else {
+                LocalKind::Param
+            };
+            self.scopes.last_mut().unwrap().push(Local {
+                name,
+                ty,
+                kind,
+                span: Span::default(),
+                read: std::cell::Cell::new(true),
+            });
         }
-        self.block(block);
+        let completes = self.block(block);
+        let ret = self.resolved(&self.ret.clone());
+        if completes && !matches!(ret, Ty::Unit | Ty::Never | Ty::Unknown) {
+            let shown = self.p.show(&ret);
+            self.err("E0082", name_span, catalog::missing_return(&shown));
+        }
+    }
+
+    /// The span of a function's signature, for the fix that extends its `fails with`.
+    fn signature_span(&self, f: FnId) -> Option<Span> {
+        let body = self.p.funcs[f].body?;
+        match &self.p.modules[body.module].analysis.file.items[body.item] {
+            ast::Item::Declaration(d) => match (&d.kind, body.member) {
+                (ast::DeclarationKind::Function(func), None) => Some(func.signature.span),
+                (ast::DeclarationKind::Interface(i), Some(m)) => Some(i.members[m].0.span),
+                _ => None,
+            },
+            ast::Item::Extend(e) => body.member.map(|m| e.members[m].signature.span),
+            _ => None,
+        }
     }
 
     // ------------------------------------------------------------ scopes
 
     fn find_local(&self, name: &str) -> Option<Ty> {
-        for scope in self.scopes.iter().rev() {
+        self.find_local_full(name).map(|(_, t, _)| t)
+    }
+
+    /// A local name: the index of its scope, its type and how it was introduced.
+    fn find_local_full(&self, name: &str) -> Option<(usize, Ty, LocalKind)> {
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
             if let Some(local) = scope.iter().rev().find(|l| l.name == name) {
-                return Some(local.ty.clone());
+                return Some((i, local.ty.clone(), local.kind));
             }
         }
         None
     }
 
     fn bind(&mut self, name: &str, ty: Ty, span: Span) {
+        self.bind_kind(name, ty, span, LocalKind::Let);
+    }
+
+    fn bind_kind(&mut self, name: &str, ty: Ty, span: Span, kind: LocalKind) {
         if name == "_" {
             return;
         }
@@ -239,6 +403,9 @@ impl<'a> Checker<'a> {
         self.scopes.last_mut().unwrap().push(Local {
             name: name.to_string(),
             ty,
+            kind,
+            span,
+            read: std::cell::Cell::new(false),
         });
     }
 
@@ -247,7 +414,44 @@ impl<'a> Checker<'a> {
     }
 
     fn pop(&mut self) {
-        self.scopes.pop();
+        let Some(scope) = self.scopes.pop() else {
+            return;
+        };
+        for local in scope {
+            if matches!(local.kind, LocalKind::Let | LocalKind::Var)
+                && !local.read.get()
+                && self.is_required_result(&local.ty)
+            {
+                let shown = self.p.show(&self.resolved(&local.ty));
+                self.err(
+                    "E0043",
+                    local.span,
+                    catalog::binding_never_read(&local.name, &shown),
+                );
+            }
+        }
+    }
+
+    /// A `Result` or a `std.process.Output`: a value that must not be dropped (L-30).
+    fn is_required_result(&self, ty: &Ty) -> bool {
+        match self.resolved(ty) {
+            Ty::Named(d, _) => {
+                let def = &self.p.defs[d];
+                Some(d) == prelude_def(self.p, "Result")
+                    || (def.name == "Output" && self.p.modules[def.module].name == "std.process")
+            }
+            _ => false,
+        }
+    }
+
+    /// Marks a local as read (L-30).
+    fn mark_read(&self, name: &str) {
+        for scope in self.scopes.iter().rev() {
+            if let Some(local) = scope.iter().rev().find(|l| l.name == name) {
+                local.read.set(true);
+                return;
+            }
+        }
     }
 
     /// Ends the scope of `is` bindings, so that later uses report E0050.
@@ -262,35 +466,42 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ statements
 
-    fn block(&mut self, block: &ast::Block) {
+    /// Checks a block; returns whether its end can be reached (docs/semantics.md 6.4).
+    fn block(&mut self, block: &ast::Block) -> bool {
         self.push();
+        let mut completes = true;
         for s in block {
-            self.statement(s);
+            if !self.statement(s) {
+                completes = false;
+            }
         }
         self.pop();
+        completes
     }
 
-    fn statement(&mut self, s: &ast::Statement) {
+    fn statement(&mut self, s: &ast::Statement) -> bool {
         match &s.kind {
             StatementKind::Simple { statement, handler } => {
                 // The inline handler runs instead of the rest of the statement: its name is in
                 // scope only in its block.
-                self.simple(statement, s.span, handler.as_ref());
+                self.simple(statement, s.span, handler.as_ref())
             }
             StatementKind::If {
                 branches,
                 otherwise,
             } => {
+                let mut completes = otherwise.is_none();
                 for (condition, body) in branches {
                     let bindings = self.condition(condition);
                     self.push();
                     let names = self.bind_all(bindings);
-                    self.block(body);
+                    completes |= self.block(body);
                     self.pop_expiring(&names);
                 }
                 if let Some(body) = otherwise {
-                    self.block(body);
+                    completes |= self.block(body);
                 }
+                completes
             }
             StatementKind::For {
                 names,
@@ -301,18 +512,26 @@ impl<'a> Checker<'a> {
                 let element = self.element_of(&ty, iterable.span);
                 self.push();
                 self.bind_destructured(names, element, iterable.span);
+                self.loops += 1;
                 self.block(body);
+                self.loops -= 1;
                 self.pop();
+                true
             }
             StatementKind::While { condition, body } => {
                 let bindings = self.condition(condition);
                 self.push();
                 let names = self.bind_all(bindings);
+                self.loops += 1;
                 self.block(body);
+                self.loops -= 1;
                 self.pop_expiring(&names);
+                let forever = matches!(strip(condition).kind, ExprKind::Bool(true));
+                !forever || has_break(body)
             }
             StatementKind::Match { subject, cases } => {
                 let ty = self.expr(subject, &Ty::Unknown);
+                let mut completes = false;
                 for case in cases {
                     self.push();
                     let mut bindings = Vec::new();
@@ -325,28 +544,42 @@ impl<'a> Checker<'a> {
                         let b = self.condition(guard);
                         names = self.bind_all(b);
                     }
-                    self.block(&case.body);
+                    completes |= self.block(&case.body);
                     self.pop_expiring(&names);
                 }
+                // A match that is not exhaustive is reported once (E0068), not again as a
+                // reachable end of the function.
+                self.check_exhaustive(&ty, cases, s.span);
+                completes
             }
             StatementKind::Try { body, handlers } => {
-                self.block(body);
-                for h in handlers {
-                    let ty = self.resolve_type(&h.ty, false);
+                let types: Vec<Ty> = handlers
+                    .iter()
+                    .map(|h| self.resolve_type(&h.ty, false))
+                    .collect();
+                self.handlers.push(types.clone());
+                self.in_try_block += 1;
+                let mut completes = self.block(body);
+                self.in_try_block -= 1;
+                self.handlers.pop();
+                for (h, ty) in handlers.iter().zip(types) {
                     self.push();
                     if let Some(name) = &h.name {
                         self.bind(&name.text, ty, name.span);
                     }
-                    self.block(&h.body);
+                    completes |= self.block(&h.body);
                     self.pop();
                 }
+                completes
             }
             StatementKind::Using { name, value, body } => {
+                self.allow_creation(value);
                 let ty = self.expr(value, &Ty::Unknown);
                 self.push();
-                self.bind(&name.text, ty, name.span);
-                self.block(body);
+                self.bind_kind(&name.text, ty, name.span, LocalKind::Using);
+                let completes = self.block(body);
                 self.pop();
+                completes
             }
         }
     }
@@ -363,7 +596,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn inline_handler(&mut self, e: &ast::Expr, block: Option<&ast::Block>) {
+    fn inline_handler(&mut self, e: &ast::Expr, block: Option<&ast::Block>, span: Span) {
         let Some(block) = block else { return };
         let Some((ty, name)) = Checker::handler_of(e) else {
             self.block(block);
@@ -374,18 +607,30 @@ impl<'a> Checker<'a> {
         if let Some(name) = name {
             self.bind(&name.text, ty, name.span);
         }
-        self.block(block);
+        // The block replaces the value of the expression, so it must not complete (L-14a).
+        if self.block(block) {
+            self.err("E0075", span, catalog::handler_completes());
+        }
         self.pop();
     }
 
-    fn simple(&mut self, s: &ast::Simple, span: Span, handler: Option<&ast::Block>) {
+    fn is_never(&self, t: &Ty) -> bool {
+        matches!(self.resolved(t), Ty::Never)
+    }
+
+    /// Checks a simple statement; returns whether the statement after it can be reached.
+    fn simple(&mut self, s: &ast::Simple, span: Span, handler: Option<&ast::Block>) -> bool {
         match s {
             ast::Simple::Let {
-                name, ty, value, ..
+                var,
+                name,
+                ty,
+                value,
             } => {
                 let annotated = ty.as_ref().map(|t| self.resolve_type(t, true));
                 let found = self.expr(value, annotated.as_ref().unwrap_or(&Ty::Unknown));
-                self.inline_handler(value, handler);
+                self.inline_handler(value, handler, span);
+                let never = self.is_never(&found);
                 let ty = match annotated {
                     Some(expected) => {
                         self.expect(&found, &expected, value.span);
@@ -398,20 +643,35 @@ impl<'a> Checker<'a> {
                         found
                     }
                 };
-                self.bind(&name.text, ty, name.span);
+                // A resource held by `let` has been reported (E0080 or E0081); the name then
+                // behaves like a `using` name, so that its methods give no further messages.
+                let kind = if self.is_resource(&self.resolved(&ty)) {
+                    LocalKind::Using
+                } else if *var {
+                    LocalKind::Var
+                } else {
+                    LocalKind::Let
+                };
+                self.bind_kind(&name.text, ty, name.span, kind);
+                !never
             }
             ast::Simple::Assign { target, value } => {
+                self.check_assignment(target);
                 let expected = self.expr(target, &Ty::Unknown);
                 let found = self.expr(value, &expected);
-                self.inline_handler(value, handler);
+                self.inline_handler(value, handler, span);
                 self.expect(&found, &expected, value.span);
+                !self.is_never(&found)
             }
             ast::Simple::Return(value) => {
                 let ret = self.ret.clone();
                 match value {
                     Some(v) => {
+                        if self.is_resource(&self.resolved(&ret)) {
+                            self.allow_creation(v);
+                        }
                         let found = self.expr(v, &ret);
-                        self.inline_handler(v, handler);
+                        self.inline_handler(v, handler, span);
                         if ret == Ty::Unit {
                             self.err("E0061", v.span, catalog::returns_nothing());
                         } else {
@@ -425,18 +685,552 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                false
             }
             ast::Simple::Fail(e) => {
-                self.expr(e, &Ty::Unknown);
+                let t = self.expr(e, &Ty::Unknown);
+                let t = self.resolved(&t);
+                match &t {
+                    Ty::Named(d, _) if matches!(self.p.defs[*d].kind, DefKind::Error(_)) => {
+                        self.raise(vec![t.clone()], e.span);
+                    }
+                    Ty::Unknown | Ty::Never => {}
+                    other => {
+                        let shown = self.p.show(other);
+                        self.err("E0061", e.span, catalog::type_mismatch("error", &shown));
+                    }
+                }
+                false
             }
             ast::Simple::Assert(e) => {
                 let ty = self.expr(e, &Ty::bool());
                 self.expect(&ty, &Ty::bool(), e.span);
+                true
             }
-            ast::Simple::Break | ast::Simple::Continue | ast::Simple::Pass => {}
+            ast::Simple::Break | ast::Simple::Continue => {
+                if self.loops == 0 {
+                    let word = if matches!(s, ast::Simple::Break) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    self.err("E0083", span, catalog::outside_loop(word));
+                }
+                false
+            }
+            ast::Simple::Pass => true,
             ast::Simple::Expr(e) => {
-                self.expr(e, &Ty::Unknown);
-                self.inline_handler(e, handler);
+                let t = self.expr(e, &Ty::Unknown);
+                self.inline_handler(e, handler, span);
+                let t = self.resolved(&t);
+                if is_call(e) && self.is_required_result(&t) {
+                    let shown = self.p.show(&t);
+                    self.err("E0043", e.span, catalog::result_discarded(&shown));
+                }
+                !matches!(t, Ty::Never)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ errors (section 5)
+
+    /// Whether a handler (or a `fails with` entry) of type `handler` receives the error `err`.
+    fn catches(&self, handler: &Ty, err: &Ty) -> bool {
+        let error_iface = prelude_def(self.p, "Error");
+        match (&self.resolved(handler), &self.resolved(err)) {
+            (Ty::Unknown, _) | (_, Ty::Unknown) | (_, Ty::Never) => true,
+            (Ty::Named(h, _), _) if Some(*h) == error_iface => true,
+            (Ty::Named(h, _), Ty::Named(e, _)) => h == e,
+            (Ty::Param(h), Ty::Param(e)) => h == e,
+            _ => false,
+        }
+    }
+
+    /// Errors that leave an expression: handled by an enclosing `try:`, or listed in the
+    /// `fails with` of the function (L-15); otherwise E0074 with a fix that lists them.
+    fn raise(&mut self, errors: Vec<Ty>, span: Span) {
+        if self.silent > 0 {
+            return;
+        }
+        for err in errors {
+            let err = self.resolved(&err);
+            if self
+                .handlers
+                .iter()
+                .any(|hs| hs.iter().any(|h| self.catches(h, &err)))
+                || self.fn_fails.iter().any(|f| self.catches(f, &err))
+            {
+                continue;
+            }
+            let shown = self.p.show(&err);
+            let mut diagnostic =
+                Diagnostic::error("E0074", span, catalog::error_not_handled(&shown));
+            if let Some((sig, has_fails)) = self.signature {
+                let at = Span::new(sig.end, sig.end);
+                let text = if has_fails {
+                    format!(", {shown}")
+                } else {
+                    format!(" fails with {shown}")
+                };
+                diagnostic.fixes.push(Fix {
+                    span: at,
+                    new_text: text,
+                    description: catalog::add_to_fails(&shown),
+                });
+            }
+            self.p.error(self.module, diagnostic);
+        }
+    }
+
+    /// A call of a function that can fail: inside `try`, inside a `try:` block, or E0073.
+    fn fallible_call(&mut self, fails: Vec<Ty>, span: Span) {
+        if fails.is_empty() || self.silent > 0 {
+            return;
+        }
+        if let Some(frame) = self.try_frames.last_mut() {
+            frame.errors.extend(fails);
+            return;
+        }
+        if self.in_try_block > 0 {
+            self.raise(fails, span);
+            return;
+        }
+        let shown: Vec<String> = fails.iter().map(|t| self.p.show(t)).collect();
+        self.err("E0073", span, catalog::call_needs_try(&shown.join(", ")));
+    }
+
+    fn uncertain(&mut self) {
+        if let Some(frame) = self.try_frames.last_mut() {
+            frame.uncertain = true;
+        }
+    }
+
+    // ------------------------------------------------------------ values (section 6)
+
+    /// Where a place starts, and the first field on the way that is not declared `var`.
+    fn place(&mut self, e: &ast::Expr) -> (Root, Option<String>) {
+        match &e.kind {
+            ExprKind::Paren(inner) => self.place(inner),
+            ExprKind::Name(n) => match self.find_local_full(n) {
+                Some((_, _, kind)) => (Root::Local(n.clone(), kind), None),
+                None => (Root::Other, None),
+            },
+            ExprKind::SelfValue => (Root::SelfValue(self.self_var), None),
+            ExprKind::Index { target, .. } => self.place(target),
+            ExprKind::Field { target, name } => {
+                if self.module_ref(target).is_some() || self.type_ref(target).is_some() {
+                    return (Root::Other, None);
+                }
+                let (root, bad) = self.place(target);
+                if bad.is_some() {
+                    return (root, bad);
+                }
+                self.silent += 1;
+                let t = self.expr(target, &Ty::Unknown);
+                self.silent -= 1;
+                let var = match self.resolved(&t) {
+                    Ty::Named(d, _) => match &self.p.defs[d].kind {
+                        DefKind::Struct(f) | DefKind::Error(f) => {
+                            f.iter().find(|f| f.name == name.text).is_none_or(|f| f.var)
+                        }
+                        _ => true,
+                    },
+                    _ => true,
+                };
+                (root, (!var).then(|| name.text.clone()))
+            }
+            _ => (Root::Other, None),
+        }
+    }
+
+    fn mutable_root(root: &Root) -> bool {
+        matches!(
+            root,
+            Root::Local(_, LocalKind::Var | LocalKind::VarParam | LocalKind::Using)
+                | Root::SelfValue(true)
+        )
+    }
+
+    fn root_name(root: &Root) -> String {
+        match root {
+            Root::Local(n, _) => n.clone(),
+            Root::SelfValue(_) => "self".to_string(),
+            Root::Other => "the value".to_string(),
+        }
+    }
+
+    /// Checks that a place can change (L-10, L-11): E0077 for a name, E0078 for a part of one.
+    fn check_assignment(&mut self, target: &ast::Expr) {
+        if let ExprKind::Name(n) = &strip(target).kind {
+            match self.find_local_full(n) {
+                Some((_, _, LocalKind::Var | LocalKind::VarParam)) => {}
+                Some(_) => self.err("E0077", target.span, catalog::assign_immutable(n)),
+                None => {
+                    if self.p.lookup(self.module, n).is_some() {
+                        self.err("E0077", target.span, catalog::assign_immutable(n));
+                    }
+                }
+            }
+            return;
+        }
+        self.check_changeable(target, target.span);
+    }
+
+    fn check_changeable(&mut self, place: &ast::Expr, span: Span) {
+        let (root, bad) = self.place(place);
+        if !Checker::mutable_root(&root) {
+            let name = Checker::root_name(&root);
+            self.err("E0078", span, catalog::not_mutable(&name));
+        } else if let Some(field) = bad {
+            self.err("E0078", span, catalog::field_not_var(&field));
+        }
+    }
+
+    // ------------------------------------------------------------ resources (section 7)
+
+    /// Marks an expression where a resource may be created: `using`, `return` of a function
+    /// that returns a resource, a field of a resource.
+    fn allow_creation(&mut self, e: &ast::Expr) {
+        self.creation_ok.insert(span_key(e.span));
+        match &e.kind {
+            ExprKind::Paren(inner) => self.allow_creation(inner),
+            ExprKind::Try { operand, .. } => self.allow_creation(operand),
+            _ => {}
+        }
+    }
+
+    fn check_creation(&mut self, ty: &Ty, span: Span) {
+        if self.silent > 0 || self.creation_ok.contains(&span_key(span)) {
+            return;
+        }
+        let ty = self.resolved(ty);
+        if self.is_resource(&ty) {
+            let shown = self.p.show(&ty);
+            self.err("E0080", span, catalog::resource_outside_using(&shown));
+        }
+    }
+
+    /// A parameter type that takes a resource without letting it escape.
+    fn takes_resource(&mut self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Param(p) => self.p.params[*p]
+                .bounds
+                .iter()
+                .any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == self.known.resource)),
+            other => {
+                let other = self.resolved(other);
+                self.is_resource(&other)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ match (section 6.5)
+
+    /// Reports E0068 when the cases do not cover every value; returns whether they do.
+    fn check_exhaustive(&mut self, subject: &Ty, cases: &[ast::Case], span: Span) -> bool {
+        let ty = self.resolved(subject);
+        if ty.is_partial() || matches!(ty, Ty::Never) {
+            return true;
+        }
+        let mut rows = Vec::new();
+        for case in cases.iter().filter(|c| c.guard.is_none()) {
+            for p in self.abstract_pattern(&case.pattern, &ty) {
+                rows.push(vec![p]);
+            }
+        }
+        match self.missing(rows, vec![ty], 0) {
+            None => true,
+            Some(witness) => {
+                let example = witness.first().cloned().unwrap_or_else(|| "_".to_string());
+                self.err("E0068", span, catalog::match_not_exhaustive(&example));
+                false
+            }
+        }
+    }
+
+    fn pattern_variant(&self, path: &[ast::Name], subject: &Ty) -> Option<(DefId, usize)> {
+        let last = &path.last()?.text;
+        if let Some(found) = self.variant_in(subject, last) {
+            return Some(found);
+        }
+        if path.len() == 1 && last.chars().next().is_some_and(char::is_uppercase) {
+            return self.short_variants(last).first().copied();
+        }
+        None
+    }
+
+    fn variant_field_types(&self, d: DefId, v: usize, subject: &Ty) -> Vec<Ty> {
+        let args = match subject {
+            Ty::Named(sd, args) if *sd == d => args.clone(),
+            _ => self.p.defs[d]
+                .generics
+                .iter()
+                .map(|_| Ty::Unknown)
+                .collect(),
+        };
+        let subst: HashMap<ParamId, Ty> =
+            self.p.defs[d].generics.iter().copied().zip(args).collect();
+        match &self.p.defs[d].kind {
+            DefKind::Enum(vs) => vs[v]
+                .fields
+                .iter()
+                .map(|(_, t)| t.subst(&subst, None))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The alternatives a pattern stands for.
+    fn abstract_pattern(&self, p: &ast::Pattern, subject: &Ty) -> Vec<Pat> {
+        match &p.kind {
+            PatternKind::Wildcard => vec![Pat::Wild],
+            PatternKind::Literal(ast::Literal::Bool(b)) => vec![Pat::Bool(*b)],
+            PatternKind::Literal(_) => vec![Pat::Literal],
+            PatternKind::Name(path) => match self.pattern_variant(path, subject) {
+                Some((d, v)) => {
+                    let k = self.variant_field_types(d, v, subject).len();
+                    vec![Pat::Variant(d, v, vec![Pat::Wild; k])]
+                }
+                None => vec![Pat::Wild],
+            },
+            PatternKind::Constructor { name, arguments } => {
+                let Some((d, v)) = self.pattern_variant(name, subject) else {
+                    return vec![Pat::Wild];
+                };
+                let fields = self.variant_field_types(d, v, subject);
+                let names: Vec<String> = match &self.p.defs[d].kind {
+                    DefKind::Enum(vs) => vs[v].fields.iter().map(|(n, _)| n.clone()).collect(),
+                    _ => Vec::new(),
+                };
+                let mut columns: Vec<Vec<Pat>> = vec![vec![Pat::Wild]; fields.len()];
+                let mut position = 0;
+                for (label, q) in arguments {
+                    let index = match label {
+                        Some(l) => names.iter().position(|n| *n == l.text),
+                        None => {
+                            position += 1;
+                            Some(position - 1)
+                        }
+                    };
+                    if let Some(i) = index.filter(|i| *i < fields.len()) {
+                        columns[i] = self.abstract_pattern(q, &fields[i]);
+                    }
+                }
+                product(&columns)
+                    .into_iter()
+                    .map(|args| Pat::Variant(d, v, args))
+                    .collect()
+            }
+            PatternKind::List(elements) => {
+                let item = match subject {
+                    Ty::List(t) => (**t).clone(),
+                    _ => Ty::Unknown,
+                };
+                let mut columns = Vec::new();
+                let mut rest = false;
+                for el in elements {
+                    match el {
+                        ast::ListElement::Rest(_) => rest = true,
+                        ast::ListElement::Pattern(q) => {
+                            columns.push(self.abstract_pattern(q, &item))
+                        }
+                    }
+                }
+                product(&columns)
+                    .into_iter()
+                    .map(|items| Pat::List(items, rest))
+                    .collect()
+            }
+            PatternKind::Tuple(items) => {
+                let types = match subject {
+                    Ty::Tuple(ts) if ts.len() == items.len() => ts.clone(),
+                    _ => vec![Ty::Unknown; items.len()],
+                };
+                let columns: Vec<Vec<Pat>> = items
+                    .iter()
+                    .zip(&types)
+                    .map(|(q, t)| self.abstract_pattern(q, t))
+                    .collect();
+                product(&columns).into_iter().map(Pat::Tuple).collect()
+            }
+            PatternKind::Bind { pattern, .. } => self.abstract_pattern(pattern, subject),
+            PatternKind::Or(alternatives) => alternatives
+                .iter()
+                .flat_map(|a| self.abstract_pattern(a, subject))
+                .collect(),
+        }
+    }
+
+    /// A value that no row matches, written as patterns for the columns; None if every value
+    /// is matched.
+    fn missing(
+        &mut self,
+        rows: Vec<Vec<Pat>>,
+        types: Vec<Ty>,
+        depth: usize,
+    ) -> Option<Vec<String>> {
+        if types.is_empty() {
+            return rows.is_empty().then(Vec::new);
+        }
+        if depth > 12 {
+            return None;
+        }
+        let ty = self.resolved(&types[0]);
+        let rest_types = types[1..].to_vec();
+        let enum_variants = match &ty {
+            Ty::Named(d, _) => match &self.p.defs[*d].kind {
+                DefKind::Enum(vs) => Some((*d, vs.len())),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((d, count)) = enum_variants {
+            for v in 0..count {
+                let fields = self.variant_field_types(d, v, &ty);
+                let k = fields.len();
+                let specialized: Vec<Vec<Pat>> = rows
+                    .iter()
+                    .filter_map(|row| match &row[0] {
+                        Pat::Wild => Some([vec![Pat::Wild; k], row[1..].to_vec()].concat()),
+                        Pat::Variant(d2, v2, args) if *d2 == d && *v2 == v => {
+                            Some([args.clone(), row[1..].to_vec()].concat())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut next = fields.clone();
+                next.extend(rest_types.clone());
+                if let Some(w) = self.missing(specialized, next, depth + 1) {
+                    let name = match &self.p.defs[d].kind {
+                        DefKind::Enum(vs) => vs[v].name.clone(),
+                        _ => String::new(),
+                    };
+                    let shown = if k == 0 {
+                        name
+                    } else {
+                        format!("{name}({})", w[..k].join(", "))
+                    };
+                    return Some([vec![shown], w[k..].to_vec()].concat());
+                }
+            }
+            return None;
+        }
+        match &ty {
+            Ty::Prim(Prim::Bool) => {
+                for b in [true, false] {
+                    let specialized: Vec<Vec<Pat>> = rows
+                        .iter()
+                        .filter_map(|row| match &row[0] {
+                            Pat::Wild => Some(row[1..].to_vec()),
+                            Pat::Bool(x) if *x == b => Some(row[1..].to_vec()),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(w) = self.missing(specialized, rest_types.clone(), depth + 1) {
+                        return Some([vec![b.to_string()], w].concat());
+                    }
+                }
+                None
+            }
+            Ty::Tuple(ts) => {
+                let k = ts.len();
+                let specialized: Vec<Vec<Pat>> = rows
+                    .iter()
+                    .filter_map(|row| match &row[0] {
+                        Pat::Wild => Some([vec![Pat::Wild; k], row[1..].to_vec()].concat()),
+                        Pat::Tuple(items) if items.len() == k => {
+                            Some([items.clone(), row[1..].to_vec()].concat())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut next = ts.clone();
+                next.extend(rest_types.clone());
+                self.missing(specialized, next, depth + 1)
+                    .map(|w| [vec![format!("({})", w[..k].join(", "))], w[k..].to_vec()].concat())
+            }
+            Ty::List(item) => {
+                let longest = rows
+                    .iter()
+                    .filter_map(|row| match &row[0] {
+                        Pat::List(items, _) => Some(items.len()),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                for k in 0..=longest + 1 {
+                    let specialized: Vec<Vec<Pat>> = rows
+                        .iter()
+                        .filter_map(|row| match &row[0] {
+                            Pat::Wild => Some([vec![Pat::Wild; k], row[1..].to_vec()].concat()),
+                            Pat::List(items, false) if items.len() == k => {
+                                Some([items.clone(), row[1..].to_vec()].concat())
+                            }
+                            Pat::List(items, true) if items.len() <= k => Some(
+                                [
+                                    items.clone(),
+                                    vec![Pat::Wild; k - items.len()],
+                                    row[1..].to_vec(),
+                                ]
+                                .concat(),
+                            ),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut next = vec![(**item).clone(); k];
+                    next.extend(rest_types.clone());
+                    if let Some(w) = self.missing(specialized, next, depth + 1) {
+                        let mut items = w[..k].to_vec();
+                        if k == longest + 1 {
+                            items.push("...".to_string());
+                        }
+                        return Some(
+                            [vec![format!("[{}]", items.join(", "))], w[k..].to_vec()].concat(),
+                        );
+                    }
+                }
+                None
+            }
+            _ => {
+                let defaults: Vec<Vec<Pat>> = rows
+                    .iter()
+                    .filter(|row| matches!(row[0], Pat::Wild))
+                    .map(|row| row[1..].to_vec())
+                    .collect();
+                self.missing(defaults, rest_types, depth + 1)
+                    .map(|w| [vec!["_".to_string()], w].concat())
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ calls, layers and effects
+
+    /// Records a call for the call graph, `unio symbol`, and the layer rule (E0084).
+    fn record_call(&mut self, f: FnId, span: Span) {
+        if self.silent > 0 {
+            return;
+        }
+        self.p.usages.push((f, self.module, span));
+        if let Some(caller) = self.current_fn {
+            self.p.calls.push(CallEdge {
+                caller,
+                callee: f,
+                module: self.module,
+                span,
+            });
+        }
+        let callee_module = self.p.funcs[f].module;
+        if let (Some(here), Some(there)) = (
+            self.p.module_layer(self.module),
+            self.p.module_layer(callee_module),
+        ) {
+            if there > here {
+                let name = self.p.funcs[f].name.clone();
+                self.err(
+                    "E0084",
+                    span,
+                    catalog::layer_violation(&name, LAYER_NAMES[there], LAYER_NAMES[here]),
+                );
             }
         }
     }
@@ -664,6 +1458,9 @@ impl<'a> Checker<'a> {
                         .zip(&g.params)
                         .all(|((_, x), (_, y))| self.compatible_resolved(y, x))
                     && (g.ret == Ty::Unit || self.compatible_resolved(&f.ret, &g.ret))
+                    && f.fails
+                        .iter()
+                        .all(|x| g.fails.iter().any(|y| self.catches(y, x)))
             }
             (Ty::Var(_), _) | (_, Ty::Var(_)) => true,
             (Ty::SelfTy, _) | (_, Ty::SelfTy) => true,
@@ -729,18 +1526,27 @@ impl<'a> Checker<'a> {
         Some(resolved)
     }
 
-    /// Whether `ty` implements `iface`. The arguments of a generic interface are not compared
-    /// yet: `Iterator[Int]` and `Iterator[Text]` both count as implemented.
+    /// Whether two types are the same as far as the check knows.
+    fn same_type(&mut self, a: &Ty, b: &Ty) -> bool {
+        self.compatible_resolved(a, b) && self.compatible_resolved(b, a)
+    }
+
+    /// Whether `ty` implements `iface` with the given arguments: `Iterator[Int]` is not
+    /// `Iterator[Text]` (docs/semantics.md 2.5, 3.6).
     fn implements(&mut self, ty: &Ty, iface: DefId, args: &[Ty]) -> bool {
-        let _ = args;
         let name = self.p.defs[iface].name.clone();
         match ty {
             Ty::Unknown | Ty::Never | Ty::Var(_) | Ty::SelfTy => return true,
             Ty::Param(p) => {
-                return self.p.params[*p]
-                    .bounds
-                    .iter()
-                    .any(|b| matches!(b, Ty::Named(d, _) if *d == iface));
+                let bounds = self.p.params[*p].bounds.clone();
+                return bounds.iter().any(|b| match b {
+                    Ty::Named(d, bargs) if *d == iface => {
+                        args.is_empty()
+                            || bargs.len() != args.len()
+                            || bargs.iter().zip(args).all(|(x, y)| self.same_type(x, y))
+                    }
+                    _ => false,
+                });
             }
             Ty::Named(d, _) if *d == iface => return true,
             _ => {}
@@ -784,12 +1590,25 @@ impl<'a> Checker<'a> {
             return true;
         }
         for i in 0..self.p.impls.len() {
-            match &self.p.impls[i].interface {
-                Some(Ty::Named(d, _)) if *d == iface => {}
+            let impl_args = match &self.p.impls[i].interface {
+                Some(Ty::Named(d, a)) if *d == iface => a.clone(),
                 _ => continue,
-            }
-            if self.match_impl(i, ty).is_some() {
-                return true;
+            };
+            if let Some(subst) = self.match_impl(i, ty) {
+                if args.is_empty() || impl_args.len() != args.len() {
+                    return true;
+                }
+                let impl_args: Vec<Ty> = impl_args
+                    .iter()
+                    .map(|a| a.subst(&subst, Some(ty)))
+                    .collect();
+                if impl_args
+                    .iter()
+                    .zip(args)
+                    .all(|(x, y)| self.same_type(x, y))
+                {
+                    return true;
+                }
             }
         }
         false
@@ -932,6 +1751,7 @@ impl<'a> Checker<'a> {
                 ty: p.ty.subst(subst, self_ty),
                 named_only: p.named_only,
                 has_default: p.has_default,
+                var: p.var,
             })
             .collect()
     }
@@ -944,6 +1764,7 @@ impl<'a> Checker<'a> {
                 ty: ty.clone(),
                 named_only: label.is_some(),
                 has_default: false,
+                var: false,
             })
             .collect()
     }
@@ -1032,6 +1853,27 @@ impl<'a> Checker<'a> {
                 )
             }))
             .collect();
+        let mut var_roots: Vec<String> = Vec::new();
+        for (i, p) in params.iter().enumerate() {
+            let Some(arg) = assigned[i] else { continue };
+            if p.var && self.silent == 0 {
+                // A var parameter changes the caller's variable (L-11, RFC 0001).
+                let (root, bad) = self.place(&arg.value);
+                if !Checker::mutable_root(&root) || bad.is_some() {
+                    let name = Checker::root_name(&root);
+                    self.err("E0079", arg.value.span, catalog::var_argument(&name));
+                } else {
+                    let name = Checker::root_name(&root);
+                    if var_roots.contains(&name) {
+                        self.err("E0042", arg.value.span, catalog::var_argument_twice(&name));
+                    }
+                    var_roots.push(name);
+                }
+            }
+            if self.takes_resource(&p.ty.clone()) {
+                self.use_ok.insert(span_key(arg.value.span));
+            }
+        }
         for i in order {
             let Some(arg) = assigned[i] else { continue };
             let expected_arg = self.resolved_keep(&params[i].ty);
@@ -1106,7 +1948,14 @@ impl<'a> Checker<'a> {
         }
         let params = self.fn_params(f, &subst, self_ty.as_ref());
         let ret = self.p.funcs[f].ret.subst(&subst, self_ty.as_ref());
+        let fails: Vec<Ty> = self.p.funcs[f]
+            .fails
+            .iter()
+            .map(|t| t.subst(&subst, self_ty.as_ref()))
+            .collect();
         let result = self.call(params, ret, args, span, expected);
+        self.record_call(f, span);
+        self.fallible_call(fails, span);
         // Constraints of the generic parameters (E0062).
         for (g, v) in generics.iter().zip(&vars) {
             let t = self.resolved(v);
@@ -1160,6 +2009,17 @@ impl<'a> Checker<'a> {
                 .collect(),
             _ => Vec::new(),
         };
+        // The fields of a resource may hold resources created right here (L-20).
+        let unknown_args: Vec<Ty> = self.p.defs[def]
+            .generics
+            .iter()
+            .map(|_| Ty::Unknown)
+            .collect();
+        if self.is_resource(&Ty::Named(def, unknown_args)) {
+            for arg in args {
+                self.allow_creation(&arg.value);
+            }
+        }
         let foreign = self.p.defs[def].module != self.module;
         let type_name = self.p.defs[def].name.clone();
         if foreign && fields.iter().any(|f| !f.2) {
@@ -1234,6 +2094,7 @@ impl<'a> Checker<'a> {
                 ty: t,
                 named_only: false,
                 has_default: false,
+                var: false,
             })
             .collect();
         self.call(params, result, args, span, &Ty::Unknown)
@@ -1317,6 +2178,7 @@ impl<'a> Checker<'a> {
     fn symbol_type(&mut self, owner: ModId, symbol: Symbol, span: Span) -> Ty {
         match symbol {
             Symbol::Func(f) => {
+                self.record_call(f, span);
                 let def = &self.p.funcs[f];
                 let generics = def.generics.clone();
                 let subst: HashMap<ParamId, Ty> =
@@ -1358,7 +2220,16 @@ impl<'a> Checker<'a> {
     }
 
     fn name_value(&mut self, name: &str, span: Span, expected: &Ty) -> Ty {
-        if let Some(t) = self.find_local(name) {
+        if let Some((scope, t, kind)) = self.find_local_full(name) {
+            self.mark_read(name);
+            if self.silent == 0 && !t.is_unknown() {
+                let resolved = self.resolved(&t);
+                let captured = scope < self.lambda_floor;
+                let escapes = kind == LocalKind::Using && !self.use_ok.contains(&span_key(span));
+                if (captured || escapes) && self.is_resource(&resolved) {
+                    self.err("E0081", span, catalog::resource_escapes(name));
+                }
+            }
             return t;
         }
         if !self.short_variants(name).is_empty()
@@ -1517,9 +2388,9 @@ impl<'a> Checker<'a> {
             ExprKind::Lambda {
                 params,
                 returns,
+                fails,
                 body,
-                ..
-            } => self.lambda(params, returns.as_ref(), body, e.span, expected),
+            } => self.lambda(params, returns.as_ref(), fails, body, e.span, expected),
             ExprKind::Is { .. } => {
                 let (ty, bindings) = self.cond_expr(e);
                 for (n, _, _) in bindings {
@@ -1575,23 +2446,45 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            ExprKind::Try { operand, .. } => {
+            ExprKind::Try { operand, handler } => {
+                self.try_frames.push(Frame::default());
                 let t = self.expr(operand, expected);
-                match self.resolved(&t) {
-                    Ty::Named(d, args) if Some(d) == self.known.result => {
+                let resolved = self.resolved(&t);
+                let frame = self.try_frames.pop().unwrap_or_default();
+                let mut errors = frame.errors;
+                let value = match &resolved {
+                    Ty::Named(d, args) if Some(*d) == self.known.result => {
+                        if let Some(err) = args.get(1) {
+                            errors.push(err.clone());
+                        }
                         args.first().cloned().unwrap_or(Ty::Unknown)
                     }
-                    other => other,
+                    other => other.clone(),
+                };
+                if errors.is_empty() && !frame.uncertain && !resolved.is_partial() {
+                    self.err("E0076", e.span, catalog::try_cannot_fail());
                 }
+                if let Some((ty, _)) = handler {
+                    let handled = self.resolve_type(ty, false);
+                    errors.retain(|x| !self.catches(&handled, x));
+                }
+                self.raise(errors, e.span);
+                value
             }
             ExprKind::Call { callee, arguments } => {
-                self.call_expr(callee, None, arguments, e.span, expected)
+                let t = self.call_expr(callee, None, arguments, e.span, expected);
+                self.check_creation(&t, e.span);
+                t
             }
             ExprKind::GenericCall {
                 callee,
                 types,
                 arguments,
-            } => self.call_expr(callee, Some(types), arguments, e.span, expected),
+            } => {
+                let t = self.call_expr(callee, Some(types), arguments, e.span, expected);
+                self.check_creation(&t, e.span);
+                t
+            }
             ExprKind::Index { target, index } => {
                 let t = self.expr(target, &Ty::Unknown);
                 match self.resolved(&t) {
@@ -1660,10 +2553,12 @@ impl<'a> Checker<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lambda(
         &mut self,
         params: &[ast::LambdaParam],
         returns: Option<&ast::Type>,
+        fails: &[ast::Type],
         body: &ast::Expr,
         span: Span,
         expected: &Ty,
@@ -1697,6 +2592,21 @@ impl<'a> Checker<'a> {
                 .map(|f| self.resolved_keep(&f.ret))
                 .unwrap_or(Ty::Unknown),
         };
+        let lambda_fails: Vec<Ty> = if fails.is_empty() {
+            expected_fn
+                .as_ref()
+                .map(|f| f.fails.iter().map(|t| self.resolved_keep(t)).collect())
+                .unwrap_or_default()
+        } else {
+            fails.iter().map(|t| self.resolve_type(t, true)).collect()
+        };
+        // A lambda has its own errors, loops and captured names (docs/semantics.md 5, 7.2).
+        let saved_fails = std::mem::replace(&mut self.fn_fails, lambda_fails.clone());
+        let saved_frames = std::mem::take(&mut self.try_frames);
+        let saved_handlers = std::mem::take(&mut self.handlers);
+        let saved_try = std::mem::replace(&mut self.in_try_block, 0);
+        let saved_loops = std::mem::replace(&mut self.loops, 0);
+        let saved_floor = std::mem::replace(&mut self.lambda_floor, self.scopes.len());
         self.push();
         for (p, (_, t)) in params.iter().zip(&types) {
             let t = if matches!(t, Ty::Var(_)) {
@@ -1710,6 +2620,12 @@ impl<'a> Checker<'a> {
         let found = self.expr(body, &ret);
         self.ret = saved;
         self.pop();
+        self.fn_fails = saved_fails;
+        self.try_frames = saved_frames;
+        self.handlers = saved_handlers;
+        self.in_try_block = saved_try;
+        self.loops = saved_loops;
+        self.lambda_floor = saved_floor;
         if returns.is_some() {
             self.expect(&found, &ret, body.span);
         }
@@ -1724,7 +2640,7 @@ impl<'a> Checker<'a> {
         Ty::Func(Box::new(FnTy {
             params: types,
             ret,
-            fails: Vec::new(),
+            fails: lambda_fails,
         }))
     }
 
@@ -1945,6 +2861,7 @@ impl<'a> Checker<'a> {
             );
             return Ty::Unknown;
         }
+        self.use_ok.insert(span_key(target.span));
         let t = self.expr(target, &Ty::Unknown);
         self.field_of(&t, name)
     }
@@ -2064,9 +2981,11 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Unknown;
                 }
+                self.use_ok.insert(span_key(target.span));
                 let recv = self.expr(target, &Ty::Unknown);
                 let recv = self.resolved(&recv);
                 if matches!(recv, Ty::Unknown | Ty::Never) {
+                    self.uncertain();
                     for a in args {
                         self.expr(&a.value, &Ty::Unknown);
                     }
@@ -2075,6 +2994,20 @@ impl<'a> Checker<'a> {
                 if let Some((f, subst, self_ty)) = self.find_method(&recv, &name.text) {
                     let (owner, public) = (self.p.funcs[f].module, self.p.funcs[f].public);
                     self.check_visible(owner, public, &name.text, name.span);
+                    if self.p.funcs[f].self_param == Some(true) && self.silent == 0 {
+                        // A `var self` method changes its receiver (L-11).
+                        let (root, bad) = self.place(target);
+                        if !Checker::mutable_root(&root) {
+                            let who = Checker::root_name(&root);
+                            self.err(
+                                "E0078",
+                                target.span,
+                                catalog::method_changes(&name.text, &who),
+                            );
+                        } else if let Some(field) = bad {
+                            self.err("E0078", target.span, catalog::field_not_var(&field));
+                        }
+                    }
                     return self.call_function(
                         f,
                         subst,
@@ -2154,9 +3087,12 @@ impl<'a> Checker<'a> {
         match self.resolved(t) {
             Ty::Func(f) => {
                 let params = Checker::value_params(&f);
-                self.call(params, f.ret.clone(), args, span, expected)
+                let result = self.call(params, f.ret.clone(), args, span, expected);
+                self.fallible_call(f.fails.clone(), span);
+                result
             }
             Ty::Unknown | Ty::Never => {
+                self.uncertain();
                 for a in args {
                     self.expr(&a.value, &Ty::Unknown);
                 }
@@ -2455,4 +3391,25 @@ impl<'a> Checker<'a> {
 
 fn prelude_iface(p: &Program, name: &str) -> Option<DefId> {
     prelude_def(p, name)
+}
+
+/// Every combination of one pattern from each column.
+fn product(columns: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
+    let mut result = vec![Vec::new()];
+    for column in columns {
+        let mut next = Vec::new();
+        for prefix in &result {
+            for p in column {
+                let mut row = prefix.clone();
+                row.push(p.clone());
+                next.push(row);
+            }
+        }
+        result = next;
+        if result.len() > 256 {
+            // Too many combinations to enumerate: treat the rest as matching anything.
+            return vec![vec![Pat::Wild; columns.len()]];
+        }
+    }
+    result
 }

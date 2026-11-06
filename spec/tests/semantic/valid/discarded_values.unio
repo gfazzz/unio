@@ -1,0 +1,17 @@
+## L-30: only a Result or a process Output must be used; other results may be dropped.
+error Bad:
+    reason as Text
+
+function parse(text as Text) returns Result[Int, Bad]:
+    return ok(text.length())
+
+function answer() returns Int:
+    return 42
+
+function f() returns Int:
+    answer()
+    let _ = parse("1")
+    let parsed = parse("2")
+    match parsed:
+        case ok(value): return value
+        case error(_): return 0

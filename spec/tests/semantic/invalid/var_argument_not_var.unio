@@ -1,0 +1,7 @@
+# expect-error: 7 E0079
+function bump(var items as List[Int]):
+    items.append(1)
+
+function f():
+    let items = [1]
+    bump(items)

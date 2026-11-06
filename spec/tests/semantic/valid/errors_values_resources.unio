@@ -1,0 +1,122 @@
+## Sprint S4: what must pass the checks of errors, values, control flow, resources and match.
+
+error Bad:
+    reason as Text
+
+error Worse:
+    code as Int
+
+enum Color:
+    Red
+    Green
+
+struct Counter:
+    var count as Int = 0
+    label as Text
+
+struct Handle:
+    id as Int
+    var closed as Bool = false
+
+extend Handle with Resource:
+    function release(var self):
+        self.closed = true
+
+extend Handle:
+    public function read(var self) returns Int:
+        return self.id
+
+function open(id as Int) returns Handle:
+    return Handle(id = id)
+
+function risky(n as Int) returns Int fails with Bad:
+    if n < 0: fail Bad(reason = "negative")
+    return n
+
+function riskier(n as Int) returns Int fails with Bad, Worse:
+    if n > 100: fail Worse(code = n)
+    return try risky(n)
+
+function propagate(n as Int) returns Int fails with Bad, Worse:
+    let a = try risky(n)
+    return a + try riskier(n)
+
+function handle_all(n as Int) returns Int:
+    try:
+        return riskier(n)
+    on Bad as e: return 0
+    on Error: return -1
+
+function inline_handler(n as Int) returns Int:
+    let value = try risky(n) on Bad as e:
+        return -1
+    return value
+
+function from_result(r as Result[Int, Bad]) returns Int fails with Bad:
+    return try r
+
+function bump(var counter as Counter):
+    counter.count = counter.count + 1
+
+function values() returns Int:
+    var counter = Counter(label = "a")
+    bump(counter)
+    counter.count = 10
+    var items = [1, 2]
+    items.append(3)
+    items[0] = 5
+    return counter.count + items[0]
+
+function name(c as Color) returns Text:
+    match c:
+        case Color.Red: return "red"
+        case Color.Green: return "green"
+
+function describe(o as Option[Int], flag as Bool) returns Text:
+    match o:
+        case some(n) if n > 10: return "big"
+        case some(_): return "small"
+        case none: pass
+    match flag:
+        case true: return "yes"
+        case false: return "no"
+
+function words(list as List[Text]) returns Int:
+    match list:
+        case []: return 0
+        case [_]: return 1
+        case [_, rest...]: return 1 + rest.length()
+
+function forever() returns Int:
+    var n = 0
+    while true:
+        n = n + 1
+        if n > 10: return n
+
+function never_ends() returns Int:
+    assert_fail("not implemented")
+
+function loops(items as List[Int]) returns Int:
+    var total = 0
+    for item in items:
+        if item < 0: continue
+        if item > 100: break
+        total = total + item
+    return total
+
+function resources() returns Int:
+    using h = open(1):
+        let value = h.read()
+        return value + h.id
+
+function discard() returns Int:
+    let _ = risky_free()
+    return 0
+
+function risky_free() returns Int:
+    return 1
+
+test "a test may handle errors":
+    let n = try risky(1) on Bad as e:
+        assert_fail(e.reason)
+    assert n == 1

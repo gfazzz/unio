@@ -1,0 +1,18 @@
+# expect-error: 18 E0061
+interface Source[T]:
+    function next(var self) returns Option[T]
+
+struct Numbers:
+    var left as Int
+
+extend Numbers with Source[Int]:
+    function next(var self) returns Option[Int]:
+        if self.left == 0: return none
+        self.left = self.left - 1
+        return some(self.left)
+
+function first(source as Source[Text]) returns Int:
+    return 0
+
+function f() returns Int:
+    return first(Numbers(left = 3))

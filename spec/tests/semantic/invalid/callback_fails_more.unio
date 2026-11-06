@@ -1,0 +1,12 @@
+# expect-error: 12 E0061
+error Bad:
+    reason as Text
+
+function risky(x as Int) returns Int fails with Bad:
+    fail Bad(reason = "x")
+
+function apply(f as Function[(Int) -> Int], x as Int) returns Int:
+    return f(x)
+
+function g() returns Int:
+    return apply(risky, 1)

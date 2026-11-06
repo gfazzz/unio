@@ -46,6 +46,8 @@ pub struct FieldDef {
     pub name: String,
     pub ty: Ty,
     pub public: bool,
+    /// Declared `var`: the field can change through a mutable place (L-11).
+    pub var: bool,
     pub has_default: bool,
 }
 
@@ -73,6 +75,8 @@ pub struct Def {
 pub struct ParamDef {
     pub name: String,
     pub ty: Ty,
+    /// A `var` parameter: the argument is a `var` name of the caller (L-11).
+    pub var: bool,
     pub named_only: bool,
     pub has_default: bool,
     pub span: Span,
@@ -131,6 +135,18 @@ pub struct ConstDef {
     pub span: Span,
 }
 
+/// A call of one function from another.
+#[derive(Clone, Copy, Debug)]
+pub struct CallEdge {
+    pub caller: FnId,
+    pub callee: FnId,
+    pub module: ModId,
+    pub span: Span,
+}
+
+/// The layers of the standard library in order (S-11): each may use itself and those before it.
+pub const LAYER_NAMES: [&str; 3] = ["core", "alloc", "std"];
+
 pub struct Program {
     pub modules: Vec<Module>,
     pub defs: Vec<Def>,
@@ -140,6 +156,10 @@ pub struct Program {
     pub params: Vec<ParamInfo>,
     pub prelude: HashMap<String, (ModId, Symbol)>,
     pub diagnostics: Vec<(ModId, Diagnostic)>,
+    /// Calls found by the checks: caller, callee, and the place of the call (sprint S4).
+    pub calls: Vec<CallEdge>,
+    /// Places where a function is named, for `unio symbol`.
+    pub usages: Vec<(FnId, ModId, Span)>,
     by_path: HashMap<PathBuf, ModId>,
     stdlib_root: Option<PathBuf>,
 }
@@ -179,7 +199,58 @@ fn package_root(file: &Path) -> PathBuf {
     dir
 }
 
+/// The files that may declare the module named by a prefix of a symbol name: a module of the
+/// standard library (`std.files`) or of the package around `start`. Longer prefixes first.
+pub fn symbol_module_files(query: &str, start: &Path) -> Vec<PathBuf> {
+    let parts: Vec<&str> = query.split('.').collect();
+    let stdlib = find_stdlib(&start.join("unio.toml"));
+    let package = package_root(&start.join("unio.toml"));
+    let mut found = Vec::new();
+    for end in (1..parts.len()).rev() {
+        let module = &parts[..end];
+        if module[0] == "std" && module.len() > 1 {
+            if let Some(root) = &stdlib {
+                let rest = module[1..].join("/") + ".unio";
+                found.extend(
+                    LAYERS
+                        .iter()
+                        .map(|l| root.join(l).join(&rest))
+                        .filter(|p| p.is_file()),
+                );
+            }
+        } else {
+            let file = package.join(module.join("/") + ".unio");
+            if file.is_file() {
+                found.push(file);
+            }
+        }
+    }
+    if found.is_empty() {
+        if let Some(root) = stdlib {
+            found.push(root.join("core/prelude.unio"));
+        }
+    }
+    found
+}
+
 impl Program {
+    /// The layer of a module of the standard library: 0 core, 1 alloc, 2 std; None elsewhere.
+    pub fn module_layer(&self, module: ModId) -> Option<usize> {
+        let m = &self.modules[module];
+        if !m.stdlib {
+            return None;
+        }
+        let parts: Vec<String> = m
+            .path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let at = parts.iter().rposition(|c| c == "stdlib")?;
+        LAYER_NAMES
+            .iter()
+            .position(|l| parts.get(at + 1).map(String::as_str) == Some(*l))
+    }
+
     /// Loads the files, what they import, and the standard library.
     pub fn load(files: &[PathBuf]) -> Program {
         let stdlib_root = files.first().and_then(|f| find_stdlib(f));
@@ -192,6 +263,8 @@ impl Program {
             params: Vec::new(),
             prelude: HashMap::new(),
             diagnostics: Vec::new(),
+            calls: Vec::new(),
+            usages: Vec::new(),
             by_path: HashMap::new(),
             stdlib_root,
         };
@@ -964,6 +1037,7 @@ impl Program {
                 name: field.name.text.clone(),
                 ty,
                 public: field.public || always_public,
+                var: field.var,
                 has_default: field.default.is_some(),
             });
         }
@@ -984,12 +1058,17 @@ impl Program {
         let mut default_plain = false;
         let mut default_named = false;
         for param in &sig.params {
-            let (name, ty, named_only, default) = match param {
+            let (name, ty, named_only, default, var) = match param {
                 ast::Param::SelfParam { .. } => continue,
-                ast::Param::Named { name, ty, default } => (name, ty, true, default.is_some()),
+                ast::Param::Named { name, ty, default } => {
+                    (name, ty, true, default.is_some(), false)
+                }
                 ast::Param::Plain {
-                    name, ty, default, ..
-                } => (name, ty, false, default.is_some()),
+                    name,
+                    ty,
+                    default,
+                    var,
+                } => (name, ty, false, default.is_some(), *var),
             };
             let grouping_error = if named_only {
                 let bad = default_named && !default;
@@ -1017,6 +1096,7 @@ impl Program {
             params.push(ParamDef {
                 name: name.text.clone(),
                 ty,
+                var,
                 named_only,
                 has_default: default,
                 span: name.span,
@@ -1353,10 +1433,15 @@ impl Program {
                     .map(|(_, t)| self.show(t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if f.ret == Ty::Unit {
-                    format!("Function[({params})]")
+                let fails = if f.fails.is_empty() {
+                    String::new()
                 } else {
-                    format!("Function[({params}) -> {}]", self.show(&f.ret))
+                    format!(" fails with {}", list(&f.fails))
+                };
+                if f.ret == Ty::Unit {
+                    format!("Function[({params}){fails}]")
+                } else {
+                    format!("Function[({params}) -> {}{fails}]", self.show(&f.ret))
                 }
             }
             Ty::Named(d, args) if args.is_empty() => self.defs[*d].name.clone(),

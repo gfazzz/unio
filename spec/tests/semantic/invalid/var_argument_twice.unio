@@ -1,0 +1,7 @@
+# expect-error: 7 E0042
+function move(var source as List[Int], var target as List[Int]):
+    target.append_all(source)
+
+function f():
+    var items = [1]
+    move(items, items)

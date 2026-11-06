@@ -1,0 +1,10 @@
+# expect-error: 8 E0068
+enum Color:
+    Red
+    Green
+    Blue
+
+function name(c as Color) returns Text:
+    match c:
+        case Color.Red: return "red"
+        case Color.Green: return "green"

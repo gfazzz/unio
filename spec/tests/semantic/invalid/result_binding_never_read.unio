@@ -1,0 +1,9 @@
+# expect-error: 9 E0043
+error Bad:
+    reason as Text
+
+function parse(text as Text) returns Result[Int, Bad]:
+    return ok(text.length())
+
+function f():
+    let parsed = parse("1")

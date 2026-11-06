@@ -51,7 +51,7 @@ fn names(items: &[Name]) -> String {
         .join(".")
 }
 
-fn item(item: &Item) -> String {
+pub fn item(item: &Item) -> String {
     match item {
         Item::Import(i) => {
             if i.names.is_empty() {
@@ -84,21 +84,36 @@ fn item(item: &Item) -> String {
             }
             for m in &e.members {
                 out.push(' ');
-                let inner = match &m.body {
-                    Some(body) => format!("(function {} {})", signature(&m.signature), block(body)),
-                    None => format!("(external {})", signature(&m.signature)),
-                };
-                if m.public {
-                    out.push_str(&format!("(public {inner})"));
-                } else {
-                    out.push_str(&inner);
-                }
+                out.push_str(&member(m));
             }
             out.push(')');
             out
         }
         Item::Test(t) => format!("(test {} {})", text(&t.description), block(&t.body)),
     }
+}
+
+/// One member of an extend block.
+pub fn member(m: &Member) -> String {
+    let inner = match &m.body {
+        Some(body) => format!("(function {} {})", signature(&m.signature), block(body)),
+        None => format!("(external {})", signature(&m.signature)),
+    };
+    if m.public {
+        format!("(public {inner})")
+    } else {
+        inner
+    }
+}
+
+/// The head of an extend block without its members: generics, target and interface.
+pub fn extend_head(e: &Extend) -> String {
+    let mut out = format!("(extend{} {}", generics(&e.generics), ty(&e.target));
+    if let Some(i) = &e.interface {
+        out.push_str(&format!(" (with {})", ty(i)));
+    }
+    out.push(')');
+    out
 }
 
 fn generics(g: &[GenericParam]) -> String {

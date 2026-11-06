@@ -1,0 +1,9 @@
+# expect-error: 9 E0074
+error Bad:
+    reason as Text
+
+function risky() returns Int fails with Bad:
+    fail Bad(reason = "x")
+
+function f() returns Int:
+    return try risky()

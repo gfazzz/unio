@@ -1,0 +1,3 @@
+# expect-error: 2 E0082
+function sign(x as Int) returns Int:
+    if x > 0: return 1

@@ -59,14 +59,17 @@ pub const CODES: &[&str] = &[
     "E0012", "E0013", "E0020", "E0023", "E0024", "E0030", "E0032", "E0034", "E0040", "E0041",
     "E0044", "E0049", "E0050", "E0051", "E0052", "E0053", "E0054", "E0055", "E0056", "E0057",
     "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
-    "E0069", "E0071", "E0072",
+    "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074", "E0075", "E0076",
+    "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085",
 ];
 
 /// Codes of the name and type checks (sprint S3); their examples need the whole check.
 pub const SEMANTIC_CODES: &[&str] = &[
     "E0040", "E0041", "E0044", "E0049", "E0050", "E0051", "E0052", "E0053", "E0054", "E0055",
     "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
-    "E0066", "E0067", "E0069", "E0071", "E0072",
+    "E0066", "E0067", "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074",
+    "E0075", "E0076", "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084",
+    "E0085",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -514,6 +517,26 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0063", missing_field("y", "Point")),
         ("E0063", variant_fields("Add", 1)),
         ("E0072", variant_collision("List", "Command")),
+        ("E0042", var_argument_twice("items")),
+        ("E0043", result_discarded("Result[Int, Bad]")),
+        ("E0068", match_not_exhaustive("Color.Blue")),
+        ("E0073", call_needs_try("IoError")),
+        ("E0074", error_not_handled("IoError")),
+        ("E0074", add_to_fails("IoError")),
+        ("E0075", handler_completes()),
+        ("E0076", try_cannot_fail()),
+        ("E0077", assign_immutable("count")),
+        ("E0078", not_mutable("point")),
+        ("E0078", field_not_var("x")),
+        ("E0078", method_changes("append", "items")),
+        ("E0079", var_argument("items")),
+        ("E0080", resource_outside_using("AtomicFile")),
+        ("E0081", resource_escapes("file")),
+        ("E0082", missing_return("Int")),
+        ("E0083", outside_loop("break")),
+        ("E0084", layer_violation("print", "std", "core")),
+        ("E0084", profile_violation("main", "alloc", "main -> join")),
+        ("E0085", effect_not_permitted("files", "main -> read_text")),
         ("E0050", is_name_not_bound("x")),
         ("E0065", operator_not_defined("+", "Point")),
         ("E0065", operands_differ("==", "Int", "Text")),
@@ -773,6 +796,102 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "Вариант, имя которого совпадает с видимым типом, функцией или другим вариантом, пишется с именем перечисления (Я-6a). Пишите `Enum.Variant`.",
             "enum C:\n    List\n    Show\n\nlet A as C = List\n",
             "enum C:\n    List\n    Show\n\nlet A as C = C.List\n",
+        ),
+        "E0042" => (
+            "One variable reaches two `var` parameters of one call, so both would change the same value (RFC 0001). Pass two different variables, or a copy for one of them.",
+            "Одна переменная попадает в два `var`-параметра одного вызова, и оба меняли бы одно значение (RFC 0001). Передайте две разные переменные или копию для одного из них.",
+            "function move(var source as List[Int], var target as List[Int]):\n    target.append_all(source)\n\nfunction f():\n    var items = [1]\n    move(items, items)\n",
+            "function move(var source as List[Int], var target as List[Int]):\n    target.append_all(source)\n\nfunction f():\n    var items = [1]\n    var other as List[Int] = []\n    move(items, other)\n",
+        ),
+        "E0043" => (
+            "A `Result` or a `std.process.Output` returned by a call is dropped, or held by a local name that is never read (L-30, RFC 0001). Other results may be dropped. Use it, return it, or bind it to `_` with `let _ = ...` to show that it is dropped on purpose; for a process, also look at its `status`.",
+            "`Result` или `std.process.Output`, возвращённый вызовом, отбрасывается или хранится в локальном имени, которое не читается (Я-30, RFC 0001). Остальные результаты можно отбрасывать. Используйте его, верните или свяжите с `_` через `let _ = ...`, чтобы показать, что он отбрасывается намеренно; для процесса проверьте и его `status`.",
+            "error Bad:\n    reason as Text\n\nfunction parse(text as Text) returns Result[Int, Bad]:\n    return ok(1)\n\nfunction f():\n    parse(\"1\")\n",
+            "error Bad:\n    reason as Text\n\nfunction parse(text as Text) returns Result[Int, Bad]:\n    return ok(1)\n\nfunction f():\n    let _ = parse(\"1\")\n",
+        ),
+        "E0068" => (
+            "A `match` covers every variant of its value or ends with `case _`; cases with `if` guards do not count. Add the missing case shown in the message.",
+            "`match` покрывает каждый вариант своего значения или заканчивается `case _`; ветки с условием `if` не считаются. Добавьте недостающую ветку из сообщения.",
+            "enum Color:\n    Red\n    Green\n\nfunction name(c as Color) returns Text:\n    match c:\n        case Color.Red: return \"red\"\n",
+            "enum Color:\n    Red\n    Green\n\nfunction name(c as Color) returns Text:\n    match c:\n        case Color.Red: return \"red\"\n        case Color.Green: return \"green\"\n",
+        ),
+        "E0073" => (
+            "A function with `fails with` is called with `try` in front of the call, which passes the error on, or inside a `try:` block whose `on` handlers receive it (L-14).",
+            "Функция с `fails with` вызывается с `try` перед вызовом, который передаёт ошибку дальше, или внутри блока `try:`, чьи обработчики `on` её принимают (Я-14).",
+            "error Bad:\n    reason as Text\n\nfunction risky() returns Int fails with Bad:\n    fail Bad(reason = \"x\")\n\nfunction f() returns Int fails with Bad:\n    return risky()\n",
+            "error Bad:\n    reason as Text\n\nfunction risky() returns Int fails with Bad:\n    fail Bad(reason = \"x\")\n\nfunction f() returns Int fails with Bad:\n    return try risky()\n",
+        ),
+        "E0074" => (
+            "Every error that can leave a function is handled by an `on` of an enclosing `try:` or listed in the function's `fails with` (L-15). Add it to `fails with` or handle it.",
+            "Каждая ошибка, которая может выйти из функции, обрабатывается `on` объемлющего `try:` или перечислена в `fails with` функции (Я-15). Добавьте её в `fails with` или обработайте.",
+            "error Bad:\n    reason as Text\n\nfunction f() returns Int:\n    fail Bad(reason = \"x\")\n",
+            "error Bad:\n    reason as Text\n\nfunction f() returns Int fails with Bad:\n    fail Bad(reason = \"x\")\n",
+        ),
+        "E0075" => (
+            "The block of an inline handler replaces the value of the expression, so it must not reach its end: finish it with `return`, `fail`, `break`, `continue`, or a call that never returns (L-14a).",
+            "Блок строчного обработчика заменяет значение выражения, поэтому не должен доходить до конца: закончите его `return`, `fail`, `break`, `continue` или вызовом, который не возвращает управление (Я-14a).",
+            "error Bad:\n    reason as Text\n\nfunction risky() returns Int fails with Bad:\n    fail Bad(reason = \"x\")\n\nfunction f() returns Int:\n    let x = try risky() on Bad as e:\n        pass\n    return x\n",
+            "error Bad:\n    reason as Text\n\nfunction risky() returns Int fails with Bad:\n    fail Bad(reason = \"x\")\n\nfunction f() returns Int:\n    let x = try risky() on Bad as e:\n        return 0\n    return x\n",
+        ),
+        "E0076" => (
+            "`try` stands before an expression that cannot fail, so it says nothing. Remove it.",
+            "`try` стоит перед выражением, которое не может завершиться ошибкой, и ничего не сообщает. Уберите его.",
+            "function plain() returns Int:\n    return 1\n\nfunction f() returns Int:\n    return try plain()\n",
+            "function plain() returns Int:\n    return 1\n\nfunction f() returns Int:\n    return plain()\n",
+        ),
+        "E0077" => (
+            "A name bound by `let`, a parameter, a `for` variable, a pattern, or `using` cannot be assigned (L-10). Declare it with `var` if it has to change.",
+            "Имя, введённое `let`, параметр, переменной `for`, образцом или `using`, нельзя переприсвоить (Я-10). Объявите его через `var`, если оно должно меняться.",
+            "function f() returns Int:\n    let count = 1\n    count = 2\n    return count\n",
+            "function f() returns Int:\n    var count = 1\n    count = 2\n    return count\n",
+        ),
+        "E0078" => (
+            "A value changes only through a place that starts at a `var` name, a `var` parameter, or a `using` name, and only in fields declared `var` (L-11). Declare the name or the field with `var`.",
+            "Значение меняется только через место, которое начинается с `var`-имени, `var`-параметра или имени `using`, и только в полях, объявленных `var` (Я-11). Объявите имя или поле через `var`.",
+            "struct P:\n    var x as Int\n\nfunction f() returns Int:\n    let p = P(x = 1)\n    p.x = 2\n    return p.x\n",
+            "struct P:\n    var x as Int\n\nfunction f() returns Int:\n    var p = P(x = 1)\n    p.x = 2\n    return p.x\n",
+        ),
+        "E0079" => (
+            "A `var` parameter changes the caller's variable, so the argument is a `var` name of the caller (L-11). Declare the variable with `var`.",
+            "`var`-параметр меняет переменную вызывающего, поэтому аргумент — `var`-имя вызывающего (Я-11). Объявите переменную через `var`.",
+            "function bump(var items as List[Int]):\n    items.append(1)\n\nfunction f():\n    let items = [1]\n    bump(items)\n",
+            "function bump(var items as List[Int]):\n    items.append(1)\n\nfunction f():\n    var items = [1]\n    bump(items)\n",
+        ),
+        "E0080" => (
+            "A resource is created only as the value of `using`, as a field of another resource, or as the result of a function that returns it (L-20). Open it with `using`.",
+            "Ресурс создаётся только как значение `using`, как поле другого ресурса или как результат функции, которая его возвращает (Я-20). Откройте его через `using`.",
+            "struct Handle:\n    id as Int\n\nextend Handle with Resource:\n    function release(var self):\n        pass\n\nfunction open() returns Handle:\n    return Handle(id = 1)\n\nfunction f() returns Int:\n    let h = open()\n    return h.id\n",
+            "struct Handle:\n    id as Int\n\nextend Handle with Resource:\n    function release(var self):\n        pass\n\nfunction open() returns Handle:\n    return Handle(id = 1)\n\nfunction f() returns Int:\n    using h = open():\n        return h.id\n",
+        ),
+        "E0081" => (
+            "A resource stays in its `using` block: it can be read, have its methods called, and be passed to a parameter of its type, but not be stored, returned, or captured (L-20). Use it inside the block.",
+            "Ресурс остаётся в своём блоке `using`: его можно читать, вызывать его методы и передавать параметру его типа, но нельзя сохранять, возвращать или захватывать (Я-20). Используйте его внутри блока.",
+            "struct Handle:\n    id as Int\n\nextend Handle with Resource:\n    function release(var self):\n        pass\n\nfunction open() returns Handle:\n    return Handle(id = 1)\n\nfunction f() returns Int:\n    using h = open():\n        let copy = h\n        return copy.id\n",
+            "struct Handle:\n    id as Int\n\nextend Handle with Resource:\n    function release(var self):\n        pass\n\nfunction open() returns Handle:\n    return Handle(id = 1)\n\nfunction f() returns Int:\n    using h = open():\n        return h.id\n",
+        ),
+        "E0082" => (
+            "A function with a result returns a value on every path: the end of its body cannot be reachable. Add a `return` or a `fail` at the end.",
+            "Функция с результатом возвращает значение на каждом пути: конец её тела не может быть достижим. Добавьте в конце `return` или `fail`.",
+            "function sign(x as Int) returns Int:\n    if x > 0: return 1\n",
+            "function sign(x as Int) returns Int:\n    if x > 0: return 1\n    return 0\n",
+        ),
+        "E0083" => (
+            "`break` and `continue` belong to a `for` or `while` loop. Use `return` to leave a function.",
+            "`break` и `continue` относятся к циклу `for` или `while`. Чтобы выйти из функции, используйте `return`.",
+            "function f():\n    break\n",
+            "function f():\n    return\n",
+        ),
+        "E0084" => (
+            "A module of a library layer uses only its layer and the layers before it, and `--profile=core` allows nothing above `core` (S-11, C-21). Move the code to a higher layer, or avoid the call shown in the chain.",
+            "Модуль слоя библиотеки пользуется только своим слоем и предшествующими, а `--profile=core` не разрешает ничего выше `core` (Б-11, К-21). Перенесите код в более высокий слой или уберите вызов из цепочки.",
+            "from std.text import join\n\nfunction label(parts as List[Text]) returns Text:\n    return join(parts, \" \")\n",
+            "function label(count as Int) returns Int:\n    return count + 1\n",
+        ),
+        "E0085" => (
+            "The package uses a function whose effect its manifest does not permit (T-6, concept section 6). Add the permission to `unio.toml`, or remove the call shown in the chain.",
+            "Пакет использует функцию, эффект которой не разрешён его манифестом (И-6, раздел 6 концепции). Добавьте полномочие в `unio.toml` или уберите вызов из цепочки.",
+            "import std.files\n\nfunction size(path as Path) returns Int fails with IoError:\n    return (try files.read_text(path)).length()\n",
+            "function size(text as Text) returns Int:\n    return text.length()\n",
         ),
         _ => return None,
     })
@@ -1110,5 +1229,158 @@ pub fn not_callable(ty: &str) -> Msg {
     Msg::new(
         format!("a value of type {ty} cannot be called"),
         format!("значение типа {ty} нельзя вызвать"),
+    )
+}
+
+pub fn missing_return(ty: &str) -> Msg {
+    Msg::new(
+        format!("the end of this function can be reached without returning a value of type {ty}; add a return"),
+        format!("конец этой функции достижим без возврата значения типа {ty}; добавьте return"),
+    )
+}
+
+pub fn handler_completes() -> Msg {
+    Msg::new(
+        "the handler block reaches its end; finish it with return, fail, break, or continue",
+        "блок обработчика доходит до конца; закончите его return, fail, break или continue",
+    )
+}
+
+pub fn outside_loop(word: &str) -> Msg {
+    Msg::new(
+        format!("'{word}' is outside a loop; use return to leave the function"),
+        format!("'{word}' стоит вне цикла; чтобы выйти из функции, используйте return"),
+    )
+}
+
+pub fn binding_never_read(name: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' holds a {ty} that is never read; use it or write 'let _ = ...'"),
+        format!(
+            "'{name}' хранит {ty}, который не читается; используйте его или напишите 'let _ = ...'"
+        ),
+    )
+}
+
+pub fn result_discarded(ty: &str) -> Msg {
+    Msg::new(
+        format!("the {ty} result of this call is dropped; use it or write 'let _ = ...'"),
+        format!(
+            "результат {ty} этого вызова отбрасывается; используйте его или напишите 'let _ = ...'"
+        ),
+    )
+}
+
+pub fn error_not_handled(ty: &str) -> Msg {
+    Msg::new(
+        format!("the error {ty} is neither handled nor listed in 'fails with'; add it to 'fails with' or handle it with 'on'"),
+        format!("ошибка {ty} не обработана и не перечислена в 'fails with'; добавьте её в 'fails with' или обработайте через 'on'"),
+    )
+}
+
+pub fn add_to_fails(ty: &str) -> Msg {
+    Msg::new(
+        format!("add {ty} to 'fails with'"),
+        format!("добавить {ty} в 'fails with'"),
+    )
+}
+
+pub fn call_needs_try(errors: &str) -> Msg {
+    Msg::new(
+        format!("this call can fail with {errors}; write 'try' before it, or call it inside 'try:' with 'on'"),
+        format!("этот вызов может завершиться ошибкой {errors}; напишите перед ним 'try' или вызовите его внутри 'try:' с 'on'"),
+    )
+}
+
+pub fn try_cannot_fail() -> Msg {
+    Msg::new(
+        "'try' stands before an expression that cannot fail; remove it",
+        "'try' стоит перед выражением, которое не может завершиться ошибкой; уберите его",
+    )
+}
+
+pub fn assign_immutable(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' cannot be assigned; declare it with 'var'"),
+        format!("'{name}' нельзя переприсвоить; объявите его через 'var'"),
+    )
+}
+
+pub fn not_mutable(name: &str) -> Msg {
+    Msg::new(
+        format!("{name} cannot change here; declare it with 'var'"),
+        format!("{name} здесь нельзя менять; объявите через 'var'"),
+    )
+}
+
+pub fn field_not_var(field: &str) -> Msg {
+    Msg::new(
+        format!(
+            "the field '{field}' is not declared 'var', so it cannot change; declare it with 'var'"
+        ),
+        format!("поле '{field}' не объявлено 'var' и не может меняться; объявите его через 'var'"),
+    )
+}
+
+pub fn method_changes(method: &str, who: &str) -> Msg {
+    Msg::new(
+        format!("'{method}' changes {who}, which cannot change here; declare it with 'var'"),
+        format!("'{method}' меняет {who}, а здесь это нельзя менять; объявите через 'var'"),
+    )
+}
+
+pub fn var_argument(name: &str) -> Msg {
+    Msg::new(
+        format!("a 'var' parameter needs a 'var' variable, and {name} is not one; declare it with 'var'"),
+        format!("'var'-параметру нужна 'var'-переменная, а {name} ею не является; объявите её через 'var'"),
+    )
+}
+
+pub fn var_argument_twice(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is passed to two 'var' parameters of one call; pass two different variables"),
+        format!("'{name}' передаётся в два 'var'-параметра одного вызова; передайте две разные переменные"),
+    )
+}
+
+pub fn resource_outside_using(ty: &str) -> Msg {
+    Msg::new(
+        format!("the resource {ty} is created outside 'using'; open it with 'using'"),
+        format!("ресурс {ty} создаётся вне 'using'; откройте его через 'using'"),
+    )
+}
+
+pub fn resource_escapes(name: &str) -> Msg {
+    Msg::new(
+        format!("the resource '{name}' would leave its 'using' block; use it inside the block"),
+        format!("ресурс '{name}' покинул бы свой блок 'using'; используйте его внутри блока"),
+    )
+}
+
+pub fn match_not_exhaustive(example: &str) -> Msg {
+    Msg::new(
+        format!("this match does not cover {example}; add a case for it or 'case _'"),
+        format!("этот match не покрывает {example}; добавьте для него ветку или 'case _'"),
+    )
+}
+
+pub fn layer_violation(name: &str, needed: &str, here: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' needs the layer {needed}, but this module is in the layer {here}; move the code or avoid the call"),
+        format!("'{name}' требует слоя {needed}, а этот модуль в слое {here}; перенесите код или уберите вызов"),
+    )
+}
+
+pub fn profile_violation(name: &str, needed: &str, chain: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' needs the layer {needed} through {chain}, which the core profile does not have; avoid that call"),
+        format!("'{name}' требует слоя {needed} через {chain}, которого нет в профиле core; уберите этот вызов"),
+    )
+}
+
+pub fn effect_not_permitted(effect: &str, chain: &str) -> Msg {
+    Msg::new(
+        format!("the effect '{effect}' is not permitted by unio.toml, but {chain} needs it; add the permission or remove the call"),
+        format!("эффект '{effect}' не разрешён в unio.toml, но он нужен {chain}; добавьте полномочие или уберите вызов"),
     )
 }

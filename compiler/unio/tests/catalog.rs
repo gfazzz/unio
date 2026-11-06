@@ -28,7 +28,8 @@ fn every_code_has_an_explanation_with_an_example_and_its_fix() {
 
 /// Checks an example as a whole file: syntax only for syntax codes, names and types too for
 /// the codes of docs/semantics.md. Each semantic example gets its own directory, so that the
-/// example of E0058 can import itself.
+/// example of E0058 can import itself. E0084 is checked with the core profile, and E0085 in a
+/// package whose manifest permits nothing.
 fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
     if !catalog::SEMANTIC_CODES.contains(&code) {
         return unio::check_source("example.unio", source);
@@ -40,7 +41,19 @@ fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("example.unio");
     std::fs::write(&file, source).unwrap();
-    let mut results = unio::check_files(std::slice::from_ref(&file));
+    if code == "E0085" {
+        std::fs::write(
+            dir.join("unio.toml"),
+            "[package]\nname = \"example\"\nversion = \"0.1.0\"\n\n[permissions]\n",
+        )
+        .unwrap();
+    }
+    let profile = if code == "E0084" {
+        unio::effects::Profile::Core
+    } else {
+        unio::effects::Profile::Application
+    };
+    let mut results = unio::check_files_with(std::slice::from_ref(&file), profile);
     let _ = std::fs::remove_dir_all(&dir);
     results.remove(0)
 }

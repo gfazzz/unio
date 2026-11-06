@@ -1,18 +1,22 @@
 //! The Unio compiler front end: lexer, parser, syntax tree, diagnostics and their catalog
 //! (requirements C-1, C-2, C-6 to C-10, R-12), the formatter (T-1 to T-3), the outline
-//! (C-12), and name and type checks (docs/semantics.md, sections 1–4). Errors, resources,
-//! and code generation are later stages of the plan.
+//! (C-12), the static checks of docs/semantics.md (names, types, errors, values, resources,
+//! layers, profiles and effects), and `unio symbol` with content hashes (C-11 to C-11b).
+//! Code generation is a later stage of the plan.
 
 pub mod ast;
 pub mod catalog;
 pub mod check;
 pub mod diag;
+pub mod effects;
 pub mod format;
 pub mod lexer;
 pub mod outline;
 pub mod parser;
 pub mod program;
 pub mod sexpr;
+pub mod sha;
+pub mod symbol;
 pub mod types;
 
 pub use diag::{explanation, Diagnostic, Lang, Msg, Severity, Span};
@@ -56,21 +60,41 @@ impl Analysis {
 /// analysis for every given file and every imported module of the same packages; the
 /// standard library is checked but reported only when it is given.
 pub fn check_files(files: &[std::path::PathBuf]) -> Vec<Analysis> {
+    check_files_with(files, effects::Profile::Application)
+}
+
+/// Loads and checks a program: syntax, then, when every module parses, the semantic checks,
+/// the profile and the permissions of the manifest.
+fn load_checked(files: &[std::path::PathBuf], profile: effects::Profile) -> program::Program {
+    let mut program = program::Program::load(files);
+    let syntax_ok = program.modules.iter().all(|m| !m.analysis.has_errors());
+    if syntax_ok {
+        check::check_program(&mut program);
+        effects::report(&mut program, profile);
+    } else {
+        // Names and types are checked only when every module parses; otherwise the
+        // syntax errors come first.
+        program.diagnostics.clear();
+    }
+    program
+}
+
+/// `unio symbol`: the reports of the declarations with the full name, found in the module
+/// that a prefix of the name designates, from the package around `start`.
+pub fn symbol(query: &str, start: &std::path::Path) -> Vec<symbol::Report> {
+    let files = program::symbol_module_files(query, start);
+    let query = query.to_string();
+    on_front_end_stack(move || {
+        let program = load_checked(&files, effects::Profile::Application);
+        symbol::lookup(&program, &query)
+    })
+}
+
+/// Like check_files, with the build profile of `unio check --profile` (C-21).
+pub fn check_files_with(files: &[std::path::PathBuf], profile: effects::Profile) -> Vec<Analysis> {
     let files = files.to_vec();
     on_front_end_stack(move || {
-        let mut program = program::Program::load(&files);
-        let syntax_ok: Vec<bool> = program
-            .modules
-            .iter()
-            .map(|m| !m.analysis.has_errors())
-            .collect();
-        if syntax_ok.iter().all(|ok| *ok) {
-            check::check_program(&mut program);
-        } else {
-            // Names and types are checked only when every module parses; otherwise the
-            // syntax errors come first.
-            program.diagnostics.clear();
-        }
+        let mut program = load_checked(&files, profile);
         let semantic = std::mem::take(&mut program.diagnostics);
         let mut modules = std::mem::take(&mut program.modules);
         for (module, diagnostic) in semantic {

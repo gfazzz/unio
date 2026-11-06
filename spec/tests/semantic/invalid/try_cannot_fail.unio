@@ -1,0 +1,6 @@
+# expect-error: 6 E0076
+function plain() returns Int:
+    return 1
+
+function f() returns Int:
+    return try plain()

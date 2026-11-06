@@ -1,13 +1,14 @@
-//! The `unio` command (front-end subset): check, fmt, outline, parse --ast, explain.
+//! The `unio` command (front-end subset): check, fmt, outline, symbol, parse --ast, explain.
 
 use std::process::ExitCode;
 
 use unio::Lang;
 
 const USAGE: &str = "Usage:
-    unio check [--diagnostics=json] [--lang=en|ru] FILE...
+    unio check [--diagnostics=json] [--lang=en|ru] [--profile=application|core] FILE...
     unio fmt [--check] FILE...
     unio outline [--json] FILE
+    unio symbol [--json] MODULE.NAME
     unio parse --ast FILE
     unio explain CODE
 
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
     let mut json = false;
     let mut ast = false;
     let mut check_only = false;
+    let mut profile = unio::effects::Profile::Application;
     let mut positional = Vec::new();
     for argument in &arguments {
         if let Some(value) = argument.strip_prefix("--lang=") {
@@ -29,6 +31,16 @@ fn main() -> ExitCode {
                 Some(l) => lang = l,
                 None => return usage(&format!("unknown language '{value}'; use en or ru")),
             }
+        } else if let Some(value) = argument.strip_prefix("--profile=") {
+            profile = match value {
+                "application" => unio::effects::Profile::Application,
+                "core" => unio::effects::Profile::Core,
+                _ => {
+                    return usage(&format!(
+                        "unknown profile '{value}'; use application or core"
+                    ))
+                }
+            };
         } else if argument == "--diagnostics=json" {
             json = true;
         } else if argument == "--diagnostics=text" {
@@ -52,7 +64,8 @@ fn main() -> ExitCode {
         return usage("a command is required");
     };
     match command.as_str() {
-        "check" => check(files, json, lang),
+        "check" => check(files, json, lang, profile),
+        "symbol" if files.len() == 1 => symbol(&files[0], json),
         "parse" if ast && files.len() == 1 => parse(&files[0], lang),
         "fmt" => fmt(files, check_only, lang),
         "outline" if files.len() == 1 => outline(&files[0], json, lang),
@@ -82,7 +95,26 @@ fn read(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("unio: {path}: {e}"))
 }
 
-fn check(files: &[String], json: bool, lang: Lang) -> ExitCode {
+/// `unio symbol`: what the compiler knows about one declaration (C-11).
+fn symbol(name: &str, json: bool) -> ExitCode {
+    let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let reports = unio::symbol(name, &start);
+    if reports.is_empty() {
+        eprintln!("unio: no declaration named {name}");
+        return ExitCode::from(1);
+    }
+    if json {
+        let items: Vec<String> = reports.iter().map(|r| r.json()).collect();
+        println!("[{}]", items.join(","));
+    } else {
+        for report in reports {
+            print!("{}", report.text());
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn check(files: &[String], json: bool, lang: Lang, profile: unio::effects::Profile) -> ExitCode {
     if files.is_empty() {
         return usage("check needs at least one file");
     }
@@ -95,7 +127,7 @@ fn check(files: &[String], json: bool, lang: Lang) -> ExitCode {
         }
     }
     let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
-    for analysis in unio::check_files(&paths) {
+    for analysis in unio::check_files_with(&paths, profile) {
         failed |= analysis.has_errors();
         if json {
             all_json.push(analysis.render_json(lang));

@@ -1,0 +1,9 @@
+# expect-error: 9 E0073
+error Bad:
+    reason as Text
+
+function risky() returns Int fails with Bad:
+    fail Bad(reason = "x")
+
+function f() returns Int fails with Bad:
+    return risky()
