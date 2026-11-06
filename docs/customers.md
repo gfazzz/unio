@@ -4,11 +4,11 @@ Version 0.1-draft. Russian localization: [ru/customers.md](ru/customers.md).
 
 A language meant for writing products with AI is checked by writing a product with AI. tanstaafl is that product: a B2B platform for building security systems (fire alarm, voice evacuation, access control, video surveillance, structured cabling, building dispatch) that audits a site against the norms with AI, generates designs, monitors sites around the clock with prediction, and has a separate post-quantum module. It is written by AI under human review, which is the use Unio is designed for.
 
-Today tanstaafl has a Rails portal; its AI service (Python), site agent (Rust with protocol drivers in C), event core (Elixir/OTP), and integrations (TypeScript) are planned. Each part becomes a scenario here. A scenario either runs in a named release of Unio or names what that release lacks.
+Today tanstaafl has a website in plain HTML; the Rails portal it started with is gone. Its AI service, site agent, event core, and integrations are planned in Unio, where they were once planned in Python, Rust with C drivers, Elixir/OTP, and TypeScript; until a release of Unio can carry a part, the part lives here as a scenario. Each part becomes a scenario here. A scenario either runs in a named release of Unio or names what that release lacks.
 
 ## 1. Rules
 
-- A scenario program lives in [../examples](../examples), uses only the standard library in [../stdlib](../stdlib), and follows the rules of the reference utilities: its usage and exit codes in the documentation comment, `test` blocks written before the code. CI checks its syntax and API use; its tests run once the stage 3 interpreter works (plan, section 3).
+- A scenario program lives in [../examples](../examples), uses only the standard library in [../stdlib](../stdlib), and follows the rules of the reference utilities: its usage and exit codes in the documentation comment, `test` blocks written before the code. CI checks it with the Rust front end (`unio check`, `unio fmt --check`) and checks its API use; its tests run once the interpreter of sprint S5 works (plan, section 12).
 - A gap is recorded in section 4 with its target: the existing requirement it waits for, a release, or an RFC. Closing a gap changes the concept, the requirements, or the library by the usual process (concept section 1.2, [rfcs/README.md](rfcs/README.md)); this document only points to where it landed.
 - The customer adds no requirement by itself. A gap becomes a requirement when the release it targets is specified.
 
@@ -30,7 +30,7 @@ Today tanstaafl has a Rails portal; its AI service (Python), site agent (Rust wi
 | B | Event journal of a site agent: undelivered events kept however old, delivered ones removed after the 72-hour window, a warning when the window is exceeded | Site agent | 0.1 | [../examples/event_journal.unio](../examples/event_journal.unio) |
 | C | Field protocol frames: a Modbus RTU response read from bytes and checked by its CRC-16 | Site agent, protocol drivers | 0.1 for the frames, 0.2 for the ports | Waits for RC-7, RC-8, RC-9 |
 | D | Event core: a service per site that receives events, keeps a state machine of each alarm, and is restarted when it fails | Event core | 0.2 | Waits for RC-10, RC-11 |
-| E | Portal: pages in two languages, sign-in for the team, a site dashboard over PostgreSQL | Portal | 0.2 | Waits for RC-12, RC-13 |
+| E | Website and client portal: the two-language site served by a Unio program, then sign-in and a site dashboard over PostgreSQL | Website, client portal | 0.2 | Waits for RC-12, RC-13 |
 | F | AI service: a norm question answered by an LLM with citations; site documents never reach the model as instructions | AI service | 0.2 | Waits for RC-14 and the HTTPS client of 0.2 |
 | G | Post-quantum channel between a site and the cloud: mTLS with hybrid key exchange, the algorithm chosen by a profile | PQC module | 0.2 | Follows [cryptography.md](cryptography.md) |
 
@@ -60,4 +60,4 @@ RC-1, RC-3, RC-7, and RC-8 are library additions within 0.1 and can be made now,
 
 ## 5. What has been checked
 
-Both programs parse with [../spec/grammar.ebnf](../spec/grammar.ebnf) and call only the declared standard library (`spec/check_grammar.py`, `spec/check_api.py`). Their tests have not run: there is no interpreter yet.
+Both programs parse with [../spec/grammar.ebnf](../spec/grammar.ebnf) and call only the declared standard library (`spec/check_grammar.py`, `spec/check_api.py`). They pass the Rust front end: `unio check` reports nothing (`compiler/unio/tests/sources.rs`) and they are in the one style of `unio fmt --check`, both in CI. Their tests have not run: the interpreter arrives with sprint S5.
