@@ -1,0 +1,5 @@
+# The toolchain is pinned so that builds are reproducible (C-4) and CI does not change with
+# the Rust version a runner happens to have. Update it deliberately, with the lints it brings.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

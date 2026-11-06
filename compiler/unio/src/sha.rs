@@ -97,8 +97,8 @@ const INITIAL: [u64; 8] = [
 
 fn compress(state: &mut [u64; 8], block: &[u8]) {
     let mut w = [0u64; 80];
-    for (i, chunk) in block.chunks_exact(8).enumerate() {
-        w[i] = u64::from_be_bytes(chunk.try_into().unwrap());
+    for (i, chunk) in block.as_chunks::<8>().0.iter().enumerate() {
+        w[i] = u64::from_be_bytes(*chunk);
     }
     for i in 16..80 {
         let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
@@ -144,7 +144,7 @@ pub fn sha384(data: &[u8]) -> [u8; 48] {
         message.push(0);
     }
     message.extend_from_slice(&bits.to_be_bytes());
-    for block in message.chunks_exact(128) {
+    for block in message.as_chunks::<128>().0 {
         compress(&mut state, block);
     }
     let mut out = [0u8; 48];
