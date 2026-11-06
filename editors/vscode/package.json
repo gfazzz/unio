@@ -2,7 +2,7 @@
   "name": "unio",
   "displayName": "Unio",
   "description": "Syntax highlighting for the Unio programming language, in .unio files and in ```unio blocks of Markdown.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "unio",
   "license": "SEE LICENSE IN README.md",
   "repository": {

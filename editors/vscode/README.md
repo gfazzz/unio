@@ -11,13 +11,13 @@ cd editors/vscode
 npx @vscode/vsce package
 ```
 
-Then install `unio-0.1.0.vsix`:
+Then install `unio-0.1.2.vsix`:
 
-- **Cursor:** `cursor --install-extension unio-0.1.0.vsix`, or the command palette: *Extensions: Install from VSIX...*
-- **VS Code:** `code --install-extension unio-0.1.0.vsix`, or the same command.
+- **Cursor:** `cursor --install-extension unio-0.1.2.vsix`, or the command palette: *Extensions: Install from VSIX...*
+- **VS Code:** `code --install-extension unio-0.1.2.vsix`, or the same command.
 - **JetBrains IDEs:** *Settings, Editor, TextMate Bundles*, add the `editors/vscode` directory.
 
-Without building a package, the directory can be linked into the extensions folder: `ln -s "$PWD" ~/.cursor/extensions/unio.unio-0.1.0` (or `~/.vscode/extensions/...`), then reload the window. The CI job `editors` also builds the package as a downloadable artifact.
+Without building a package, the directory can be linked into the extensions folder: `ln -s "$PWD" ~/.cursor/extensions/unio.unio-0.1.2` (or `~/.vscode/extensions/...`), then reload the window. The CI job `editors` also builds the package as a downloadable artifact.
 
 ## Development
 
