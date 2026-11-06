@@ -1,6 +1,6 @@
 # Static semantics of Unio 0.1
 
-Version 0.1-draft. Changes in this draft: decisions recorded while implementing S3 (1.3, 1.4, 2.5, 2.7, 2.8, 4.1). Russian localization: [ru/semantics.md](ru/semantics.md). Basis: concept sections 2–6, requirements L-1 to L-33, [language-contracts.md](language-contracts.md), RFC 0001 and RFC 0002. This document is the reference that `unio check` implements in sprints S3 and S4 of the plan; where it and the requirements disagree, the requirements win and this document is corrected.
+Version 0.1-draft. Changes in this draft: decisions recorded while implementing S3 (1.3, 1.4, 2.5, 2.7, 2.8, 4.1) and S4 (6.5, 6.6, 7.2, 8.2, 8.3). Russian localization: [ru/semantics.md](ru/semantics.md). Basis: concept sections 2–6, requirements L-1 to L-33, [language-contracts.md](language-contracts.md), RFC 0001 and RFC 0002. This document is the reference that `unio check` implements in sprints S3 and S4 of the plan; where it and the requirements disagree, the requirements win and this document is corrected.
 
 `unio check` runs every check on a whole package and reports every error it finds, not only the first (C-2). Each rule below names its diagnostic. Codes E0051 to E0085 are allocated here; the column "Sprint" says when the compiler starts to report them. Name and type checks run only when every module of the program parses: syntax errors are reported first.
 
@@ -61,20 +61,20 @@ Version 0.1-draft. Changes in this draft: decisions recorded while implementing 
 2. Changing a value through a place that does not start at a `var` name, a `var` parameter or a `using` name, changing a field not declared `var`, or calling a `var self` method on such a place is E0078 (L-11).
 3. A `var` parameter takes a `var` name of the caller (E0079); one name may not reach two `var` parameters of one call (E0042).
 4. A function with a result whose end can be reached without `return` is E0082. `break` and `continue` outside a loop are E0083.
-5. `match` must cover every variant of its subject or have `case _` (E0068). A `match` on `Float` is E0061 (L-9).
-6. The result of a call that is not `Never` or nothing must be used, assigned, or returned (E0043, RFC 0001).
+5. `match` must cover every variant of its subject or have `case _` (E0068), and E0068 names the cases that are missing. A `match` whose list or tuple patterns combine into more cases than the checker enumerates is not taken as covered: it needs `case _`, and E0068 says so. After E0068, a missing `return` in the same function is not reported again (2.8). A `match` on `Float` is E0061 (L-9).
+6. A `Result` or a `std.process.Output` must not be discarded, and a local that holds one must be read; `let _ = expression` discards one explicitly (E0043, L-30). Other results may be ignored.
 
 ## 7. Resources
 
 1. A value of a type that implements `Resource` is created only as the initializer of `using` or of a field of another resource; anywhere else it is E0080 (L-20).
-2. A resource may not leave its `using` block: storing it in a struct, a collection, or a name of an enclosing block, returning it, or capturing it in a lambda is E0081.
+2. A resource may not leave its `using` block: storing it in a struct, a collection, or a name of an enclosing block, returning it, or capturing it in a lambda is E0081. A parameter of a resource type may be used and passed on to other functions, but storing, returning, or capturing it is E0081 too. A `let` that holds a resource gives only E0080; the name is then treated like a `using` name, so that one mistake gives one message.
 3. A resource is not a value: it cannot be held as an interface value (L-6b) or compared with `==` (E0066).
 
 ## 8. Layers, profiles and effects
 
 1. A module of a library layer may use only its layer and the layers before it (S-11); in a package, `unio check --profile=core` applies the same rule to every function the package defines. A violation is E0084 and lists the chain of calls from the function to the first one of a higher layer (C-21).
-2. Effects are derived, not declared (L-9b). An external function has the effect of its standard-library module: `std.files` gives `files`, `std.env` gives `env`, `std.process` gives `process`, `std.net` gives `network`; any function of the `alloc` layer gives `allocates`. A function has the union of the effects of the functions it calls. `unio symbol` shows them (C-11).
-3. A package that uses a function whose effect its manifest does not permit is E0085, with the chain of calls (concept section 6, T-6).
+2. Effects are derived, not declared (L-9b). An external function has the effect of its standard-library module: `std.files` gives `files.read` or `files.write`, as the "Permission" line of the function says, `std.env` gives `env`, `std.process` gives `process`, `std.net` gives `network`; any function of the `alloc` layer gives `allocates`. A function has the union of the effects of the functions it calls. `unio symbol` shows them (C-11).
+3. A package that uses a function whose effect its manifest does not permit is E0085, with the chain of calls (concept section 6, T-6). `files.read` and `files.write` are checked against the scopes of the same names in the manifest.
 
 ## 9. Diagnostics of this document
 
