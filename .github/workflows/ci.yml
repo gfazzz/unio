@@ -52,3 +52,21 @@ jobs:
         with:
           name: unio-vscode-extension
           path: editors/vscode/*.vsix
+
+  compiler:
+    name: compiler front end
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: compiler
+    steps:
+      - uses: actions/checkout@v4
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests (corpus, all .unio sources, diagnostics, mutation)
+        run: cargo test

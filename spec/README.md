@@ -56,6 +56,8 @@ These codes are fixed by the grammar. The full list of the first 50 codes, with 
 | E0009 | Unclosed bracket |
 | E0010 | Closing bracket without a matching opening one |
 | E0011 | Empty or unterminated interpolation, or `}` in text without `\` |
+| E0012 | Unexpected token; the message names what the grammar expects there (compiler front end) |
+| E0013 | Nesting too deep (more than 64 levels of expressions, patterns, types, blocks, or interpolations) |
 | E0020 | Chained comparison such as `a < b < c` |
 | E0023 | Positional argument after a named one |
 | E0024 | More than one inline handler in a statement, or not at its end |

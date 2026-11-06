@@ -1,0 +1,98 @@
+//! The Unio compiler front end: lexer, parser, syntax tree and diagnostics
+//! (requirements C-1, C-2, C-6 to C-10). Type checking, the formatter and code
+//! generation are later stages of the plan.
+
+pub mod ast;
+pub mod diag;
+pub mod lexer;
+pub mod parser;
+pub mod sexpr;
+
+pub use diag::{explanation, Diagnostic, Lang, Msg, Severity, Span};
+
+/// The result of checking one source file.
+pub struct Analysis {
+    pub path: String,
+    pub source: String,
+    /// Lexical diagnostics first, in the order found, then syntax diagnostics by position.
+    pub diagnostics: Vec<Diagnostic>,
+    pub comments: Vec<lexer::Comment>,
+    pub file: ast::File,
+}
+
+impl Analysis {
+    pub fn render_text(&self, lang: Lang) -> String {
+        diag::render_text(&self.diagnostics, &self.path, &self.source, lang)
+    }
+
+    pub fn render_json(&self, lang: Lang) -> String {
+        diag::render_json(&self.diagnostics, &self.path, lang)
+    }
+
+    /// The tree as an S-expression without spans; None if the file has errors.
+    pub fn ast_sexpr(&self) -> Option<String> {
+        if self.diagnostics.is_empty() {
+            Some(sexpr::file(&self.file))
+        } else {
+            None
+        }
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
+    }
+}
+
+/// The stack of the thread that runs the front end. Parsing recurses once per nesting
+/// level, which E0013 bounds; the stack is fixed here so that the bound holds whatever
+/// thread calls the compiler (R-1).
+const STACK_SIZE: usize = 64 * 1024 * 1024;
+
+/// Lexes and parses a source file and collects its diagnostics.
+pub fn check_source(path: &str, source: &str) -> Analysis {
+    let (path, source) = (path.to_string(), source.to_string());
+    std::thread::Builder::new()
+        .name("unio-front-end".to_string())
+        .stack_size(STACK_SIZE)
+        .spawn(move || analyse(&path, &source))
+        .expect("the front-end thread starts")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn analyse(path: &str, source: &str) -> Analysis {
+    let lexed = lexer::lex(source);
+    let mut parser = parser::Parser::new(&lexed.tokens);
+    let file = parser.file();
+    let mut syntax = std::mem::take(&mut parser.diagnostics);
+    syntax.sort_by_key(|d| d.span.start.offset);
+    // A lexical error usually causes syntax errors next to it; report only the first.
+    let lexical = lexed.diagnostics;
+    let swallowed_after = lexical
+        .iter()
+        .filter(|d| d.code == "E0009" || d.code == "E0005")
+        .map(|d| d.span.start.offset)
+        .min();
+    let mut seen_lines = Vec::new();
+    syntax.retain(|d| {
+        let line = d.line();
+        let near_lexical = lexical
+            .iter()
+            .any(|l| line + 1 >= l.line() && line <= l.line() + 1);
+        let after_swallow = swallowed_after.is_some_and(|offset| d.span.start.offset >= offset);
+        let repeated = seen_lines.contains(&line);
+        seen_lines.push(line);
+        !near_lexical && !after_swallow && !repeated
+    });
+    let mut diagnostics = lexical;
+    diagnostics.extend(syntax);
+    Analysis {
+        path: path.to_string(),
+        source: source.to_string(),
+        diagnostics,
+        comments: lexed.comments,
+        file,
+    }
+}

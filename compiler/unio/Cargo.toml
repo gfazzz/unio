@@ -1,0 +1,16 @@
+[package]
+name = "unio"
+version = "0.1.0-dev"
+edition = "2021"
+description = "The Unio compiler: front end (lexer, parser, diagnostics)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "unio"
+path = "src/main.rs"
+
+[dependencies]
