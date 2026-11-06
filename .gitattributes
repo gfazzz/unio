@@ -1,0 +1,4 @@
+# Unio sources and the grammar use LF line ends on every platform (docs/style.md, rule 1.1),
+# so that unio fmt --check gives the same result on Windows as on Linux and macOS.
+*.unio text eol=lf
+*.ebnf text eol=lf
