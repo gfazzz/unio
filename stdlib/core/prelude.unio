@@ -98,8 +98,7 @@ extend Range:
 
 extend RangeIterator with Iterator[Int]:
     function next(var self) returns Option[Int]:
-        if self.current >= self.end:
-            return none
+        if self.current >= self.end: return none
         let value = self.current
         self.current = self.current + 1
         return some(value)

@@ -32,14 +32,12 @@ extend[T] List[T]:
 
     public function find(self, predicate as Function[(T) -> Bool]) returns Option[T]:
         for item in self:
-            if predicate(item):
-                return some(item)
+            if predicate(item): return some(item)
         return none
 
     public function find_index(self, predicate as Function[(T) -> Bool]) returns Option[Int]:
         for index, item in self.enumerate():
-            if predicate(item):
-                return some(index)
+            if predicate(item): return some(index)
         return none
 
     public function filter(self, predicate as Function[(T) -> Bool]) returns List[T]:
@@ -49,18 +47,23 @@ extend[T] List[T]:
         return [change(item) for item in self]
 
     ## Like map, propagating the first callback error; later items are not visited.
-    public function try_map[U, E with Error](self, change as Function[(T) -> U fails with E]) returns List[U] fails with E:
+    public function try_map[U, E with Error](
+        self,
+        change as Function[(T) -> U fails with E],
+    ) returns List[U] fails with E:
         var result as List[U] = []
         for item in self:
             result.append(try change(item))
         return result
 
     ## Like filter, propagating the first callback error.
-    public function try_filter[E with Error](self, predicate as Function[(T) -> Bool fails with E]) returns List[T] fails with E:
+    public function try_filter[E with Error](
+        self,
+        predicate as Function[(T) -> Bool fails with E],
+    ) returns List[T] fails with E:
         var result as List[T] = []
         for item in self:
-            if try predicate(item):
-                result.append(item)
+            if try predicate(item): result.append(item)
         return result
 
     ## Left fold in input order; an empty list returns initial without calling combine.
@@ -71,32 +74,39 @@ extend[T] List[T]:
         return result
 
     ## Left fold, stopping at the first callback error.
-    public function try_fold[U, E with Error](self, initial as U, combine as Function[(U, T) -> U fails with E]) returns U fails with E:
+    public function try_fold[U, E with Error](
+        self,
+        initial as U,
+        combine as Function[(U, T) -> U fails with E],
+    ) returns U fails with E:
         var result = initial
         for item in self:
             result = try combine(result, item)
         return result
 
     ## Matching items, then nonmatching items; each list keeps input order.
-    public function partition(self, predicate as Function[(T) -> Bool]) returns Tuple[List[T], List[T]]:
+    public function partition(
+        self,
+        predicate as Function[(T) -> Bool],
+    ) returns Tuple[List[T], List[T]]:
         var yes as List[T] = []
         var no as List[T] = []
         for item in self:
-            if predicate(item):
-                yes.append(item)
-            else:
-                no.append(item)
+            if predicate(item): yes.append(item)
+            else: no.append(item)
         return (yes, no)
 
     ## Groups and their items keep first-occurrence order; key is called once per item.
-    public function group_by[K with Hash and Equal](self, key as Function[(T) -> K]) returns Map[K, List[T]]:
+    public function group_by[K with Hash and Equal](
+        self,
+        key as Function[(T) -> K],
+    ) returns Map[K, List[T]]:
         var indices as Map[K, Int] = {}
         var groups as List[List[T]] = []
         for item in self:
             let group_key = key(item)
             match indices.get(group_key):
-                case some(index):
-                    groups[index].append(item)
+                case some(index): groups[index].append(item)
                 case none:
                     indices.put(group_key, groups.length())
                     groups.append([item])
@@ -107,8 +117,7 @@ extend[T] List[T]:
 
     ## Equal-length lists paired in order; none for different lengths, never silent truncation.
     public function zip[U](self, other as List[U]) returns Option[List[Tuple[T, U]]]:
-        if self.length() != other.length():
-            return none
+        if self.length() != other.length(): return none
         var pairs as List[Tuple[T, U]] = []
         for index in range(0, self.length()):
             pairs.append((self[index], other[index]))
@@ -116,8 +125,7 @@ extend[T] List[T]:
 
     ## Consecutive nonempty blocks, with a possibly shorter last block; none unless size > 0.
     public function chunks(self, size as Int) returns Option[List[List[T]]]:
-        if size <= 0:
-            return none
+        if size <= 0: return none
         var result as List[List[T]] = []
         var start = 0
         while start < self.length():
@@ -128,8 +136,7 @@ extend[T] List[T]:
 
     ## Overlapping complete windows, advancing by one; none unless size > 0.
     public function windows(self, size as Int) returns Option[List[List[T]]]:
-        if size <= 0:
-            return none
+        if size <= 0: return none
         var result as List[List[T]] = []
         if size <= self.length():
             for start in range(0, self.length() - size + 1):
@@ -151,8 +158,7 @@ extend[T] List[T]:
     ## A sorted list where comes_before(a, b) means that a goes before b; equal items keep their order.
     ## Merge sort, O(n log n).
     public function sorted_with(self, comes_before as Function[(T, T) -> Bool]) returns List[T]:
-        if self.length() <= 1:
-            return self
+        if self.length() <= 1: return self
         let middle = self.length() / 2
         let left = self.slice(0, middle).sorted_with(comes_before)
         let right = self.slice(middle, self.length()).sorted_with(comes_before)
@@ -162,7 +168,9 @@ extend[T] List[T]:
     ## O(n) additional key storage. Example: names.sorted_by(function (name as Text) returns Int: name.length()).
     public function sorted_by[K with Order](self, key as Function[(T) -> K]) returns List[T]:
         let keyed = [Keyed[K, T](key = key(item), value = item) for item in self]
-        let ordered = keyed.sorted_with(function (a as Keyed[K, T], b as Keyed[K, T]) returns Bool: a.key < b.key)
+        let ordered = keyed.sorted_with(
+            function (a as Keyed[K, T], b as Keyed[K, T]) returns Bool: a.key < b.key,
+        )
         return [item.value for item in ordered]
 
 struct Keyed[K, T]:
@@ -180,8 +188,7 @@ extend[T] List[T]:
 
 extend[T] ListIterator[T] with Iterator[T]:
     function next(var self) returns Option[T]:
-        if self.position >= self.items.length():
-            return none
+        if self.position >= self.items.length(): return none
         let value = self.items[self.position]
         self.position = self.position + 1
         return some(value)
@@ -190,25 +197,26 @@ extend[T with Equal] List[T]:
     ## Used by "item in list".
     public function contains(self, item as T) returns Bool:
         for candidate in self:
-            if candidate == item:
-                return true
+            if candidate == item: return true
         return false
 
 extend[T with Order] List[T]:
     public function max(self) returns Option[T]:
-        if self.is_empty():
-            return none
+        if self.is_empty(): return none
         var best = self[0]
         for item in self:
-            if item > best:
-                best = item
+            if item > best: best = item
         return some(best)
 
     ## A sorted list; equal items keep their order.
     public function sorted(self) returns List[T]:
         return self.sorted_with(function (a as T, b as T) returns Bool: a < b)
 
-function merge[T](left as List[T], right as List[T], comes_before as Function[(T, T) -> Bool]) returns List[T]:
+function merge[T](
+    left as List[T],
+    right as List[T],
+    comes_before as Function[(T, T) -> Bool],
+) returns List[T]:
     var result as List[T] = []
     var left_index = 0
     var right_index = 0
@@ -223,10 +231,14 @@ function merge[T](left as List[T], right as List[T], comes_before as Function[(T
     result.append_all(right.slice(right_index, right.length()))
     return result
 
-
 test "sorting by key is stable and does not change the input":
     let items = ["bb", "a", "cc", "d"]
-    assert items.sorted_by(function (item as Text) returns Int: item.length()) == ["a", "d", "bb", "cc"]
+    assert items.sorted_by(function (item as Text) returns Int: item.length()) == [
+        "a",
+        "d",
+        "bb",
+        "cc",
+    ]
     assert items == ["bb", "a", "cc", "d"]
     let empty as List[Text] = []
     assert empty.sorted_by(function (item as Text) returns Int: item.length()) == []
@@ -262,16 +274,14 @@ error ItemError:
     item as Int
 
 function positive(item as Int) returns Int fails with ItemError:
-    if item < 0:
-        fail ItemError(item = item)
+    if item < 0: fail ItemError(item = item)
     return item * 2
 
 test "fallible mapping stops at the first error":
     try:
         let result = try [1, -2, MINIMUM_INT].try_map(positive)
         assert_fail("expected ItemError")
-    on ItemError as e:
-        assert e.item == -2
+    on ItemError as e: assert e.item == -2
 
 test "fallible mapping returns all successful results":
     let result = try [1, 2].try_map(positive) on ItemError as e:
@@ -291,18 +301,15 @@ test "fallible filtering and folding preserve order and error type":
         assert filtered == [2, 4]
         let sum = try [1, 2].try_fold(10, add_positive)
         assert sum == 16
-    on ItemError as e:
-        assert_fail("unexpected error {e.item}")
+    on ItemError as e: assert_fail("unexpected error {e.item}")
     try:
         let result = try [1, -2, MINIMUM_INT].try_filter(positive_even)
         assert_fail("expected ItemError")
-    on ItemError as e:
-        assert e.item == -2
+    on ItemError as e: assert e.item == -2
     try:
         let result = try [1, -2, MINIMUM_INT].try_fold(0, add_positive)
         assert_fail("expected ItemError")
-    on ItemError as e:
-        assert e.item == -2
+    on ItemError as e: assert e.item == -2
 
 test "list cursors see a snapshot and remain exhausted":
     var items = [1, 2]

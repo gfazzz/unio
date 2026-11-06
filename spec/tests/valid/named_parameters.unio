@@ -15,5 +15,7 @@ test "named is contextual and function values keep labels":
     assert apply(connect) == "localhost:8080"
     assert ordinary(3) == 3
     assert named_callback(transform_only = function (value as Int) returns Int: value + 1) == 4
-    let named_lambda as Function[(named value as Int) -> Int] = function (named value as Int) returns Int: value
+    let named_lambda as Function[(named value as Int) -> Int] = function (
+        named value as Int,
+    ) returns Int: value
     assert named_lambda(value = 7) == 7

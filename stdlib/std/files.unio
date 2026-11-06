@@ -62,66 +62,75 @@ public function open_reader(path as Path) returns FileReader fails with IoError:
 extend FileReader with Resource:
     function release(var self):
         match self.state:
-            case ReaderState.Closed:
-                return
-            case _:
-                pass
+            case ReaderState.Closed: return
+            case _: pass
         self.state = ReaderState.Closed
         let close = self.close_step
         try:
             try close(self.descriptor)
-        on IoError:
-            pass
+        on IoError: pass
 
 extend FileReader:
     ## some(nonempty bytes) up to max_bytes, or permanent none at EOF. max_bytes must be positive;
     ## otherwise InvalidData. Buffered bytes are returned before a pending error on the next call.
     ## An error makes further reads return that error. Memory is O(max_bytes), independent of file size.
-    public function read_bytes(var self, named max_bytes as Int = 65536) returns Option[Bytes] fails with IoError:
+    public function read_bytes(
+        var self,
+        named max_bytes as Int = 65536,
+    ) returns Option[Bytes] fails with IoError:
         match self.state:
-            case ReaderState.Failed(problem):
-                fail problem
+            case ReaderState.Failed(problem): fail problem
             case ReaderState.Closed:
-                fail IoError(path = self.path, kind = IoErrorKind.InvalidData, reason = "reader is closed")
-            case _:
-                pass
+                fail IoError(
+                    path = self.path,
+                    kind = IoErrorKind.InvalidData,
+                    reason = "reader is closed",
+                )
+            case _: pass
         if max_bytes <= 0:
-            let problem = IoError(path = self.path, kind = IoErrorKind.InvalidData, reason = "max_bytes must be positive")
+            let problem = IoError(
+                path = self.path,
+                kind = IoErrorKind.InvalidData,
+                reason = "max_bytes must be positive",
+            )
             self.state = ReaderState.Failed(problem)
             fail problem
         match self.state:
-            case ReaderState.End:
-                return none
-            case _:
-                pass
+            case ReaderState.End: return none
+            case _: pass
         let read = self.read_step
         let step = read(self.descriptor, self.path, max_bytes)
         assert step.data.length() <= max_bytes
         assert not step.data.is_empty() or step.end or step.problem.is_some()
         match step.problem:
-            case some(problem):
-                self.state = ReaderState.Failed(problem)
+            case some(problem): self.state = ReaderState.Failed(problem)
             case none:
-                if step.end:
-                    self.state = ReaderState.End
-        if not step.data.is_empty():
-            return some(step.data)
+                if step.end: self.state = ReaderState.End
+        if not step.data.is_empty(): return some(step.data)
         match step.problem:
-            case some(problem):
-                fail problem
-            case none:
-                return none
+            case some(problem): fail problem
+            case none: return none
 
 external function system_open_read(path as Path) returns Int fails with IoError
 
 ## Blocks until data, EOF or error; retries interrupted reads. data.length() <= max_bytes.
-external function system_read_chunk(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep
+external function system_read_chunk(
+    descriptor as Int,
+    path as Path,
+    max_bytes as Int,
+) returns ReadStep
 
 function end_read(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
     return ReadStep(data = Bytes(), end = true)
 
 function failed_read(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
-    return ReadStep(data = Bytes(), end = false, problem = some(IoError(path = path, kind = IoErrorKind.Other, reason = "injected read failure")))
+    return ReadStep(
+        data = Bytes(),
+        end = false,
+        problem = some(
+            IoError(path = path, kind = IoErrorKind.Other, reason = "injected read failure"),
+        ),
+    )
 
 function unexpected_read(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
     assert_fail("terminal reader called the OS again")
@@ -130,31 +139,43 @@ function no_close(descriptor as Int) fails with IoError:
     pass
 
 test "EOF is permanent until release, without extra native reads":
-    using reader = FileReader(path = Path("test"), descriptor = 1, read_step = end_read, close_step = no_close):
+    using reader = FileReader(
+        path = Path("test"),
+        descriptor = 1,
+        read_step = end_read,
+        close_step = no_close,
+    ):
         try:
             assert (try reader.read_bytes()) == none
             reader.read_step = unexpected_read
             assert (try reader.read_bytes()) == none
-        on IoError as e:
-            assert_fail(e.reason)
+        on IoError as e: assert_fail(e.reason)
 
 test "a read failure is retained without retrying native I/O":
-    using reader = FileReader(path = Path("test"), descriptor = 1, read_step = failed_read, close_step = no_close):
+    using reader = FileReader(
+        path = Path("test"),
+        descriptor = 1,
+        read_step = failed_read,
+        close_step = no_close,
+    ):
         for attempt in range(0, 2):
             try:
                 let data = try reader.read_bytes()
                 assert_fail("expected injected error")
-            on IoError as e:
-                assert e.reason == "injected read failure"
+            on IoError as e: assert e.reason == "injected read failure"
             reader.read_step = unexpected_read
 
 test "invalid read size fails before any native I/O":
-    using reader = FileReader(path = Path("test"), descriptor = 1, read_step = unexpected_read, close_step = no_close):
+    using reader = FileReader(
+        path = Path("test"),
+        descriptor = 1,
+        read_step = unexpected_read,
+        close_step = no_close,
+    ):
         try:
             let data = try reader.read_bytes(max_bytes = 0)
             assert_fail("expected size error")
-        on IoError as e:
-            assert e.kind == IoErrorKind.InvalidData
+        on IoError as e: assert e.kind == IoErrorKind.InvalidData
 
 ## Resolve an existing path through the filesystem, including links. Permission: files.read.
 ## This is not an authorization token; sandbox enforcement still applies at the eventual open.
@@ -167,10 +188,8 @@ public external function list_directory(path as Path) returns List[Path] fails w
 public function list_tree(root as Path) returns List[Path] fails with IoError:
     var found as List[Path] = []
     for entry in try list_directory(root):
-        if is_directory(entry):
-            found.append_all(try list_tree(entry))
-        else:
-            found.append(entry)
+        if is_directory(entry): found.append_all(try list_tree(entry))
+        else: found.append(entry)
     return found
 
 ## Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.
@@ -183,14 +202,22 @@ public function write_text(path as Path, text as Text, durable as Bool = false) 
 public external function read_bytes(path as Path) returns Bytes fails with IoError
 
 ## Replaces the file with the bytes atomically, like write_text. Permission: files.write.
-public function write_bytes(path as Path, data as Bytes, durable as Bool = false) fails with IoError:
+public function write_bytes(
+    path as Path,
+    data as Bytes,
+    durable as Bool = false,
+) fails with IoError:
     using file = try open_atomic(path, durable = durable):
         try file.write_bytes(data)
         try file.commit()
 
 ## Copies the content of a file; the target is replaced atomically, like write_bytes.
 ## Permission: files.read for the source, files.write for the target.
-public function copy_file(source as Path, target as Path, durable as Bool = false) fails with IoError:
+public function copy_file(
+    source as Path,
+    target as Path,
+    durable as Bool = false,
+) fails with IoError:
     try write_bytes(target, try read_bytes(source), durable = durable)
 
 ## Gives a file or directory a new path on the same file system. It fails with kind AlreadyExists
@@ -204,14 +231,11 @@ public external function create_directory(path as Path) fails with IoError
 ## Creates the directory and every missing parent; an existing directory is not an error.
 ## Permission: files.write.
 public function create_directories(path as Path) fails with IoError:
-    if is_directory(path):
-        return
+    if is_directory(path): return
     match path.parent():
         case some(parent):
-            if parent.to_text() != ".":
-                try create_directories(parent)
-        case none:
-            pass
+            if parent.to_text() != ".": try create_directories(parent)
+        case none: pass
     try create_directory(path)
 
 ## The progress of an atomic file. Each step of commit records its result before the next step
@@ -237,7 +261,15 @@ struct AtomicSteps:
     sync_directory as Function[(Path) fails with IoError]
     remove as Function[(Path)]
 
-let SYSTEM_STEPS as AtomicSteps = AtomicSteps(write_data = system_write, write_bytes = system_write_bytes, sync_data = system_sync_data, close = system_close, rename = system_rename, sync_directory = system_sync_directory, remove = system_remove)
+let SYSTEM_STEPS as AtomicSteps = AtomicSteps(
+    write_data = system_write,
+    write_bytes = system_write_bytes,
+    sync_data = system_sync_data,
+    close = system_close,
+    rename = system_rename,
+    sync_directory = system_sync_directory,
+    remove = system_remove,
+)
 
 ## What release still has to do.
 enum Cleanup:
@@ -261,16 +293,32 @@ struct TemporaryFile:
 
 ## Opens a temporary file in the directory of the target. With durable = true it fails with kind
 ## Unsupported on a file system where durability cannot be guaranteed (S-9a). Permission: files.write.
-public function open_atomic(path as Path, durable as Bool = false) returns AtomicFile fails with IoError:
+public function open_atomic(
+    path as Path,
+    durable as Bool = false,
+) returns AtomicFile fails with IoError:
     if durable and not system_supports_durability(path):
-        fail IoError(path = path, kind = IoErrorKind.Unsupported, reason = "this file system cannot guarantee durability")
+        fail IoError(
+            path = path,
+            kind = IoErrorKind.Unsupported,
+            reason = "this file system cannot guarantee durability",
+        )
     let temporary = try system_open_temporary(path)
-    return AtomicFile(target = path, temporary = temporary.path, descriptor = temporary.descriptor, durable = durable)
+    return AtomicFile(
+        target = path,
+        temporary = temporary.path,
+        descriptor = temporary.descriptor,
+        durable = durable,
+    )
 
 extend AtomicFile:
     public function write(var self, text as Text) fails with IoError:
         if self.state != AtomicState.Writing:
-            fail IoError(path = self.target, kind = IoErrorKind.Other, reason = "the file is already being committed")
+            fail IoError(
+                path = self.target,
+                kind = IoErrorKind.Other,
+                reason = "the file is already being committed",
+            )
         let write_data = self.steps.write_data
         try write_data(self.descriptor, text)
 
@@ -279,7 +327,11 @@ extend AtomicFile:
 
     public function write_bytes(var self, data as Bytes) fails with IoError:
         if self.state != AtomicState.Writing:
-            fail IoError(path = self.target, kind = IoErrorKind.Other, reason = "the file is already being committed")
+            fail IoError(
+                path = self.target,
+                kind = IoErrorKind.Other,
+                reason = "the file is already being committed",
+            )
         let write_bytes = self.steps.write_bytes
         try write_bytes(self.descriptor, data)
 
@@ -307,20 +359,20 @@ extend AtomicFile:
         if self.state == AtomicState.Replaced and self.durable:
             let sync_directory = self.steps.sync_directory
             try sync_directory(self.target.parent() or Path(".")) on IoError as e:
-                fail IoError(path = self.target, kind = IoErrorKind.DurabilityUnconfirmed, reason = "the target was replaced, but syncing its directory failed: {e.reason}")
+                fail IoError(
+                    path = self.target,
+                    kind = IoErrorKind.DurabilityUnconfirmed,
+                    reason = "the target was replaced, but syncing its directory failed: {e.reason}",
+                )
             self.state = AtomicState.Durable
 
     ## The cleanup that release performs in the current state; separate so that tests can check it.
     function cleanup(self) returns List[Cleanup]:
         match self.state:
-            case AtomicState.Writing:
-                return [Cleanup.CloseDescriptor, Cleanup.RemoveTemporary]
-            case AtomicState.Closed:
-                return [Cleanup.RemoveTemporary]
-            case AtomicState.Replaced:
-                return []
-            case AtomicState.Durable:
-                return []
+            case AtomicState.Writing: return [Cleanup.CloseDescriptor, Cleanup.RemoveTemporary]
+            case AtomicState.Closed: return [Cleanup.RemoveTemporary]
+            case AtomicState.Replaced: return []
+            case AtomicState.Durable: return []
 
 extend AtomicFile with Resource:
     ## Errors are ignored: release cannot fail, and the target is unchanged in every case where it acts.
@@ -331,8 +383,7 @@ extend AtomicFile with Resource:
                     let close = self.steps.close
                     try:
                         close(self.descriptor)
-                    on IoError:
-                        pass
+                    on IoError: pass
                 case Cleanup.RemoveTemporary:
                     let remove = self.steps.remove
                     remove(self.temporary)
@@ -361,7 +412,6 @@ external function system_sync_directory(directory as Path) fails with IoError
 ## Removes the file; errors are ignored.
 external function system_remove(path as Path)
 
-
 # ---------------------------------------------------------------- tests of the commit protocol
 # The steps below replace the system operations; each test makes one step fail.
 
@@ -384,7 +434,11 @@ function ignore_remove(path as Path):
     return
 
 function fail_descriptor(descriptor as Int) fails with IoError:
-    fail IoError(path = Path("descriptor {descriptor}"), kind = IoErrorKind.Other, reason = "injected failure")
+    fail IoError(
+        path = Path("descriptor {descriptor}"),
+        kind = IoErrorKind.Other,
+        reason = "injected failure",
+    )
 
 function fail_rename(temporary as Path, target as Path) fails with IoError:
     fail IoError(path = target, kind = IoErrorKind.Other, reason = "injected failure")
@@ -392,19 +446,37 @@ function fail_rename(temporary as Path, target as Path) fails with IoError:
 function fail_sync_directory(directory as Path) fails with IoError:
     fail IoError(path = directory, kind = IoErrorKind.Other, reason = "injected failure")
 
-function fake_steps(sync_data as Function[(Int) fails with IoError] = succeed_descriptor, close as Function[(Int) fails with IoError] = succeed_descriptor, rename as Function[(Path, Path) fails with IoError] = succeed_rename, sync_directory as Function[(Path) fails with IoError] = succeed_sync_directory) returns AtomicSteps:
-    return AtomicSteps(write_data = succeed_write, write_bytes = succeed_write_bytes, sync_data = sync_data, close = close, rename = rename, sync_directory = sync_directory, remove = ignore_remove)
+function fake_steps(
+    sync_data as Function[(Int) fails with IoError] = succeed_descriptor,
+    close as Function[(Int) fails with IoError] = succeed_descriptor,
+    rename as Function[(Path, Path) fails with IoError] = succeed_rename,
+    sync_directory as Function[(Path) fails with IoError] = succeed_sync_directory,
+) returns AtomicSteps:
+    return AtomicSteps(
+        write_data = succeed_write,
+        write_bytes = succeed_write_bytes,
+        sync_data = sync_data,
+        close = close,
+        rename = rename,
+        sync_directory = sync_directory,
+        remove = ignore_remove,
+    )
 
 function fake_file(steps as AtomicSteps, durable as Bool) returns AtomicFile:
-    return AtomicFile(target = Path("dir/target.txt"), temporary = Path("dir/.target.txt.unio-tmp-1"), descriptor = 3, durable = durable, steps = steps)
+    return AtomicFile(
+        target = Path("dir/target.txt"),
+        temporary = Path("dir/.target.txt.unio-tmp-1"),
+        descriptor = 3,
+        durable = durable,
+        steps = steps,
+    )
 
 test "a failed directory sync after the rename reports that the target was replaced":
     using file = fake_file(fake_steps(sync_directory = fail_sync_directory), durable = true):
         try:
             file.commit()
             assert_fail("expected the directory sync to fail")
-        on IoError as e:
-            assert e.kind == IoErrorKind.DurabilityUnconfirmed
+        on IoError as e: assert e.kind == IoErrorKind.DurabilityUnconfirmed
         assert file.state == AtomicState.Replaced
         assert file.is_replaced()
         assert file.cleanup() == []
@@ -414,8 +486,7 @@ test "a failed rename leaves the descriptor closed and removes only the temporar
         try:
             file.commit()
             assert_fail("expected the rename to fail")
-        on IoError as e:
-            assert e.kind == IoErrorKind.Other
+        on IoError as e: assert e.kind == IoErrorKind.Other
         assert file.state == AtomicState.Closed
         assert not file.is_replaced()
         assert file.cleanup() == [Cleanup.RemoveTemporary]
@@ -425,8 +496,7 @@ test "a failed close still counts the descriptor as released":
         try:
             file.commit()
             assert_fail("expected close to fail")
-        on IoError as e:
-            assert e.kind == IoErrorKind.Other
+        on IoError as e: assert e.kind == IoErrorKind.Other
         assert file.state == AtomicState.Closed
         assert file.cleanup() == [Cleanup.RemoveTemporary]
 
@@ -435,8 +505,7 @@ test "a failed data sync keeps the descriptor open for release":
         try:
             file.commit()
             assert_fail("expected the data sync to fail")
-        on IoError as e:
-            assert e.kind == IoErrorKind.Other
+        on IoError as e: assert e.kind == IoErrorKind.Other
         assert file.state == AtomicState.Writing
         assert file.cleanup() == [Cleanup.CloseDescriptor, Cleanup.RemoveTemporary]
 
@@ -456,10 +525,13 @@ test "a commit after a failed directory sync repeats only the directory sync and
         try:
             file.commit()
             assert_fail("expected the directory sync to fail")
-        on IoError as e:
-            assert e.kind == IoErrorKind.DurabilityUnconfirmed
+        on IoError as e: assert e.kind == IoErrorKind.DurabilityUnconfirmed
         assert file.state == AtomicState.Replaced
-        file.steps = fake_steps(sync_data = fail_descriptor, close = fail_descriptor, rename = fail_rename)
+        file.steps = fake_steps(
+            sync_data = fail_descriptor,
+            close = fail_descriptor,
+            rename = fail_rename,
+        )
         try file.commit() on IoError as e:
             assert_fail("the second commit repeated a finished step: {e.reason}")
         assert file.state == AtomicState.Durable
@@ -472,10 +544,8 @@ test "writing after commit started is an error":
         try:
             file.write("late")
             assert_fail("expected an error")
-        on IoError as e:
-            assert e.kind == IoErrorKind.Other
+        on IoError as e: assert e.kind == IoErrorKind.Other
         try:
             file.write_bytes(Bytes())
             assert_fail("expected an error for bytes too")
-        on IoError as e:
-            assert e.kind == IoErrorKind.Other
+        on IoError as e: assert e.kind == IoErrorKind.Other

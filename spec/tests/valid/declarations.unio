@@ -1,8 +1,8 @@
 ## Declarations: constants, structs, errors, enums, interfaces, extensions, generics.
 
-import std.text
 import std.json as json
-from std.collections import Stack, Queue
+import std.text
+from std.collections import Queue, Stack
 
 public let VERSION as Text = "0.1"
 let DEFAULT_PORT = 8080
@@ -56,7 +56,10 @@ function connect(host as Text, port as Int = DEFAULT_PORT, secure as Bool = fals
 function apply(f as Function[(Int, Int) -> Int], a as Int, b as Int) returns Int:
     return f(a, b)
 
-function load(path as Path, parse as Function[(Text) -> Config fails with ParseError]) returns Config fails with IoError, ParseError:
+function load(
+    path as Path,
+    parse as Function[(Text) -> Config fails with ParseError],
+) returns Config fails with IoError, ParseError:
     return try parse(try read_text(path))
 
 function sort_in_place(var items as List[Int]):

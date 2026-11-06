@@ -32,13 +32,21 @@ function parse_options(arguments as List[Text]) returns Options fails with Usage
             return try make_options(true, old_part, new_part, names)
         case [old_part, new_part, names...] if not names.is_empty() and old_part != "--dry-run":
             return try make_options(false, old_part, new_part, names)
-        case _:
-            fail UsageError(message = USAGE)
+        case _: fail UsageError(message = USAGE)
 
-function make_options(dry_run as Bool, old_part as Text, new_part as Text, names as List[Text]) returns Options fails with UsageError:
-    if old_part.is_empty():
-        fail UsageError(message = "FROM must not be empty")
-    return Options(dry_run = dry_run, old_part = old_part, new_part = new_part, paths = [Path(name) for name in names])
+function make_options(
+    dry_run as Bool,
+    old_part as Text,
+    new_part as Text,
+    names as List[Text],
+) returns Options fails with UsageError:
+    if old_part.is_empty(): fail UsageError(message = "FROM must not be empty")
+    return Options(
+        dry_run = dry_run,
+        old_part = old_part,
+        new_part = new_part,
+        paths = [Path(name) for name in names],
+    )
 
 ## The renamings for the paths; a path whose name does not contain the old part is left out.
 function plan(options as Options) returns List[Renaming]:
@@ -47,12 +55,20 @@ function plan(options as Options) returns List[Renaming]:
         let name = path.name()
         if name.contains(options.old_part):
             let directory = path.parent() or Path(".")
-            renamings.append(Renaming(source = path, target = directory.join(name.replace(options.old_part, options.new_part))))
+            renamings.append(
+                Renaming(
+                    source = path,
+                    target = directory.join(name.replace(options.old_part, options.new_part)),
+                ),
+            )
     return renamings
 
 ## What stops the whole run: two sources with one target, or a target that exists already.
 ## exists is a parameter so that tests do not need a file system.
-function conflicts(renamings as List[Renaming], exists as Function[(Path) -> Bool]) returns List[Text]:
+function conflicts(
+    renamings as List[Renaming],
+    exists as Function[(Path) -> Bool],
+) returns List[Text]:
     var problems as List[Text] = []
     var targets as Map[Text, Path] = {}
     for renaming in renamings:
@@ -60,10 +76,8 @@ function conflicts(renamings as List[Renaming], exists as Function[(Path) -> Boo
         match targets.get(key):
             case some(other):
                 problems.append("{other} and {renaming.source} would both become {renaming.target}")
-            case none:
-                targets.put(key, renaming.source)
-        if exists(renaming.target):
-            problems.append("{renaming.target} already exists")
+            case none: targets.put(key, renaming.source)
+        if exists(renaming.target): problems.append("{renaming.target} already exists")
     return problems
 
 public function main() returns Int:
@@ -86,19 +100,29 @@ public function main() returns Int:
     return 0
 
 test "a part of the name is replaced and the directory is kept":
-    let options = Options(dry_run = false, old_part = "draft", new_part = "final", paths = [Path("docs").join("draft-1.txt"), Path("notes.txt")])
+    let options = Options(
+        dry_run = false,
+        old_part = "draft",
+        new_part = "final",
+        paths = [Path("docs").join("draft-1.txt"), Path("notes.txt")],
+    )
     let renamings = plan(options)
     assert renamings.length() == 1
     assert renamings[0].target == Path("docs").join("final-1.txt")
 
 test "two files that would get the same name are a conflict":
-    let renamings = [Renaming(source = Path("a-x.txt"), target = Path("a.txt")), Renaming(source = Path("a-y.txt"), target = Path("a.txt"))]
+    let renamings = [
+        Renaming(source = Path("a-x.txt"), target = Path("a.txt")),
+        Renaming(source = Path("a-y.txt"), target = Path("a.txt")),
+    ]
     let problems = conflicts(renamings, function (path as Path) returns Bool: false)
     assert problems == ["a-x.txt and a-y.txt would both become a.txt"]
 
 test "an existing target is a conflict":
     let renamings = [Renaming(source = Path("old.txt"), target = Path("new.txt"))]
-    assert conflicts(renamings, function (path as Path) returns Bool: true) == ["new.txt already exists"]
+    assert conflicts(renamings, function (path as Path) returns Bool: true) == [
+        "new.txt already exists",
+    ]
 
 test "options with and without a dry run":
     let dry = try parse_options(["--dry-run", "a", "b", "x.txt"]) on UsageError as e:
@@ -113,5 +137,4 @@ test "an empty FROM is a usage error":
     try:
         parse_options(["", "b", "x.txt"])
         assert_fail("expected a usage error")
-    on UsageError as e:
-        assert e.message == "FROM must not be empty"
+    on UsageError as e: assert e.message == "FROM must not be empty"

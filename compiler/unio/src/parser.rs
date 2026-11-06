@@ -7,6 +7,7 @@
 //! E0030 and E0034.
 
 use crate::ast::*;
+use crate::catalog;
 use crate::diag::{Diagnostic, Fix, Msg, Span};
 use crate::lexer::{Kind, TextPiece, Token};
 
@@ -118,21 +119,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expected(&mut self, en: &str, ru: &str) -> Failed {
+    fn expected(&mut self, what: Msg) -> Failed {
         let token = self.peek();
-        let message = Msg::new(
-            format!("expected {en}, found {}", token.describe()),
-            format!("здесь ожидается {ru}, а стоит {}", token.describe_ru()),
-        );
+        let message = catalog::expected(&what, &token.describe());
         let mut diagnostic = Diagnostic::error("E0012", token.span, message);
-        if en == "':'" && token.kind == Kind::Newline {
+        if what.en == "':'" && token.kind == Kind::Newline {
             diagnostic = diagnostic.with_fix(Fix {
                 span: token.span,
                 new_text: ":".to_string(),
-                description: Msg::new(
-                    "add ':' at the end of the line",
-                    "добавить ':' в конце строки",
-                ),
+                description: catalog::add_colon(),
             });
         }
         self.report(diagnostic);
@@ -143,14 +138,14 @@ impl<'a> Parser<'a> {
         if self.at_sym(s) {
             return Ok(self.bump().span);
         }
-        Err(self.expected(&format!("'{s}'"), &format!("'{s}'")))
+        Err(self.expected(catalog::quoted(s)))
     }
 
     fn expect_kw(&mut self, k: &str) -> P<Span> {
         if self.at_kw(k) {
             return Ok(self.bump().span);
         }
-        Err(self.expected(&format!("'{k}'"), &format!("'{k}'")))
+        Err(self.expected(catalog::quoted(k)))
     }
 
     fn expect_name(&mut self) -> P<Name> {
@@ -161,7 +156,7 @@ impl<'a> Parser<'a> {
                 span: token.span,
             });
         }
-        Err(self.expected("a name", "имя"))
+        Err(self.expected(catalog::a_name()))
     }
 
     fn expect_newline(&mut self) -> P<()> {
@@ -169,7 +164,7 @@ impl<'a> Parser<'a> {
             self.bump();
             return Ok(());
         }
-        Err(self.expected("the end of the line", "конец строки"))
+        Err(self.expected(catalog::end_of_line()))
     }
 
     fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> P<T>) -> P<T> {
@@ -178,10 +173,7 @@ impl<'a> Parser<'a> {
             self.report(Diagnostic::error(
                 "E0013",
                 span,
-                Msg::new(
-                    "the code is nested too deeply",
-                    "код вложен слишком глубоко",
-                ),
+                catalog::nested_too_deeply(),
             ));
             return Err(Failed);
         }
@@ -361,17 +353,12 @@ impl<'a> Parser<'a> {
         } else if self.at_kw("let") {
             DeclarationKind::Constant(self.constant()?)
         } else {
-            let en = if public {
-                "a declaration after 'public'"
+            let what = if public {
+                catalog::declaration_after_public()
             } else {
-                "a declaration, an import, 'extend' or 'test'"
+                catalog::declaration_or_import()
             };
-            let ru = if public {
-                "объявление после 'public'"
-            } else {
-                "объявление, импорт, 'extend' или 'test'"
-            };
-            return Err(self.expected(en, ru));
+            return Err(self.expected(what));
         };
         Ok(Declaration {
             public,
@@ -513,7 +500,7 @@ impl<'a> Parser<'a> {
     fn fields(&mut self) -> P<Vec<Field>> {
         self.expect_newline()?;
         if *self.kind() != Kind::Indent {
-            return Err(self.expected("an indented block of fields", "блок полей с отступом"));
+            return Err(self.expected(catalog::block_of_fields()));
         }
         self.bump();
         let mut fields = Vec::new();
@@ -592,7 +579,7 @@ impl<'a> Parser<'a> {
         self.expect_sym(":")?;
         self.expect_newline()?;
         if *self.kind() != Kind::Indent {
-            return Err(self.expected("an indented block", "блок с отступом"));
+            return Err(self.expected(catalog::indented_block()));
         }
         self.bump();
         Ok(())
@@ -698,7 +685,7 @@ impl<'a> Parser<'a> {
                 });
             }
             if !p.at_kw("function") {
-                return Err(p.expected("a function", "функция"));
+                return Err(p.expected(catalog::a_function()));
             }
             let function = p.function()?;
             Ok(Member {
@@ -750,13 +737,13 @@ impl<'a> Parser<'a> {
     fn block(&mut self) -> P<Block> {
         self.expect_newline()?;
         if *self.kind() != Kind::Indent {
-            return Err(self.expected("an indented block", "блок с отступом"));
+            return Err(self.expected(catalog::indented_block()));
         }
         self.bump();
         self.nested(|p| {
             let statements = p.members(|p| p.statement());
             if statements.is_empty() {
-                return Err(p.expected("a statement", "инструкция"));
+                return Err(p.expected(catalog::a_statement()));
             }
             Ok(statements)
         })
@@ -777,10 +764,7 @@ impl<'a> Parser<'a> {
             self.report(Diagnostic::error(
                 "E0024",
                 span,
-                Msg::new(
-                    "an inline handler needs a block; write this branch on its own indented lines",
-                    "строчному обработчику нужен блок; запишите эту ветку отдельными строками с отступом",
-                ),
+                catalog::handler_in_branch(),
             ));
             return Err(Failed);
         }
@@ -889,7 +873,7 @@ impl<'a> Parser<'a> {
             })
         });
         if cases.is_empty() {
-            return Err(self.expected("'case'", "'case'"));
+            return Err(self.expected(catalog::quoted("case")));
         }
         Ok(StatementKind::Match { subject, cases })
     }
@@ -913,7 +897,7 @@ impl<'a> Parser<'a> {
             handlers.push(Handler { ty, name, body });
         }
         if handlers.is_empty() {
-            return Err(self.expected("'on' after the block of 'try:'", "'on' после блока 'try:'"));
+            return Err(self.expected(catalog::on_after_try()));
         }
         Ok(StatementKind::Try { body, handlers })
     }
@@ -930,10 +914,7 @@ impl<'a> Parser<'a> {
             self.report(Diagnostic::error(
                 "E0024",
                 span,
-                Msg::new(
-                    "a statement may have only one inline handler",
-                    "в инструкции может быть только один строчный обработчик",
-                ),
+                catalog::one_inline_handler(),
             ));
         }
         if self.at_sym(":") {
@@ -943,14 +924,11 @@ impl<'a> Parser<'a> {
                     self.report(Diagnostic::error(
                         "E0024",
                         span,
-                        Msg::new(
-                            "the inline handler must be the last part of the statement",
-                            "строчный обработчик должен быть последней частью инструкции",
-                        ),
+                        catalog::handler_not_last(),
                     ));
                     return Err(Failed);
                 }
-                return Err(self.expected("the end of the line", "конец строки"));
+                return Err(self.expected(catalog::end_of_line()));
             }
             self.bump();
             let handler = self.block()?;
@@ -965,10 +943,7 @@ impl<'a> Parser<'a> {
             self.report(Diagnostic::error(
                 "E0024",
                 span,
-                Msg::new(
-                    "an inline handler needs a block: end the line with ':' and indent the handler",
-                    "строчному обработчику нужен блок: закончите строку ':' и запишите обработчик с отступом",
-                ),
+                catalog::handler_needs_block(),
             ));
         }
         Ok(StatementKind::Simple {
@@ -1031,10 +1006,7 @@ impl<'a> Parser<'a> {
                 self.report(Diagnostic::error(
                     "E0030",
                     target.span,
-                    Msg::new(
-                        "only a name, a field or an element can be assigned to",
-                        "присвоить можно только имени, полю или элементу",
-                    ),
+                    catalog::invalid_assignment_target(),
                 ));
                 return Err(Failed);
             }
@@ -1211,10 +1183,7 @@ impl<'a> Parser<'a> {
             self.report(Diagnostic::error(
                 "E0020",
                 span,
-                Msg::new(
-                    "comparisons cannot be chained; join them with 'and'",
-                    "сравнения нельзя объединять в цепочку; соедините их через 'and'",
-                ),
+                catalog::chained_comparison(),
             ));
             return Err(Failed);
         }
@@ -1319,10 +1288,7 @@ impl<'a> Parser<'a> {
                 self.report(Diagnostic::error(
                     "E0023",
                     value.span,
-                    Msg::new(
-                        "a positional argument cannot follow a named one",
-                        "позиционный аргумент не может идти после именованного",
-                    ),
+                    catalog::positional_after_named(),
                 ));
             }
             arguments.push(Argument { name, value });
@@ -1341,7 +1307,7 @@ impl<'a> Parser<'a> {
         let types = self.type_list()?;
         self.expect_sym("]")?;
         if !self.at_sym("(") {
-            return Err(self.expected("'('", "'('"));
+            return Err(self.expected(catalog::quoted("(")));
         }
         Ok(types)
     }
@@ -1452,7 +1418,7 @@ impl<'a> Parser<'a> {
             Kind::Symbol("(") => return self.paren(),
             Kind::Symbol("[") => return self.list(),
             Kind::Symbol("{") => return self.map(),
-            _ => return Err(self.expected("an expression", "выражение")),
+            _ => return Err(self.expected(catalog::an_expression())),
         };
         Ok(Expr { kind, span: start })
     }
@@ -1568,10 +1534,7 @@ impl<'a> Parser<'a> {
                         if *inner.kind() == Kind::Eof {
                             Some(expr)
                         } else {
-                            let _ = inner.expected(
-                                "'}' after the interpolated expression",
-                                "'}' после выражения интерполяции",
-                            );
+                            let _ = inner.expected(catalog::brace_after_interpolation());
                             None
                         }
                     });
@@ -1580,10 +1543,7 @@ impl<'a> Parser<'a> {
                         inner.report(Diagnostic::error(
                             "E0024",
                             span,
-                            Msg::new(
-                                "an inline handler cannot stand inside an interpolation",
-                                "строчный обработчик не может стоять внутри интерполяции",
-                            ),
+                            catalog::handler_in_interpolation(),
                         ));
                     }
                     self.diagnostics.append(&mut inner.diagnostics);
@@ -1696,14 +1656,7 @@ impl<'a> Parser<'a> {
                 let mut rest_seen: Option<Span> = None;
                 while !self.at_sym("]") {
                     if let Some(span) = rest_seen {
-                        self.report(Diagnostic::error(
-                            "E0034",
-                            span,
-                            Msg::new(
-                                "the rest element 'name...' must be the last element",
-                                "остаточный элемент 'name...' должен быть последним",
-                            ),
-                        ));
+                        self.report(Diagnostic::error("E0034", span, catalog::rest_not_last()));
                         rest_seen = None;
                     }
                     if self.at_name() && self.sym_at(1, "...") {
@@ -1736,7 +1689,7 @@ impl<'a> Parser<'a> {
                 self.expect_sym(")")?;
                 PatternKind::Tuple(items)
             }
-            _ => return Err(self.expected("a pattern", "образец")),
+            _ => return Err(self.expected(catalog::a_pattern())),
         };
         Ok(Pattern {
             kind,

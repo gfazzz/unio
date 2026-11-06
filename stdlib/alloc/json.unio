@@ -8,7 +8,7 @@
 ## variant with fields is an object {"Variant": {fields}}.
 unsafe module
 
-from std.text import join, from_code_point
+from std.text import from_code_point, join
 
 ## A JSON document. The variants share names with built-in types, so they are always written
 ## with the enum name: Value.Text("Anna").
@@ -45,7 +45,10 @@ public function encode[T](value as T, pretty as Bool = false) returns Text:
     return write_value(to_value(value), pretty, 0)
 
 ## Strict encoding for protocols and configuration: reject non-finite numbers instead of losing data.
-public function encode_checked[T](value as T, named pretty as Bool = false) returns Text fails with EncodeError:
+public function encode_checked[T](
+    value as T,
+    named pretty as Bool = false,
+) returns Text fails with EncodeError:
     let document = to_value(value)
     try validate_finite(document, "")
     return write_value(document, pretty, 0)
@@ -53,8 +56,7 @@ public function encode_checked[T](value as T, named pretty as Bool = false) retu
 function validate_finite(value as Value, path as Text) fails with EncodeError:
     match value:
         case Value.Float(number):
-            if not number.is_finite():
-                fail EncodeError(path = path, message = "non-finite number")
+            if not number.is_finite(): fail EncodeError(path = path, message = "non-finite number")
         case Value.Array(items):
             for index, item in items.enumerate():
                 try validate_finite(item, "{path}/{index}")
@@ -62,8 +64,7 @@ function validate_finite(value as Value, path as Text) fails with EncodeError:
             for key, item in fields.entries():
                 let segment = key.replace("~", "~0").replace("/", "~1")
                 try validate_finite(item, "{path}/{segment}")
-        case _:
-            pass
+        case _: pass
 
 public function decode[T](value as Value) returns T fails with DecodeError:
     return try from_value[T](value)
@@ -71,26 +72,18 @@ public function decode[T](value as Value) returns T fails with DecodeError:
 ## "null", "bool", "int", "float", "text", "array", or "object".
 public function kind_name(value as Value) returns Text:
     match value:
-        case Value.Null:
-            return "null"
-        case Value.Bool(_):
-            return "bool"
-        case Value.Int(_):
-            return "int"
-        case Value.Float(_):
-            return "float"
-        case Value.Text(_):
-            return "text"
-        case Value.Array(_):
-            return "array"
-        case Value.Object(_):
-            return "object"
+        case Value.Null: return "null"
+        case Value.Bool(_): return "bool"
+        case Value.Int(_): return "int"
+        case Value.Float(_): return "float"
+        case Value.Text(_): return "text"
+        case Value.Array(_): return "array"
+        case Value.Object(_): return "object"
 
 ## Conversions between a type and Value. The compiler generates them for every type allowed by S-5.
 external function to_value[T](value as T) returns Value
 
 external function from_value[T](value as Value) returns T fails with DecodeError
-
 
 # ---------------------------------------------------------------- reading
 
@@ -104,14 +97,17 @@ struct Reader:
 
 ## Bounded strict parsing: duplicate keys fail. Limits are checked before constructing the character list.
 ## Depth counts values along a nesting path, including the root; max_bytes counts UTF-8 bytes.
-public function parse(text as Text, named max_depth as Int = 128, named max_bytes as Int = 16777216) returns Value fails with ParseError:
+public function parse(
+    text as Text,
+    named max_depth as Int = 128,
+    named max_bytes as Int = 16777216,
+) returns Value fails with ParseError:
     if max_depth <= 0 or max_bytes <= 0 or text.byte_length() > max_bytes:
         fail ParseError(line = 1, column = 1, message = "invalid or exceeded JSON size limit")
     var reader = Reader(characters = text.chars(), max_depth = max_depth)
     let value = try read_value(reader)
     skip_space(reader)
-    if not at_end(reader):
-        fail error_at(reader, "unexpected text after the value")
+    if not at_end(reader): fail error_at(reader, "unexpected text after the value")
     return value
 
 function at_end(reader as Reader) returns Bool:
@@ -127,8 +123,7 @@ function advance(var reader as Reader) returns Text:
     if character == "\n":
         reader.line = reader.line + 1
         reader.column = 1
-    else:
-        reader.column = reader.column + 1
+    else: reader.column = reader.column + 1
     return character
 
 function error_at(reader as Reader, message as Text) returns ParseError:
@@ -143,12 +138,10 @@ function is_digit(character as Text) returns Bool:
 
 function expect(var reader as Reader, word as Text) fails with ParseError:
     for character in word.chars():
-        if advance(reader) != character:
-            fail error_at(reader, "expected \"{word}\"")
+        if advance(reader) != character: fail error_at(reader, "expected \"{word}\"")
 
 function read_value(var reader as Reader) returns Value fails with ParseError:
-    if reader.depth >= reader.max_depth:
-        fail error_at(reader, "JSON depth limit exceeded")
+    if reader.depth >= reader.max_depth: fail error_at(reader, "JSON depth limit exceeded")
     reader.depth = reader.depth + 1
     let value = try read_nested_value(reader)
     reader.depth = reader.depth - 1
@@ -157,12 +150,9 @@ function read_value(var reader as Reader) returns Value fails with ParseError:
 function read_nested_value(var reader as Reader) returns Value fails with ParseError:
     skip_space(reader)
     let character = peek(reader)
-    if character == "\{":
-        return try read_object(reader)
-    else if character == "[":
-        return try read_array(reader)
-    else if character == "\"":
-        return Value.Text(try read_text(reader))
+    if character == "\{": return try read_object(reader)
+    else if character == "[": return try read_array(reader)
+    else if character == "\"": return Value.Text(try read_text(reader))
     else if character == "t":
         try expect(reader, "true")
         return Value.Bool(true)
@@ -172,10 +162,8 @@ function read_nested_value(var reader as Reader) returns Value fails with ParseE
     else if character == "n":
         try expect(reader, "null")
         return Value.Null
-    else if character == "-" or is_digit(character):
-        return try read_number(reader)
-    else if at_end(reader):
-        fail error_at(reader, "unexpected end of the document")
+    else if character == "-" or is_digit(character): return try read_number(reader)
+    else if at_end(reader): fail error_at(reader, "unexpected end of the document")
     fail error_at(reader, "unexpected character \"{character}\"")
 
 function read_object(var reader as Reader) returns Value fails with ParseError:
@@ -187,20 +175,16 @@ function read_object(var reader as Reader) returns Value fails with ParseError:
         return Value.Object(fields)
     while true:
         skip_space(reader)
-        if peek(reader) != "\"":
-            fail error_at(reader, "expected a key in quotes")
+        if peek(reader) != "\"": fail error_at(reader, "expected a key in quotes")
         let key = try read_text(reader)
-        if fields.contains(key):
-            fail error_at(reader, "duplicate object key: {key}")
+        if fields.contains(key): fail error_at(reader, "duplicate object key: {key}")
         skip_space(reader)
         try expect(reader, ":")
         fields.put(key, try read_value(reader))
         skip_space(reader)
         let separator = advance(reader)
-        if separator == "\}":
-            return Value.Object(fields)
-        if separator != ",":
-            fail error_at(reader, "expected \",\" or \"\}\" in an object")
+        if separator == "\}": return Value.Object(fields)
+        if separator != ",": fail error_at(reader, "expected \",\" or \"\}\" in an object")
 
 function read_array(var reader as Reader) returns Value fails with ParseError:
     advance(reader)
@@ -213,50 +197,34 @@ function read_array(var reader as Reader) returns Value fails with ParseError:
         items.append(try read_value(reader))
         skip_space(reader)
         let separator = advance(reader)
-        if separator == "]":
-            return Value.Array(items)
-        if separator != ",":
-            fail error_at(reader, "expected \",\" or \"]\" in an array")
+        if separator == "]": return Value.Array(items)
+        if separator != ",": fail error_at(reader, "expected \",\" or \"]\" in an array")
 
 function read_text(var reader as Reader) returns Text fails with ParseError:
     advance(reader)
     var result = ""
     while true:
-        if at_end(reader):
-            fail error_at(reader, "unterminated text")
+        if at_end(reader): fail error_at(reader, "unterminated text")
         let character = advance(reader)
-        if character == "\"":
-            return result
-        if character == "\\":
-            result = result + try read_escape(reader)
+        if character == "\"": return result
+        if character == "\\": result = result + try read_escape(reader)
         else if character.code_points()[0] < 0x20:
             fail error_at(reader, "a control character must be escaped in text")
-        else:
-            result = result + character
+        else: result = result + character
 
 function read_escape(var reader as Reader) returns Text fails with ParseError:
     let character = advance(reader)
     match character:
-        case "\"":
-            return "\""
-        case "\\":
-            return "\\"
-        case "/":
-            return "/"
-        case "b":
-            return "\u{8}"
-        case "f":
-            return "\u{C}"
-        case "n":
-            return "\n"
-        case "r":
-            return "\r"
-        case "t":
-            return "\t"
-        case "u":
-            return try read_unicode(reader)
-        case _:
-            fail error_at(reader, "invalid escape \"\\{character}\"")
+        case "\"": return "\""
+        case "\\": return "\\"
+        case "/": return "/"
+        case "b": return "\u{8}"
+        case "f": return "\u{C}"
+        case "n": return "\n"
+        case "r": return "\r"
+        case "t": return "\t"
+        case "u": return try read_unicode(reader)
+        case _: fail error_at(reader, "invalid escape \"\\{character}\"")
 
 ## \uXXXX, or a pair of them for a character outside the Basic Multilingual Plane.
 function read_unicode(var reader as Reader) returns Text fails with ParseError:
@@ -265,26 +233,20 @@ function read_unicode(var reader as Reader) returns Text fails with ParseError:
     if first >= 0xD800 and first <= 0xDBFF:
         try expect(reader, "\\u")
         let second = try read_hex4(reader)
-        if second < 0xDC00 or second > 0xDFFF:
-            fail error_at(reader, "invalid surrogate pair")
+        if second < 0xDC00 or second > 0xDFFF: fail error_at(reader, "invalid surrogate pair")
         code = 0x10000 + (first - 0xD800) * 0x400 + (second - 0xDC00)
     match from_code_point(code):
-        case some(text):
-            return text
-        case none:
-            fail error_at(reader, "invalid code point {code}")
+        case some(text): return text
+        case none: fail error_at(reader, "invalid code point {code}")
 
 function read_hex4(var reader as Reader) returns Int fails with ParseError:
     var value = 0
     for _ in range(0, 4):
         let character = advance(reader)
-        if character.length() != 1:
-            fail error_at(reader, "expected four hexadecimal digits")
+        if character.length() != 1: fail error_at(reader, "expected four hexadecimal digits")
         match HEX_DIGITS.index_of(character.to_lower()):
-            case some(digit):
-                value = value * 16 + digit
-            case none:
-                fail error_at(reader, "expected four hexadecimal digits")
+            case some(digit): value = value * 16 + digit
+            case none: fail error_at(reader, "expected four hexadecimal digits")
     return value
 
 function read_number(var reader as Reader) returns Value fails with ParseError:
@@ -292,75 +254,71 @@ function read_number(var reader as Reader) returns Value fails with ParseError:
     let column = reader.column
     var text = ""
     var is_float = false
-    if peek(reader) == "-":
-        text = text + advance(reader)
-    if not is_digit(peek(reader)):
-        fail error_at(reader, "expected a digit")
-    if peek(reader) == "0":
-        text = text + advance(reader)
+    if peek(reader) == "-": text = text + advance(reader)
+    if not is_digit(peek(reader)): fail error_at(reader, "expected a digit")
+    if peek(reader) == "0": text = text + advance(reader)
     else:
         while is_digit(peek(reader)):
             text = text + advance(reader)
     if peek(reader) == ".":
         is_float = true
         text = text + advance(reader)
-        if not is_digit(peek(reader)):
-            fail error_at(reader, "expected a digit after \".\"")
+        if not is_digit(peek(reader)): fail error_at(reader, "expected a digit after \".\"")
         while is_digit(peek(reader)):
             text = text + advance(reader)
     if peek(reader) in ["e", "E"]:
         is_float = true
         text = text + advance(reader)
-        if peek(reader) in ["+", "-"]:
-            text = text + advance(reader)
-        if not is_digit(peek(reader)):
-            fail error_at(reader, "expected a digit in the exponent")
+        if peek(reader) in ["+", "-"]: text = text + advance(reader)
+        if not is_digit(peek(reader)): fail error_at(reader, "expected a digit in the exponent")
         while is_digit(peek(reader)):
             text = text + advance(reader)
     if not is_float:
         match text.to_int():
-            case some(number):
-                return Value.Int(number)
-            case none:
-                is_float = true
+            case some(number): return Value.Int(number)
+            case none: is_float = true
     match text.to_float():
         case some(number):
             if not number.is_finite():
-                fail ParseError(line = line, column = column, message = "number outside finite Float range")
+                fail ParseError(
+                    line = line,
+                    column = column,
+                    message = "number outside finite Float range",
+                )
             return Value.Float(number)
-        case none:
-            fail ParseError(line = line, column = column, message = "invalid number {text}")
-
+        case none: fail ParseError(line = line, column = column, message = "invalid number {text}")
 
 # ---------------------------------------------------------------- writing
 
 function write_value(value as Value, pretty as Bool, depth as Int) returns Text:
     match value:
-        case Value.Null:
-            return "null"
-        case Value.Bool(flag):
-            return flag.to_text()
-        case Value.Int(number):
-            return number.to_text()
-        case Value.Float(number):
-            return number.to_text() if number.is_finite() else "null"
-        case Value.Text(text):
-            return quote(text)
+        case Value.Null: return "null"
+        case Value.Bool(flag): return flag.to_text()
+        case Value.Int(number): return number.to_text()
+        case Value.Float(number): return number.to_text() if number.is_finite() else "null"
+        case Value.Text(text): return quote(text)
         case Value.Array(items):
-            if items.is_empty():
-                return "[]"
+            if items.is_empty(): return "[]"
             let parts = [write_value(item, pretty, depth + 1) for item in items]
             return wrap("[", parts, "]", pretty, depth)
         case Value.Object(fields):
-            if fields.is_empty():
-                return "\{\}"
+            if fields.is_empty(): return "\{\}"
             let colon = ": " if pretty else ":"
-            let parts = [quote(key) + colon + write_value(field, pretty, depth + 1) for key, field in fields.entries()]
+            let parts = [quote(key) + colon + write_value(
+                field,
+                pretty,
+                depth + 1,
+            ) for key, field in fields.entries()]
             return wrap("\{", parts, "\}", pretty, depth)
 
-function wrap(open as Text, parts as List[Text], close as Text, pretty as Bool, depth as Int) returns Text:
-    if not pretty:
-        return open + join(parts, ",") + close
+function wrap(
+    open as Text,
+    parts as List[Text],
+    close as Text,
+    pretty as Bool,
+    depth as Int,
+) returns Text:
+    if not pretty: return open + join(parts, ",") + close
     let inner = "    ".repeat(depth + 1)
     return open + "\n" + inner + join(parts, ",\n" + inner) + "\n" + "    ".repeat(depth) + close
 
@@ -372,20 +330,14 @@ function quote(text as Text) returns Text:
 
 function escape(character as Text) returns Text:
     match character:
-        case "\"":
-            return "\\\""
-        case "\\":
-            return "\\\\"
-        case "\n":
-            return "\\n"
-        case "\r":
-            return "\\r"
-        case "\t":
-            return "\\t"
+        case "\"": return "\\\""
+        case "\\": return "\\\\"
+        case "\n": return "\\n"
+        case "\r": return "\\r"
+        case "\t": return "\\t"
         case _:
             let code = character.code_points()[0]
-            if code < 0x20:
-                return "\\u" + hex4(code)
+            if code < 0x20: return "\\u" + hex4(code)
             return character
 
 function hex4(code as Int) returns Text:
@@ -395,7 +347,6 @@ function hex4(code as Int) returns Text:
         digits = HEX_DIGITS.slice(rest % 16, rest % 16 + 1) + digits
         rest = rest / 16
     return digits
-
 
 test "parse and encode round trip":
     let text = "\{\"name\":\"Anna\",\"tags\":[1,2.5,true,null]\}"
@@ -417,28 +368,24 @@ test "an error names the line":
     try:
         parse("[1,\n2,,3]")
         assert_fail("expected a parse error")
-    on ParseError as e:
-        assert e.line == 2
+    on ParseError as e: assert e.line == 2
 
 test "duplicate keys, including escaped spellings, are rejected":
     for source in ["\{\"a\":1,\"a\":2\}", "\{\"a\":1,\"\\u0061\":2\}"]:
         try:
             let value = try parse(source)
             assert_fail("expected duplicate key error")
-        on ParseError as e:
-            assert e.message == "duplicate object key: a"
+        on ParseError as e: assert e.message == "duplicate object key: a"
 
 test "JSON limits reject deep and oversized inputs":
     try:
         let value = try parse("[[0]]", max_depth = 2)
         assert_fail("expected depth limit")
-    on ParseError as e:
-        assert e.message == "JSON depth limit exceeded"
+    on ParseError as e: assert e.message == "JSON depth limit exceeded"
     try:
         let value = try parse("null", max_bytes = 3)
         assert_fail("expected size limit")
-    on ParseError as e:
-        assert e.line == 1
+    on ParseError as e: assert e.line == 1
     let scalar = try parse("0", max_depth = 1, max_bytes = 1) on ParseError as e:
         assert_fail(e.message)
     assert scalar == Value.Int(0)
@@ -447,5 +394,4 @@ test "overflowing JSON exponents do not silently become infinity":
     try:
         let value = try parse("1e9999")
         assert_fail("expected numeric range error")
-    on ParseError as e:
-        assert e.line == 1
+    on ParseError as e: assert e.line == 1

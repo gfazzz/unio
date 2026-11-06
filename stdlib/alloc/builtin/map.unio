@@ -21,10 +21,8 @@ extend[K with Hash and Equal, V] Map[K, V]:
     ## Used by "key in map".
     public function contains(self, key as K) returns Bool:
         match self.get(key):
-            case some(_):
-                return true
-            case none:
-                return false
+            case some(_): return true
+            case none: return false
 
     public function keys(self) returns List[K]:
         return [key for key, _ in self.entries()]

@@ -32,15 +32,13 @@ extend[T with Hash and Equal] Set[T]:
     public function intersection(self, other as Set[T]) returns Set[T]:
         var result = Set[T]()
         for item in self.items():
-            if item in other:
-                result.insert(item)
+            if item in other: result.insert(item)
         return result
 
     public function difference(self, other as Set[T]) returns Set[T]:
         var result = Set[T]()
         for item in self.items():
-            if item not in other:
-                result.insert(item)
+            if item not in other: result.insert(item)
         return result
 
 extend[T with Hash and Equal] List[T]:

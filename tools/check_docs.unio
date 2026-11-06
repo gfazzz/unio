@@ -19,7 +19,10 @@ let SKIPPED_DIRECTORIES as List[Text] = [".git", "target", "node_modules", "__py
 let TABS_ALLOWED as List[Text] = ["spec/tests/invalid/tab_indent.unio"]
 
 ## English documents whose Russian localization does not follow the docs/ to docs/ru/ rule.
-let SPECIAL_LOCALIZATIONS as Map[Text, Text] = {"README.md": "docs/ru/README.md", "spec/README.md": "docs/ru/spec.md"}
+let SPECIAL_LOCALIZATIONS as Map[Text, Text] = {
+    "README.md": "docs/ru/README.md",
+    "spec/README.md": "docs/ru/spec.md",
+}
 
 ## Files below the directory that have a checked extension, as paths relative to the root.
 function checked_files(root as Path, relative as Text) returns List[Text] fails with IoError:
@@ -31,15 +34,13 @@ function checked_files(root as Path, relative as Text) returns List[Text] fails 
         if files.is_directory(entry):
             if name not in SKIPPED_DIRECTORIES:
                 found.append_all(try checked_files(root, entry_relative))
-        else if entry.extension() in CHECKED_EXTENSIONS:
-            found.append(entry_relative)
+        else if entry.extension() in CHECKED_EXTENSIONS: found.append(entry_relative)
     return found
 
 ## The Russian localization required for a file, if any.
 function localization(relative as Text) returns Option[Text]:
     match SPECIAL_LOCALIZATIONS.get(relative):
-        case some(target):
-            return some(target)
+        case some(target): return some(target)
         case none:
             if relative.starts_with("docs/") and not relative.starts_with("docs/ru/"):
                 if relative.ends_with(".md") or relative.ends_with(".unio"):
@@ -52,8 +53,7 @@ function layout_problems(relative as Text, text as Text) returns List[Text]:
     if not text.is_empty() and not text.ends_with("\n"):
         problems.append("{relative}: no newline at end of file")
     for number, line in text.lines().enumerate(start = 1):
-        if line != line.trim_end():
-            problems.append("{relative}:{number}: trailing white space")
+        if line != line.trim_end(): problems.append("{relative}:{number}: trailing white space")
         if line.contains("\t") and relative not in TABS_ALLOWED:
             problems.append("{relative}:{number}: tab character")
     return problems
@@ -67,12 +67,9 @@ function link_targets(text as Text) returns List[Text]:
             case some(position):
                 start = position + 2
                 match read_target(text, start):
-                    case some(target):
-                        targets.append(target)
-                    case none:
-                        pass
-            case none:
-                return targets
+                    case some(target): targets.append(target)
+                    case none: pass
+            case none: return targets
 
 ## The target that starts at the position, or none if the text there is not a link target.
 function read_target(text as Text, start as Int) returns Option[Text]:
@@ -80,13 +77,10 @@ function read_target(text as Text, start as Int) returns Option[Text]:
     while end < text.length():
         let character = text.slice(end, end + 1)
         if character == ")" or character == "#":
-            if end == start:
-                return none
-            if character == "#" and not text.slice(end, text.length()).contains(")"):
-                return none
+            if end == start: return none
+            if character == "#" and not text.slice(end, text.length()).contains(")"): return none
             return some(text.slice(start, end))
-        if character.trim().is_empty():
-            return none
+        if character.trim().is_empty(): return none
         end = end + 1
     return none
 
@@ -96,15 +90,13 @@ function is_url(target as Text) returns Bool:
         case some(position):
             let scheme = target.slice(0, position)
             return not scheme.is_empty() and scheme == scheme.to_lower() and scheme.to_upper() != scheme
-        case none:
-            return false
+        case none: return false
 
 function link_problems(root as Path, relative as Text, text as Text) returns List[Text]:
     var problems as List[Text] = []
     let directory = root.join(relative).parent() or root
     for target in link_targets(text):
-        if is_url(target):
-            continue
+        if is_url(target): continue
         if not files.exists(directory.join(target).normalize()):
             problems.append("{relative}: broken link {target}")
     return problems
@@ -112,18 +104,15 @@ function link_problems(root as Path, relative as Text, text as Text) returns Lis
 ## All problems of one file.
 function file_problems(root as Path, relative as Text) returns List[Text]:
     let text = try files.read_text(root.join(relative)) on IoError as e:
-        if e.kind == IoErrorKind.InvalidData:
-            return ["{relative}: not UTF-8"]
+        if e.kind == IoErrorKind.InvalidData: return ["{relative}: not UTF-8"]
         return ["{relative}: cannot be read: {e.reason}"]
     var problems = layout_problems(relative, text)
-    if relative.ends_with(".md"):
-        problems.append_all(link_problems(root, relative, text))
+    if relative.ends_with(".md"): problems.append_all(link_problems(root, relative, text))
     match localization(relative):
         case some(target):
             if not files.exists(root.join(target)):
                 problems.append("{relative}: missing Russian localization {target}")
-        case none:
-            pass
+        case none: pass
     return problems
 
 public function main() returns Int:

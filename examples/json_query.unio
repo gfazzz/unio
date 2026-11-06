@@ -32,8 +32,7 @@ function step(value as Value, key as Text) returns Value fails with QueryError:
         case _: fail QueryError(message = "cannot select \"{key}\" from a {json.kind_name(value)}")
 
 function select(document as Value, path as Text) returns Value fails with QueryError:
-    if path == ".":
-        return document
+    if path == ".": return document
     var current = document
     for key in split(path, "."):
         current = try step(current, key)
@@ -70,8 +69,7 @@ test "a missing key is reported":
     try:
         select(Value.Object({}), "missing")
         assert_fail("expected a query error")
-    on QueryError as e:
-        assert e.message == "no key \"missing\""
+    on QueryError as e: assert e.message == "no key \"missing\""
 
 test "the whole document":
     let document = Value.Array([])

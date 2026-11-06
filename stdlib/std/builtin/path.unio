@@ -19,8 +19,7 @@ extend Path:
     public function components(self) returns List[Text]:
         let parsed = parse_parts(self.to_text(), separator() == "\\")
         var result as List[Text] = []
-        if not parsed.anchor.is_empty():
-            result.append(parsed.anchor)
+        if not parsed.anchor.is_empty(): result.append(parsed.anchor)
         result.append_all(parsed.items)
         return result
 
@@ -37,18 +36,24 @@ extend Path:
         let name = self.name()
         var position = -1
         for index, character in name.chars().enumerate():
-            if character == "." and index > 0:
-                position = index
-        if position < 0:
-            return ""
+            if character == "." and index > 0: position = index
+        if position < 0: return ""
         return name.slice(position + 1, name.length())
 
     ## Remove the last name; none at a root/drive anchor. UNC parents never leave the share.
     public function parent(self) returns Option[Path]:
         let parsed = parse_parts(self.to_text(), separator() == "\\")
-        if parsed.items.is_empty():
-            return none
-        return some(Path(render_parts(PathParts(anchor = parsed.anchor, items = parsed.items.slice(0, parsed.items.length() - 1)))))
+        if parsed.items.is_empty(): return none
+        return some(
+            Path(
+                render_parts(
+                    PathParts(
+                        anchor = parsed.anchor,
+                        items = parsed.items.slice(0, parsed.items.length() - 1),
+                    ),
+                ),
+            ),
+        )
 
     ## Append text without changing the anchor. This is not a sandbox containment check.
     public function join(self, part as Text) returns Path:
@@ -56,8 +61,7 @@ extend Path:
         let parsed = parse_parts(text, separator() == "\\")
         if text.is_empty() or text.ends_with("/") or (separator() == "\\" and text.ends_with("\\")):
             return Path(text + part)
-        if parsed.items.is_empty() and parsed.anchor.ends_with(":"):
-            return Path(text + part)
+        if parsed.items.is_empty() and parsed.anchor.ends_with(":"): return Path(text + part)
         return Path(text + separator() + part)
 
     ## Remove "." and redundant separators, preserving ".." and the anchor.
@@ -71,26 +75,44 @@ function parse_parts(source as Text, windows as Bool) returns PathParts:
     let text = source.replace("\\", "/") if windows else source
     var anchor = ""
     var start = 0
-    if windows and text.length() >= 2 and text.slice(1, 2) == ":" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(text.slice(0, 1)):
+    if windows and text.length() >= 2 and text.slice(
+        1,
+        2,
+    ) == ":" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(
+        text.slice(0, 1),
+    ):
         anchor = text.slice(0, 2)
         start = 2
         if text.length() > 2 and text.slice(2, 3) == "/":
             anchor = anchor + "/"
             start = 3
     else if text.starts_with("//") and not text.starts_with("///"):
-        let names = [name for name in split(text.slice(2, text.length()), "/") if not name.is_empty()]
+        let names = [name for name in split(
+            text.slice(2, text.length()),
+            "/",
+        ) if not name.is_empty()]
         if windows and names.length() >= 2:
-            return PathParts(anchor = "//{names[0]}/{names[1]}/", items = names.slice(2, names.length()))
+            return PathParts(
+                anchor = "//{names[0]}/{names[1]}/",
+                items = names.slice(2, names.length()),
+            )
         return PathParts(anchor = "//", items = names)
     else if text.starts_with("/"):
         anchor = "/"
         start = 1
-    return PathParts(anchor = anchor, items = [name for name in split(text.slice(start, text.length()), "/") if not name.is_empty()])
+    return PathParts(
+        anchor = anchor,
+        items = [name for name in split(
+            text.slice(start, text.length()),
+            "/",
+        ) if not name.is_empty()],
+    )
 
 function absolute_parts(parsed as PathParts, windows as Bool) returns Bool:
-    if not windows:
-        return parsed.anchor.starts_with("/")
-    return parsed.anchor.ends_with(":/") or (parsed.anchor.starts_with("//") and parsed.anchor.length() > 2)
+    if not windows: return parsed.anchor.starts_with("/")
+    return parsed.anchor.ends_with(":/") or (parsed.anchor.starts_with(
+        "//",
+    ) and parsed.anchor.length() > 2)
 
 function render_parts(parsed as PathParts) returns Text:
     let text = parsed.anchor + join(parsed.items, "/")

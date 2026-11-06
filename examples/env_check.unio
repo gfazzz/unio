@@ -28,11 +28,9 @@ function parse_requirements(text as Text) returns List[Requirement] fails with F
     var requirements as List[Requirement] = []
     for number, line in text.lines().enumerate(start = 1):
         let words = line.split_whitespace()
-        if words.is_empty() or words[0].starts_with("#"):
-            continue
+        if words.is_empty() or words[0].starts_with("#"): continue
         match words:
-            case ["env", name]:
-                requirements.append(Requirement.Variable(name = name))
+            case ["env", name]: requirements.append(Requirement.Variable(name = name))
             case ["program", name, version]:
                 match parse_version(version):
                     case some(minimum):
@@ -40,7 +38,10 @@ function parse_requirements(text as Text) returns List[Requirement] fails with F
                     case none:
                         fail FormatError(line = number, message = "invalid version {version}")
             case _:
-                fail FormatError(line = number, message = "expected \"env NAME\" or \"program NAME VERSION\"")
+                fail FormatError(
+                    line = number,
+                    message = "expected \"env NAME\" or \"program NAME VERSION\"",
+                )
     return requirements
 
 ## "2.40.1" as [2, 40, 1]; none unless every part is a non-negative number.
@@ -48,10 +49,8 @@ function parse_version(text as Text) returns Option[List[Int]]:
     var parts as List[Int] = []
     for part in split(text, "."):
         match part.to_int():
-            case some(number) if number >= 0:
-                parts.append(number)
-            case _:
-                return none
+            case some(number) if number >= 0: parts.append(number)
+            case _: return none
     return some(parts)
 
 ## The first version number in the output of "NAME --version", such as 2.40.1 in "git version 2.40.1".
@@ -60,10 +59,8 @@ function find_version(output as Text) returns Option[List[Int]]:
         let candidate = trim_version(word)
         if candidate.contains("."):
             match parse_version(candidate):
-                case some(version):
-                    return some(version)
-                case none:
-                    pass
+                case some(version): return some(version)
+                case none: pass
     return none
 
 ## The word without a leading "v" and without trailing characters that are not digits: "v18.2," is "18.2".
@@ -81,8 +78,7 @@ function at_least(version as List[Int], minimum as List[Int]) returns Bool:
     for index in range(0, max(version.length(), minimum.length())):
         let have = version.get(index) or 0
         let need = minimum.get(index) or 0
-        if have != need:
-            return have > need
+        if have != need: return have > need
     return true
 
 function format_version(version as List[Int]) returns Text:
@@ -92,16 +88,21 @@ function format_version(version as List[Int]) returns Text:
 function check(requirement as Requirement) returns Option[Text]:
     match requirement:
         case Requirement.Variable(name):
-            if env.get(name).is_none():
-                return some("environment variable {name} is not set")
+            if env.get(name).is_none(): return some("environment variable {name} is not set")
             return none
         case Requirement.Program(name, minimum):
-            let output = try process.run(name, ["--version"], timeout_seconds = 10) on ProcessError as e:
+            let output = try process.run(
+                name,
+                ["--version"],
+                timeout_seconds = 10,
+            ) on ProcessError as e:
                 return some("{name}: {e.reason}")
             match find_version(output.stdout + " " + output.stderr):
                 case some(version):
                     if not at_least(version, minimum):
-                        return some("{name} {format_version(version)} is older than {format_version(minimum)}")
+                        return some(
+                            "{name} {format_version(version)} is older than {format_version(minimum)}",
+                        )
                     return none
                 case none:
                     return some("{name}: no version number in the output of \"{name} --version\"")
@@ -121,8 +122,7 @@ public function main() returns Int:
                     case some(problem):
                         print("missing: {problem}")
                         unmet = unmet + 1
-                    case none:
-                        pass
+                    case none: pass
             print("{requirements.length() - unmet} of {requirements.length()} requirements met")
             return 0 if unmet == 0 else 1
         case _:
@@ -133,14 +133,16 @@ test "requirements are read line by line":
     let text = "# tools\nenv HOME\n\nprogram git 2.30\n"
     let requirements = try parse_requirements(text) on FormatError as e:
         assert_fail(e.message)
-    assert requirements == [Requirement.Variable(name = "HOME"), Requirement.Program(name = "git", minimum = [2, 30])]
+    assert requirements == [
+        Requirement.Variable(name = "HOME"),
+        Requirement.Program(name = "git", minimum = [2, 30]),
+    ]
 
 test "a malformed line names its number":
     try:
         parse_requirements("env HOME\nprogram git\n")
         assert_fail("expected a format error")
-    on FormatError as e:
-        assert e.line == 2
+    on FormatError as e: assert e.line == 2
 
 test "versions are found in typical outputs":
     assert find_version("git version 2.40.1") == some([2, 40, 1])

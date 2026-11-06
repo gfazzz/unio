@@ -35,24 +35,23 @@ function parse_options(arguments as List[Text]) returns Options fails with Usage
         let value = arguments[index + 1]
         if flag == "--lines":
             match value.to_int():
-                case some(number) if number > 0:
-                    count = number
-                case _:
-                    fail UsageError(message = "--lines needs a positive number, not {value}")
+                case some(number) if number > 0: count = number
+                case _: fail UsageError(message = "--lines needs a positive number, not {value}")
         else if flag == "--level":
             match rank(value):
-                case some(found):
-                    minimum_rank = found
+                case some(found): minimum_rank = found
                 case none:
                     fail UsageError(message = "unknown level {value}; use {join(LEVELS, ", ")}")
-        else if flag == "--contains":
-            contains = value
-        else:
-            fail UsageError(message = USAGE)
+        else if flag == "--contains": contains = value
+        else: fail UsageError(message = USAGE)
         index = index + 2
-    if index != arguments.length() - 1:
-        fail UsageError(message = USAGE)
-    return Options(count = count, minimum_rank = minimum_rank, contains = contains, path = Path(arguments[index]))
+    if index != arguments.length() - 1: fail UsageError(message = USAGE)
+    return Options(
+        count = count,
+        minimum_rank = minimum_rank,
+        contains = contains,
+        path = Path(arguments[index]),
+    )
 
 ## The position of a level in LEVELS, ignoring case.
 function rank(level as Text) returns Option[Int]:
@@ -61,19 +60,14 @@ function rank(level as Text) returns Option[Int]:
 ## The rank of the level written in the second word of the line, if there is one.
 function line_rank(line as Text) returns Option[Int]:
     match line.split_whitespace().get(1):
-        case some(word):
-            return rank(word)
-        case none:
-            return none
+        case some(word): return rank(word)
+        case none: return none
 
 function keeps(line as Text, options as Options) returns Bool:
-    if not options.contains.is_empty() and not line.contains(options.contains):
-        return false
+    if not options.contains.is_empty() and not line.contains(options.contains): return false
     match line_rank(line):
-        case some(found):
-            return found >= options.minimum_rank
-        case none:
-            return options.minimum_rank == 0
+        case some(found): return found >= options.minimum_rank
+        case none: return options.minimum_rank == 0
 
 ## The last lines that pass the filter, in their original order.
 function select(lines as List[Text], options as Options) returns List[Text]:
@@ -91,7 +85,13 @@ public function main() returns Int:
         print(line)
     return 0
 
-let SAMPLE as List[Text] = ["t1 INFO started", "t2 DEBUG cache warm", "t3 WARN slow disk", "t4 ERROR disk full", "plain text"]
+let SAMPLE as List[Text] = [
+    "t1 INFO started",
+    "t2 DEBUG cache warm",
+    "t3 WARN slow disk",
+    "t4 ERROR disk full",
+    "plain text",
+]
 
 test "the last lines are kept in order":
     let options = Options(count = 2, minimum_rank = 0, contains = "", path = Path("log"))
@@ -106,7 +106,9 @@ test "text filters combine with levels":
     assert select(SAMPLE, options) == ["t3 WARN slow disk", "t4 ERROR disk full"]
 
 test "options are read in any order":
-    let options = try parse_options(["--level", "warn", "--lines", "5", "app.log"]) on UsageError as e:
+    let options = try parse_options(
+        ["--level", "warn", "--lines", "5", "app.log"],
+    ) on UsageError as e:
         assert_fail(e.message)
     assert options.minimum_rank == 2
     assert options.count == 5
@@ -116,5 +118,4 @@ test "a file is required":
     try:
         parse_options(["--lines", "5"])
         assert_fail("expected a usage error")
-    on UsageError as e:
-        assert e.message == USAGE
+    on UsageError as e: assert e.message == USAGE

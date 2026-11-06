@@ -33,52 +33,49 @@ function split_fields(line as Text, number as Int) returns List[Text] fails with
             if character == "\"" and characters.get(index + 1) == some("\""):
                 current = current + "\""
                 index = index + 1
-            else if character == "\"":
-                quoted = false
-            else:
-                current = current + character
-        else if character == "\"" and current.is_empty():
-            quoted = true
+            else if character == "\"": quoted = false
+            else: current = current + character
+        else if character == "\"" and current.is_empty(): quoted = true
         else if character == ",":
             fields.append(current)
             current = ""
-        else:
-            current = current + character
+        else: current = current + character
         index = index + 1
-    if quoted:
-        fail CsvError(line = number, message = "a quoted field is not closed")
+    if quoted: fail CsvError(line = number, message = "a quoted field is not closed")
     fields.append(current)
     return fields
 
 function sum_columns(text as Text, columns as List[Text]) returns List[Total] fails with CsvError:
     let lines = text.lines()
-    if lines.is_empty():
-        fail CsvError(line = 1, message = "the file is empty")
+    if lines.is_empty(): fail CsvError(line = 1, message = "the file is empty")
     let header = try split_fields(lines[0], 1)
     var indexes as List[Int] = []
     for column in columns:
         match header.find_index(function (name as Text) returns Bool: name.trim() == column):
-            case some(index):
-                indexes.append(index)
-            case none:
-                fail CsvError(line = 1, message = "no column named \"{column}\"")
+            case some(index): indexes.append(index)
+            case none: fail CsvError(line = 1, message = "no column named \"{column}\"")
     var sums = [0.0 for _ in columns]
     var counts = [0 for _ in columns]
     for number, line in lines.slice(1, lines.length()).enumerate(start = 2):
-        if line.trim().is_empty():
-            continue
+        if line.trim().is_empty(): continue
         let fields = try split_fields(line, number)
         for position, index in indexes.enumerate():
             let field = (fields.get(index) or "").trim()
-            if field.is_empty():
-                continue
+            if field.is_empty(): continue
             match field.to_float():
                 case some(value):
                     sums[position] = sums[position] + value
                     counts[position] = counts[position] + 1
                 case none:
-                    fail CsvError(line = number, message = "\"{field}\" in column {columns[position]} is not a number")
-    return [Total(column = column, sum = sums[position], count = counts[position]) for position, column in columns.enumerate()]
+                    fail CsvError(
+                        line = number,
+                        message = "\"{field}\" in column {columns[position]} is not a number",
+                    )
+    return [Total(
+        column = column,
+        sum = sums[position],
+        count = counts[position],
+    ) for position, column in columns.enumerate()]
 
 public function main() returns Int:
     let arguments = args.list()
@@ -105,8 +102,7 @@ test "an unclosed quote is an error with its line":
     try:
         split_fields("1,\"open", 7)
         assert_fail("expected a CSV error")
-    on CsvError as e:
-        assert e.line == 7
+    on CsvError as e: assert e.line == 7
 
 test "columns are summed and empty fields are skipped":
     let text = "name,amount,tax\nbread,2.5,0.25\nmilk,,0.1\ncheese,10,1\n"
@@ -119,10 +115,8 @@ test "a missing column and a word in a number column are errors":
     try:
         sum_columns("a,b\n1,2\n", ["c"])
         assert_fail("expected a missing column")
-    on CsvError as e:
-        assert e.message == "no column named \"c\""
+    on CsvError as e: assert e.message == "no column named \"c\""
     try:
         sum_columns("a\n1\nx\n", ["a"])
         assert_fail("expected a number error")
-    on CsvError as e:
-        assert e.line == 3
+    on CsvError as e: assert e.line == 3

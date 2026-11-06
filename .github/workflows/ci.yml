@@ -70,3 +70,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests (corpus, all .unio sources, diagnostics, mutation)
         run: cargo test
+      - name: Formatter speed (T-3, release build)
+        run: cargo test --release --test format thousand
+      - name: Unio sources are in the one style (docs/style.md)
+        shell: bash
+        working-directory: .
+        run: |
+          cargo build --release --manifest-path compiler/Cargo.toml
+          compiler/target/release/unio fmt --check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio

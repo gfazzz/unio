@@ -7,10 +7,8 @@ extend Range:
         var cursor = self.iterator()
         while true:
             match cursor.next():
-                case some(value):
-                    numbers.append(value)
-                case none:
-                    return numbers
+                case some(value): numbers.append(value)
+                case none: return numbers
 
 test "range materialization is explicit":
     assert range(2, 5).to_list() == [2, 3, 4]

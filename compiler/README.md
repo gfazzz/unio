@@ -1,8 +1,9 @@
 # The Unio compiler
 
 The front end of the Unio compiler, written in Rust (requirements, section 10): the lexer, the
-parser, the syntax tree, and diagnostics. This is sprint S1 of the plan; type checking, the
-formatter, the interpreter, and code generation follow in later sprints.
+parser, the syntax tree, diagnostics and their catalog, the formatter, and the outline. These are
+sprints S1 and S2 of the plan; type checking, the interpreter, and code generation follow in
+later sprints.
 
 ## Build and test
 
@@ -24,8 +25,10 @@ cargo fmt --check
 | Command | What it does |
 |---|---|
 | `unio check [--diagnostics=json] [--lang=en\|ru] FILE...` | Lexes and parses the files and reports every syntax error. Exit code 0 without errors, 1 with errors, 2 on wrong usage or an unreadable file |
+| `unio fmt [--check] FILE...` | Writes each file in the one style of [docs/style.md](../docs/style.md). With `--check`, writes nothing, lists the files that differ, and exits with 1 if there are any. A file with syntax errors is reported and left unchanged |
+| `unio outline [--json] FILE` | Lists the declarations with their signatures and lines; members of structs, enums, errors, interfaces, and extend blocks are indented (C-12) |
 | `unio parse --ast FILE` | Prints the syntax tree as an S-expression without spans; the form is stable and is used to compare parses |
-| `unio explain CODE` | Prints the explanation of a diagnostic code |
+| `unio explain CODE` | Prints the explanation of a diagnostic code with an example of the error and the example fixed (C-9) |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,
 and is English otherwise (C-10). Codes and the JSON format do not depend on it.
@@ -48,6 +51,13 @@ and is English otherwise (C-10). Codes and the JSON format do not depend on it.
   not last (E0034).
 - Diagnostics in the text form of C-7 and the JSON form of C-8, in English and Russian (C-10),
   with a fix where one is obvious (a tab replaced by spaces, a missing ':').
+- The diagnostic catalog of R-12 in `src/catalog.rs`: every message, explanation, example of the
+  error, and fixed example; the review checklist is [DIAGNOSTICS.md](DIAGNOSTICS.md).
+- The formatter of `src/format.rs`: layout, blank lines, sorted imports, spaces, line breaking at
+  the outermost group that ends last, one-line branches (T-1a), comments placed by their source
+  lines, literals and parentheses as written. Every `.unio` source of the repository is in this
+  style, and CI checks it with `unio fmt --check`.
+- The outline of `src/outline.rs` in text and JSON.
 
 Diagnostic codes added by the front end:
 
@@ -73,10 +83,19 @@ The tests were written before the code (concept, section 1.2):
   and the syntactic constraint codes.
 - `tests/fuzz.rs`: deterministic mutations of the corpus and the sources never make the front end
   panic, and extreme nesting gives E0013 instead of a stack overflow (R-1).
+- `tests/format.rs`: a golden test for each rule of docs/style.md; for every valid corpus file
+  and every repository source, the formatted text parses, has the same tree with imports sorted
+  (T-2), formats to itself (T-1), and keeps every comment in order; a generated 1,000-line source
+  formats within 50 ms in a release build (`cargo test --release --test format thousand`, T-3;
+  a debug build is allowed 1 s).
+- `tests/outline.rs`: the text and JSON forms of the outline.
+- `tests/catalog.rs`: every code has an explanation and a pair of examples that the front end
+  confirms; messages follow the template and name no compiler internals.
 
 ## Not done yet
 
 - Name resolution, types, error sets, exhaustiveness, mutability, and resources (stage 2).
-- `unio fmt` and `unio outline` (sprint S2): comments are already kept as trivia with spans, and
-  the S-expression dump gives the "AST before = AST after" check of T-2.
+- Sprint S3: modules and packages, visibility (L-23 to L-23d), types and local inference,
+  generics, interface values and defaults, named parameters; then the semantic codes E0040 to
+  E0050 in the catalog.
 - The interpreter, `unio test`, code generation, and the other commands of requirement 6.1.

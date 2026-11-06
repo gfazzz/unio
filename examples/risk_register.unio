@@ -51,14 +51,15 @@ error AuditError:
 ## Expected annual loss in whole rubles, rounded down; none if it does not fit in Int.
 function annual_loss(loss as Int, per_century as Int) returns Option[Int]:
     match loss.checked_multiply(per_century):
-        case some(product):
-            return some(product / 100)
-        case none:
-            return none
+        case some(product): return some(product / 100)
+        case none: return none
 
 function validate(finding as Finding) fails with AuditError:
     if finding.norm.trim().is_empty() or finding.clause.trim().is_empty():
-        fail AuditError(finding = finding.id, message = "no norm reference: a finding rests on a clause of a norm")
+        fail AuditError(
+            finding = finding.id,
+            message = "no norm reference: a finding rests on a clause of a norm",
+        )
     if finding.per_century < 0 or finding.per_century_after < 0:
         fail AuditError(finding = finding.id, message = "the number of incidents is negative")
     if finding.loss < 0 or finding.fix_cost < 0:
@@ -68,8 +69,7 @@ function validate(finding as Finding) fails with AuditError:
 
 function money_of(finding as Finding, per_century as Int) returns Int fails with AuditError:
     match annual_loss(finding.loss, per_century):
-        case some(value):
-            return value
+        case some(value): return value
         case none:
             fail AuditError(finding = finding.id, message = "the annual loss does not fit in Int")
 
@@ -81,9 +81,17 @@ function assess(finding as Finding) returns Risk fails with AuditError:
         return Risk(finding = finding, ale = ale, ale_after = ale_after, rosi = none)
     match (ale - ale_after - finding.fix_cost).checked_multiply(100):
         case some(benefit):
-            return Risk(finding = finding, ale = ale, ale_after = ale_after, rosi = some(benefit / finding.fix_cost))
+            return Risk(
+                finding = finding,
+                ale = ale,
+                ale_after = ale_after,
+                rosi = some(benefit / finding.fix_cost),
+            )
         case none:
-            fail AuditError(finding = finding.id, message = "the return on the fix does not fit in Int")
+            fail AuditError(
+                finding = finding.id,
+                message = "the return on the fix does not fit in Int",
+            )
 
 ## The findings with their money, the largest annual loss first.
 function rank(audit as Audit) returns List[Risk] fails with AuditError:
@@ -114,16 +122,12 @@ function describe(risk as Risk) returns Text:
     let finding = risk.finding
     var line = "{finding.id} {finding.system}: {rubles(risk.ale)} → {rubles(risk.ale_after)} per year, fix {rubles(finding.fix_cost)}"
     match risk.rosi:
-        case some(percent):
-            line = line + ", ROSI {percent} %"
-        case none:
-            line = line + ", no cost"
+        case some(percent): line = line + ", ROSI {percent} %"
+        case none: line = line + ", no cost"
     line = line + " [{finding.norm}, {finding.clause}]"
     match finding.approved_by:
-        case some(person):
-            return line + " approved by {person}"
-        case none:
-            return line + " DRAFT, not approved"
+        case some(person): return line + " approved by {person}"
+        case none: return line + " DRAFT, not approved"
 
 function report(audit as Audit, risks as List[Risk]) returns List[Text]:
     var lines = ["Site: {audit.site}"]
@@ -135,9 +139,10 @@ function report(audit as Audit, risks as List[Risk]) returns List[Text]:
         if risk.finding.approved_by.is_some():
             total = total + risk.ale
             total_after = total_after + risk.ale_after
-        else:
-            drafts = drafts + 1
-    lines.append("Approved findings: {rubles(total)} → {rubles(total_after)} per year; drafts left out: {drafts}")
+        else: drafts = drafts + 1
+    lines.append(
+        "Approved findings: {rubles(total)} → {rubles(total_after)} per year; drafts left out: {drafts}",
+    )
     return lines
 
 public function main() returns Int:
@@ -163,8 +168,18 @@ public function main() returns Int:
     return 0
 
 function sample(id as Text, per_century as Int, loss as Int) returns Finding:
-    return Finding(id = id, system = "fire alarm", norm = "SP 484.1311500.2020", clause = "6.2.1", summary = "sample",
-        per_century = per_century, per_century_after = 0, loss = loss, fix_cost = 100000, approved_by = some("auditor"))
+    return Finding(
+        id = id,
+        system = "fire alarm",
+        norm = "SP 484.1311500.2020",
+        clause = "6.2.1",
+        summary = "sample",
+        per_century = per_century,
+        per_century_after = 0,
+        loss = loss,
+        fix_cost = 100000,
+        approved_by = some("auditor"),
+    )
 
 test "the annual loss is the loss times the yearly frequency, rounded down":
     assert annual_loss(1000000, 5) == some(50000)
@@ -187,8 +202,7 @@ test "a fix that makes incidents more frequent is rejected":
     try:
         validate(finding)
         assert_fail("expected an audit error")
-    on AuditError as e:
-        assert e.message.contains("more frequent")
+    on AuditError as e: assert e.message.contains("more frequent")
 
 test "ROSI is the saved loss minus the cost, over the cost":
     let risk = try assess(sample("F-3", 50, 1000000)) on AuditError as e:
@@ -197,15 +211,17 @@ test "ROSI is the saved loss minus the cost, over the cost":
     assert risk.rosi == some(400)
 
 test "findings are ranked by the annual loss and must be unique":
-    let audit = Audit(site = "warehouse", findings = [sample("small", 1, 1000000), sample("large", 10, 1000000)])
+    let audit = Audit(
+        site = "warehouse",
+        findings = [sample("small", 1, 1000000), sample("large", 10, 1000000)],
+    )
     let risks = try rank(audit) on AuditError as e:
         assert_fail(e.message)
     assert risks.map(function (risk as Risk) returns Text: risk.finding.id) == ["large", "small"]
     try:
         rank(Audit(site = "warehouse", findings = [sample("same", 1, 1), sample("same", 2, 2)]))
         assert_fail("expected a duplicate")
-    on AuditError as e:
-        assert e.message.contains("twice")
+    on AuditError as e: assert e.message.contains("twice")
 
 test "drafts are printed but left out of the totals":
     var draft = sample("draft", 10, 1000000)

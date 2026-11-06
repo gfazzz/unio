@@ -14,8 +14,7 @@ error PortError:
 
 extend Port:
     function open(number as Int) returns Port fails with PortError:
-        if number < 1 or number > 65535:
-            fail PortError(number = number)
+        if number < 1 or number > 65535: fail PortError(number = number)
         return Port(value = number)
 
     function number(self) returns Int:
@@ -33,20 +32,16 @@ test "transport data passes through the validating constructor":
     try:
         let port = try port_from_json("\{\"number\":0\}")
         assert_fail("expected PortError")
-    on PortError as e:
-        assert e.number == 0
-    on Error as e:
-        assert_fail(e.to_text())
+    on PortError as e: assert e.number == 0
+    on Error as e: assert_fail(e.to_text())
 
 test "unknown JSON fields and explicit null are distinct from missing defaults":
     for text in ["\{\"number\":8080,\"extra\":true\}", "\{\"number\":null\}", "\{\}"]:
         try:
             let port = try port_from_json(text)
             assert_fail("expected DecodeError")
-        on DecodeError as e:
-            assert not e.message.is_empty()
-        on Error as e:
-            assert_fail(e.to_text())
+        on DecodeError as e: assert not e.message.is_empty()
+        on Error as e: assert_fail(e.to_text())
 
 struct Trace:
     var items as List[Int] = []

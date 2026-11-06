@@ -5,6 +5,7 @@
 //! does not stop at the first error: it reports the error and continues, so that one run
 //! shows several problems (C-2).
 
+use crate::catalog;
 use crate::diag::{Diagnostic, Fix, Msg, Pos, Span};
 
 /// Keywords of section L. Contextual keywords are lexed as names.
@@ -105,31 +106,18 @@ impl Token {
         }
     }
 
-    pub fn describe(&self) -> String {
+    /// What the token is, for messages (E0012).
+    pub fn describe(&self) -> Msg {
         match &self.kind {
-            Kind::Name => format!("name '{}'", self.text),
-            Kind::Int | Kind::Float => format!("number {}", self.text),
-            Kind::Text => "text".to_string(),
-            Kind::Keyword(k) => format!("'{k}'"),
-            Kind::Symbol(s) => format!("'{s}'"),
-            Kind::Newline => "the end of the line".to_string(),
-            Kind::Indent => "an indented block".to_string(),
-            Kind::Dedent => "the end of the block".to_string(),
-            Kind::Eof => "the end of the file".to_string(),
-        }
-    }
-
-    pub fn describe_ru(&self) -> String {
-        match &self.kind {
-            Kind::Name => format!("имя '{}'", self.text),
-            Kind::Int | Kind::Float => format!("число {}", self.text),
-            Kind::Text => "текст".to_string(),
-            Kind::Keyword(k) => format!("'{k}'"),
-            Kind::Symbol(s) => format!("'{s}'"),
-            Kind::Newline => "конец строки".to_string(),
-            Kind::Indent => "блок с отступом".to_string(),
-            Kind::Dedent => "конец блока".to_string(),
-            Kind::Eof => "конец файла".to_string(),
+            Kind::Name => catalog::token_name(&self.text),
+            Kind::Int | Kind::Float => catalog::token_number(&self.text),
+            Kind::Text => catalog::token_text(),
+            Kind::Keyword(k) => catalog::quoted(k),
+            Kind::Symbol(s) => catalog::quoted(s),
+            Kind::Newline => catalog::token_line_end(),
+            Kind::Indent => catalog::token_block_start(),
+            Kind::Dedent => catalog::token_block_end(),
+            Kind::Eof => catalog::token_file_end(),
         }
     }
 }
@@ -257,15 +245,12 @@ impl Lexer {
                             Diagnostic::error(
                                 "E0001",
                                 Span::new(start, end),
-                                Msg::new("tab in indentation", "табуляция в отступе"),
+                                catalog::tab_in_indentation(),
                             )
                             .with_fix(Fix {
                                 span: Span::new(start, end),
                                 new_text: "    ".to_string(),
-                                description: Msg::new(
-                                    "replace the tab with four spaces",
-                                    "заменить табуляцию четырьмя пробелами",
-                                ),
+                                description: catalog::replace_tab(),
                             }),
                         );
                         tab_reported = true;
@@ -294,10 +279,7 @@ impl Lexer {
                     "E0002",
                     line_pos,
                     first,
-                    Msg::new(
-                        "indentation is not a multiple of 4 spaces",
-                        "отступ не кратен 4 пробелам",
-                    ),
+                    catalog::indentation_not_multiple(),
                 );
                 width -= width % 4;
             }
@@ -308,22 +290,11 @@ impl Lexer {
                         "E0003",
                         line_pos,
                         first,
-                        Msg::new(
-                            "indentation grows by more than one level",
-                            "отступ вырос больше чем на один уровень",
-                        ),
+                        catalog::indentation_grows_too_much(),
                     );
                     levels.push(Level { width, real: false });
                 } else if !ends_with_colon {
-                    self.error(
-                        "E0003",
-                        line_pos,
-                        first,
-                        Msg::new(
-                            "unexpected indentation: the previous line does not end with ':'",
-                            "неожиданный отступ: предыдущая строка не заканчивается на ':'",
-                        ),
-                    );
+                    self.error("E0003", line_pos, first, catalog::unexpected_indentation());
                     levels.push(Level { width, real: false });
                 } else {
                     levels.push(Level { width, real: true });
@@ -405,12 +376,7 @@ impl Lexer {
                         let mut end = pos;
                         end.offset += 1;
                         end.column += 1;
-                        self.error(
-                            "E0009",
-                            pos,
-                            end,
-                            Msg::new(format!("unclosed '{open}'"), format!("незакрытая '{open}'")),
-                        );
+                        self.error("E0009", pos, end, catalog::unclosed(open));
                     }
                     break;
                 }
@@ -457,14 +423,8 @@ impl Lexer {
             let word: String = self.chars[from..self.pos].iter().collect();
             let span = Span::new(start, self.here());
             if RESERVED.contains(&word.as_str()) {
-                self.diagnostics.push(Diagnostic::error(
-                    "E0032",
-                    span,
-                    Msg::new(
-                        format!("'{word}' is reserved for a later release"),
-                        format!("'{word}' зарезервировано для следующих выпусков"),
-                    ),
-                ));
+                self.diagnostics
+                    .push(Diagnostic::error("E0032", span, catalog::reserved(&word)));
             }
             let kind = match KEYWORDS.iter().find(|k| **k == word) {
                 Some(k) => Kind::Keyword(k),
@@ -504,10 +464,7 @@ impl Lexer {
                             self.diagnostics.push(Diagnostic::error(
                                 "E0010",
                                 span,
-                                Msg::new(
-                                    format!("unmatched '{p}'"),
-                                    format!("'{p}' без парной открывающей скобки"),
-                                ),
+                                catalog::unmatched(p),
                             ));
                             return None;
                         }
@@ -515,10 +472,7 @@ impl Lexer {
                             self.diagnostics.push(Diagnostic::error(
                                 "E0010",
                                 span,
-                                Msg::new(
-                                    format!("'{p}' does not match '{open}'"),
-                                    format!("'{p}' не соответствует '{open}'"),
-                                ),
+                                catalog::mismatched(p, open),
                             ));
                             depth.pop();
                         }
@@ -540,10 +494,7 @@ impl Lexer {
         self.diagnostics.push(Diagnostic::error(
             "E0007",
             Span::new(start, self.here()),
-            Msg::new(
-                format!("invalid character '{shown}'"),
-                format!("недопустимый символ '{shown}'"),
-            ),
+            catalog::invalid_character(&shown),
         ));
         None
     }
@@ -599,10 +550,7 @@ impl Lexer {
             self.diagnostics.push(Diagnostic::error(
                 "E0008",
                 Span::new(start, self.here()),
-                Msg::new(
-                    format!("invalid number literal '{bad}'"),
-                    format!("недопустимый числовой литерал '{bad}'"),
-                ),
+                catalog::invalid_number(&bad),
             ));
             word = "0".to_string();
             kind = Kind::Int;
@@ -619,10 +567,7 @@ impl Lexer {
             self.diagnostics.push(Diagnostic::error(
                 "E0013",
                 Span::new(start, self.here()),
-                Msg::new(
-                    "texts are nested too deeply inside interpolations",
-                    "тексты вложены в интерполяции слишком глубоко",
-                ),
+                catalog::texts_nested_too_deeply(),
             ));
             while !matches!(self.peek(0), None | Some('\n')) {
                 self.advance();
@@ -633,12 +578,7 @@ impl Lexer {
             let here = self.here();
             match self.peek(0) {
                 None | Some('\n') => {
-                    self.error(
-                        "E0005",
-                        start,
-                        here,
-                        Msg::new("unterminated text literal", "незакрытый текстовый литерал"),
-                    );
+                    self.error("E0005", start, here, catalog::unterminated_text());
                     return self.finish_text(start, pieces, literal);
                 }
                 Some('"') => {
@@ -667,10 +607,7 @@ impl Lexer {
                                 "E0006",
                                 here,
                                 self.here(),
-                                Msg::new(
-                                    "invalid \\u{...} escape",
-                                    "недопустимая последовательность \\u{...}",
-                                ),
+                                catalog::invalid_unicode_escape(),
                             );
                         }
                         continue;
@@ -700,29 +637,13 @@ impl Lexer {
                             if next.is_some_and(|c| c != '\n') {
                                 self.advance();
                             }
-                            self.error(
-                                "E0006",
-                                here,
-                                self.here(),
-                                Msg::new(
-                                    format!("invalid escape sequence '\\{shown}'"),
-                                    format!("недопустимая escape-последовательность '\\{shown}'"),
-                                ),
-                            );
+                            self.error("E0006", here, self.here(), catalog::invalid_escape(&shown));
                         }
                     }
                 }
                 Some('}') => {
                     self.advance();
-                    self.error(
-                        "E0011",
-                        here,
-                        self.here(),
-                        Msg::new(
-                            "'}' in text must be written as '\\}'",
-                            "'}' в тексте пишется как '\\}'",
-                        ),
-                    );
+                    self.error("E0011", here, self.here(), catalog::brace_in_text());
                 }
                 Some('{') => {
                     if !literal.is_empty() {
@@ -768,7 +689,7 @@ impl Lexer {
                         "E0011",
                         open,
                         self.here(),
-                        Msg::new("unterminated interpolation", "незакрытая интерполяция"),
+                        catalog::unterminated_interpolation(),
                     );
                     return Err(());
                 }
@@ -776,12 +697,7 @@ impl Lexer {
                     let close = self.here();
                     self.advance();
                     if tokens.is_empty() {
-                        self.error(
-                            "E0011",
-                            open,
-                            self.here(),
-                            Msg::new("empty interpolation", "пустая интерполяция"),
-                        );
+                        self.error("E0011", open, self.here(), catalog::empty_interpolation());
                         return Ok(None);
                     }
                     tokens.push(Token::new(

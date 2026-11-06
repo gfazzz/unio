@@ -19,8 +19,7 @@ extend Int:
 
     ## Quotient truncated toward zero, or none when other is 0 or the result does not fit.
     public function checked_divide(self, other as Int) returns Option[Int]:
-        if other == 0 or (self == MINIMUM_INT and other == -1):
-            return none
+        if other == 0 or (self == MINIMUM_INT and other == -1): return none
         return some(self / other)
 
     ## The nearest Float.

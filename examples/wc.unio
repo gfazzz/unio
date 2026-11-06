@@ -16,13 +16,21 @@ struct Counts:
 
 extend Counts with Add:
     function add(self, other as Counts) returns Counts:
-        return Counts(lines = self.lines + other.lines, words = self.words + other.words, bytes = self.bytes + other.bytes)
+        return Counts(
+            lines = self.lines + other.lines,
+            words = self.words + other.words,
+            bytes = self.bytes + other.bytes,
+        )
 
 let ZERO as Counts = Counts(lines = 0, words = 0, bytes = 0)
 
 ## Counts of one text: line ends, words separated by white space, UTF-8 bytes.
 function count(text as Text) returns Counts:
-    return Counts(lines = text.count("\n"), words = text.split_whitespace().length(), bytes = text.byte_length())
+    return Counts(
+        lines = text.count("\n"),
+        words = text.split_whitespace().length(),
+        bytes = text.byte_length(),
+    )
 
 function describe(counts as Counts, name as Text) returns Text:
     return "{counts.lines} {counts.words} {counts.bytes} {name}"
@@ -42,8 +50,7 @@ public function main() returns Int:
         let counts = count(text)
         print(describe(counts, name))
         total = total + counts
-    if names.length() > 1:
-        print(describe(total, "total"))
+    if names.length() > 1: print(describe(total, "total"))
     return status
 
 test "count of an empty text":

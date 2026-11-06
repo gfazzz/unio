@@ -5,8 +5,7 @@ unsafe module
 public function join(parts as List[Text], separator as Text) returns Text:
     var result = ""
     for index, part in parts.enumerate():
-        if index > 0:
-            result = result + separator
+        if index > 0: result = result + separator
         result = result + part
     return result
 

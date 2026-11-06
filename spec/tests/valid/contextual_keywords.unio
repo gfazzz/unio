@@ -11,12 +11,9 @@ struct Report:
 function describe(report as Report, unsafe as Bool, external as Bool) returns Text:
     let error = report.error or "none"
     match report.error:
-        case some(text):
-            print(text)
-        case none:
-            pass
-    if unsafe and not external:
-        pass
+        case some(text): print(text)
+        case none: pass
+    if unsafe and not external: pass
     return "{report.module}: {report.test}: {error}"
 
 test "a test block still starts with test":

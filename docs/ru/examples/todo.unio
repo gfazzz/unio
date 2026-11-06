@@ -6,9 +6,9 @@
 ##     todo list
 
 import std.args
+import std.env
 import std.files
 import std.json as json
-import std.env
 from std.text import join
 
 struct Task:
@@ -105,8 +105,7 @@ test "parse_command отклоняет нечисловой номер":
     try:
         parse_command(["done", "abc"])
         assert_fail("ожидалась ошибка")
-    on UsageError as e:
-        assert e.message.contains("должен быть числом")
+    on UsageError as e: assert e.message.contains("должен быть числом")
 
 test "next_id для пустого списка":
     assert next_id([]) == 1

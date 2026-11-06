@@ -17,8 +17,7 @@ public struct OrderedFloat:
 
 extend OrderedFloat with Order:
     function compare(self, other as Self) returns Int:
-        if self.key < other.key:
-            return -1
+        if self.key < other.key: return -1
         return 0 if self.key == other.key else 1
 
 extend OrderedFloat with Hash:

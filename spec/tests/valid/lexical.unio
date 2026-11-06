@@ -1,7 +1,7 @@
 ## Lexical structure: literals, text interpolation, escapes, comments.
 
 # An ordinary comment on its own line.
-let answer as Int = 42          # a trailing comment
+let answer as Int = 42  # a trailing comment
 let big as Int = 1_000_000
 let mask as Int = 0xFF_FF
 let bits as Int = 0b1010_0101

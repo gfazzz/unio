@@ -24,4 +24,8 @@ public struct Output:
 ## UTF-8 text. A program that does not finish in time is stopped and the call fails with kind
 ## TimedOut; output that is not UTF-8 fails with kind InvalidOutput. A non-zero status is not an
 ## error: the caller decides what it means. The child runs in the sandbox of the caller.
-public external function run(program as Text, arguments as List[Text], timeout_seconds as Int = 60) returns Output fails with ProcessError
+public external function run(
+    program as Text,
+    arguments as List[Text],
+    timeout_seconds as Int = 60,
+) returns Output fails with ProcessError

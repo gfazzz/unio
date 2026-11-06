@@ -12,8 +12,7 @@ function storage_path() returns Path:
         case none: return (env.home_dir() or Path(".")).join(".todo.json")
 
 function step(fields as Map[Text, Value], key as Text) returns Value fails with QueryError:
-    if fields.get(key) is some(child):
-        return child
+    if fields.get(key) is some(child): return child
     fail QueryError(message = "no key \"{key}\"")
 
 function sign(n as Int) returns Text:
@@ -27,8 +26,7 @@ function load(path as Path) returns Text:
     on IoError: return ""
 
 function first_word(line as Text) returns Option[Text]:
-    if line.split_whitespace().first() is some(word) and not word.is_empty():
-        return some(word)
+    if line.split_whitespace().first() is some(word) and not word.is_empty(): return some(word)
     return none
 
 function is_ok(result as Result[Int, ParseError]) returns Bool:

@@ -1,10 +1,13 @@
-//! The Unio compiler front end: lexer, parser, syntax tree and diagnostics
-//! (requirements C-1, C-2, C-6 to C-10). Type checking, the formatter and code
-//! generation are later stages of the plan.
+//! The Unio compiler front end: lexer, parser, syntax tree, diagnostics and their catalog
+//! (requirements C-1, C-2, C-6 to C-10, R-12), the formatter (T-1 to T-3) and the outline
+//! (C-12). Type checking and code generation are later stages of the plan.
 
 pub mod ast;
+pub mod catalog;
 pub mod diag;
+pub mod format;
 pub mod lexer;
+pub mod outline;
 pub mod parser;
 pub mod sexpr;
 
@@ -53,16 +56,23 @@ const STACK_SIZE: usize = 64 * 1024 * 1024;
 /// Lexes and parses a source file and collects its diagnostics.
 pub fn check_source(path: &str, source: &str) -> Analysis {
     let (path, source) = (path.to_string(), source.to_string());
+    on_front_end_stack(move || analyse(&path, &source))
+}
+
+/// Runs the work on a thread with the stack of the front end.
+pub(crate) fn on_front_end_stack<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
     std::thread::Builder::new()
         .name("unio-front-end".to_string())
         .stack_size(STACK_SIZE)
-        .spawn(move || analyse(&path, &source))
+        .spawn(work)
         .expect("the front-end thread starts")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-fn analyse(path: &str, source: &str) -> Analysis {
+pub(crate) fn analyse(path: &str, source: &str) -> Analysis {
     let lexed = lexer::lex(source);
     let mut parser = parser::Parser::new(&lexed.tokens);
     let file = parser.file();
