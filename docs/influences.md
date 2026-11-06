@@ -63,3 +63,9 @@ Python: required labels and sorting keys; Ruby: a small complete collection API;
 | Implicit return, optional parentheses, `unless`, `until`, statement modifiers | Declined: several written forms for one meaning, and control flow that is easy to miss in review. | concept 1, rationale 20 |
 | `name: Text` instead of `name as Text` | Not proposed: the gain is smaller than the cost of changing every source and document. | RFC 0002, alternatives |
 
+## 9. Swift and Python: reference counting
+
+| Idea | Decision | Where |
+|---|---|---|
+| Automatic reference counting instead of a tracing collector | Accepted for the interpreter of S5. Values never share mutable state and closures capture copies, so no value can reach itself and reference counting frees everything without a cycle collector; it also tells copy-on-write when a value is unshared, and it has no collection pauses. Whether the native runtime keeps it instead of the tracing collector of C-13 is decided by the measurements of S6, and a change of C-13 needs an RFC. | runtime.md 3, C-13 |
+
