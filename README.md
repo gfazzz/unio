@@ -40,6 +40,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Cryptography policy](docs/cryptography.md): post-quantum defaults, trust, compatibility, and acceptance
 - [Example program](docs/examples/todo.unio)
 - [Grammar and specification tests](spec/README.md)
+- [The Unio style](docs/style.md): the one form that `unio fmt` writes
 - [Standard library](docs/stdlib.md), written in Unio in [stdlib/](stdlib) in the layers `core`, `alloc`, and `std`
 - [Reference utilities](examples)
 - [Project tools in Unio](tools)
