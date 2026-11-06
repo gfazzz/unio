@@ -1,15 +1,15 @@
 # Static semantics of Unio 0.1
 
-Version 0.1-draft. Russian localization: [ru/semantics.md](ru/semantics.md). Basis: concept sections 2–6, requirements L-1 to L-33, [language-contracts.md](language-contracts.md), RFC 0001 and RFC 0002. This document is the reference that `unio check` implements in sprints S3 and S4 of the plan; where it and the requirements disagree, the requirements win and this document is corrected.
+Version 0.1-draft. Changes in this draft: decisions recorded while implementing S3 (1.3, 1.4, 2.5, 2.7, 2.8, 4.1). Russian localization: [ru/semantics.md](ru/semantics.md). Basis: concept sections 2–6, requirements L-1 to L-33, [language-contracts.md](language-contracts.md), RFC 0001 and RFC 0002. This document is the reference that `unio check` implements in sprints S3 and S4 of the plan; where it and the requirements disagree, the requirements win and this document is corrected.
 
-`unio check` runs every check on a whole package and reports every error it finds, not only the first (C-2). Each rule below names its diagnostic. Codes E0051 to E0085 are allocated here; the column "Sprint" says when the compiler starts to report them.
+`unio check` runs every check on a whole package and reports every error it finds, not only the first (C-2). Each rule below names its diagnostic. Codes E0051 to E0085 are allocated here; the column "Sprint" says when the compiler starts to report them. Name and type checks run only when every module of the program parses: syntax errors are reported first.
 
 ## 1. Packages, modules and names
 
 1. A package is the directory with `unio.toml`; without a manifest, the directory of the file being checked is the package root. A module is a file; its name is its path from the package root with `/` replaced by `.` and without `.unio`. Names that start with `std.` are modules of the standard library (L-22).
 2. A module declares names in one namespace: functions, constants, structs, enums, errors, and interfaces. Two declarations with one name in a module are E0051. Methods live in the namespace of their type; two methods with one name for one type are E0051.
-3. `import a.b` binds `b`, and `import a.b as c` binds `c`, to the module; `from a.b import x, y` binds `x` and `y`. A bound name that collides with a declaration or another import of the module is E0052. A module that cannot be found is E0053; an imported name the module does not declare, or does not make public, is E0054.
-4. The prelude of every available layer (S-11) is visible in every module. A declaration of the module hides a prelude name of the same spelling; `some`, `none`, `ok` and `error` cannot be declared (L-6a).
+3. `import a.b` binds `b`, and `import a.b as c` binds `c`, to the module; `from a.b import x, y` binds `x` and `y`. A bound name that collides with a declaration or another import of the module is E0052. A module that cannot be found is E0053; an imported name the module does not declare, or does not make public, is E0054. Importing a module also makes its public `error` types visible by their short names, because handlers name errors: `on IoError` after `import std.files`. Such a name that collides with another visible name is E0052.
+4. The prelude of every available layer (S-11) is visible in every module. A declaration of the module hides a prelude name of the same spelling; `some`, `none`, `ok` and `error` cannot be declared (L-6a). A variant declared or imported in the module also hides a prelude name, so the variant `Add` of a command enum can be written without its enum name although the prelude has the interface `Add`. Built-in types (L-4) cannot be hidden: a variant named like one is written in full (L-6a).
 5. Local names are introduced by parameters, `let`, `var`, `for`, `using`, `on E as e`, patterns of `case`, lambda parameters, and `is` (L-33). A local name is visible from its introduction to the end of the block that introduces it; `is` bindings follow L-33. A local name may not repeat a local name that is visible at that point (E0055): a reader never has to work out which of two equal names is meant.
 6. A name that resolves to nothing is E0056; the fix suggests the closest visible name.
 7. Visibility follows L-23 to L-23d: a private declaration, field, or method used from another module is E0057.
@@ -21,8 +21,10 @@ Version 0.1-draft. Russian localization: [ru/semantics.md](ru/semantics.md). Bas
 2. The type of a local `let` or `var` is the type of its initializer (L-8). An initializer that does not determine a type, such as `[]`, `{}` or `none` alone, needs an annotation (E0060).
 3. Types are compared by name and arguments; there are no implicit conversions (L-5). An expression whose type is not the expected one is E0061; the message names both types, and for `Text + Int` the fix suggests interpolation. Integer literals have type `Int`, other number literals `Float`.
 4. `Never` is the type of `fail`, `return`, `break`, `continue`, and calls of functions that return `Never`; it is accepted wherever any type is expected.
-5. A value of type `T` is accepted where an interface type `I` is expected when `T` implements `I` and `I` can be used as a type (L-6b); otherwise E0061, and for an interface that cannot be used as a type E0071 names the method that prevents it.
+5. A value of type `T` is accepted where an interface type `I` is expected when `T` implements `I` and `I` can be used as a type (L-6b); otherwise E0061, and for an interface that cannot be used as a type E0071 names the method that prevents it. Type arguments of a generic interface are compared: a value that implements `Iterator[Int]` is not accepted as `Iterator[Text]`; the same holds for constraints (3.3) and implementation checks (3.6).
 6. `some(v)` and `none` have type `Option[T]`, `ok(v)` and `error(e)` have type `Result[T, E]`; the missing type argument comes from the expected type, and without one it is E0060.
+7. Every `error` declaration implements `Error`, with a generated `to_text` that names the type and its fields, and therefore `Display`: an error can be interpolated into text.
+8. An expression whose type cannot be determined because of an earlier error produces no further diagnostics: one mistake gives one message.
 
 ## 3. Declarations, calls and generics
 
@@ -36,7 +38,7 @@ Version 0.1-draft. Russian localization: [ru/semantics.md](ru/semantics.md). Bas
 
 ## 4. Operators and expressions
 
-1. `+`, `-`, `*`, `/`, `%`, `**` need the operand type to implement `Add`, `Subtract`, `Multiply`, `Divide` (L-9a); `%` and `**` are defined for `Int` and `Float`. Both operands have one type; otherwise E0065.
+1. `+`, `-`, `*`, `/`, `%`, `**` need the operand type to implement `Add`, `Subtract`, `Multiply`, `Divide` (L-9a); `%` and `**` are defined for `Int` and `Float`. Both operands have one type; otherwise E0065. Lists have no `+`: `append_all` joins them, so that copying a list is always visible.
 2. `==` and `!=` need `Equal`, `<` `<=` `>` `>=` need `Order`; `Float` follows L-32 (E0045). `==` on a resource is E0066 with the fix `is_same(a, b)`.
 3. `and`, `or`, `not` take `Bool`, except `or` with an `Option[T]` left operand, which gives `T` with a `T` right operand or `Option[T]` with an `Option[T]` one. Conditions of `if`, `while`, `assert` and guards are `Bool` (E0061).
 4. `x in c` calls `c.contains(x)`; `c` must have such a method (E0061).
