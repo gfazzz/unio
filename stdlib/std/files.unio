@@ -222,8 +222,8 @@ public function copy_file(
 
 ## Gives a file or directory a new path on the same file system. It fails with kind AlreadyExists
 ## instead of replacing an existing target, so that renaming never destroys data. For a file this
-## is atomic; for a directory another process could create the target between the check and the
-## rename, and then the rename replaces nothing only on systems that refuse it. Permission: files.write.
+## is atomic. For a directory the check and the rename are two steps, so a target that another
+## process creates between them can be replaced. Permission: files.write.
 public external function rename(source as Path, target as Path) fails with IoError
 
 ## Creates one directory; fails with kind AlreadyExists if it exists and NotFound if its parent
