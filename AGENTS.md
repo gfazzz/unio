@@ -2,11 +2,14 @@
 
 ## Current state and sources
 
-Unio is currently a language specification with a grammar, reference programs,
-standard library sources, and project tools. The executable checks are temporary
-Python scripts. The compiler, runtime, and `unio` CLI described in the roadmap
-are not implemented in this checkout; do not report Unio programs or their
-`test` blocks as executed when only parsing or API checks have run.
+Unio has a specification, a grammar, reference programs, standard library
+sources, project tools, and a compiler in Rust in `compiler/` (sprints S1 to S5
+of plan section 12): `unio check`, `fmt`, `outline`, `explain`, `symbol`, `run`,
+and `test`, with an interpreter. Native code generation and the OS sandbox
+(sprint S6) are not implemented yet. Report which checks ran: `unio test`
+executes Unio code, while parsing or `unio check` only checks it statically.
+The Python checkers in `spec/` and `.github/scripts/` are temporary and give the
+same results as the Unio tools in `tools/`.
 
 Read the relevant sources before changing language behavior:
 

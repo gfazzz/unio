@@ -60,4 +60,4 @@ RC-1, RC-3, RC-7, and RC-8 are library additions within 0.1 and can be made now,
 
 ## 5. What has been checked
 
-Both programs parse with [../spec/grammar.ebnf](../spec/grammar.ebnf) and call only the declared standard library (`spec/check_grammar.py`, `spec/check_api.py`). They pass the Rust front end: `unio check` reports nothing (`compiler/unio/tests/sources.rs`) and they are in the one style of `unio fmt --check`, both in CI. Their tests have not run: the interpreter arrives with sprint S5.
+Both programs parse with [../spec/grammar.ebnf](../spec/grammar.ebnf) and call only the declared standard library (`spec/check_grammar.py`, `spec/check_api.py`). They pass the Rust front end: `unio check` reports nothing (`compiler/unio/tests/sources.rs`) and they are in the one style of `unio fmt --check`, both in CI. Their tests run and pass under `unio test` in the interpreter of sprint S5, in CI.
