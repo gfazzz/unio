@@ -1,0 +1,70 @@
+# Dynamic semantics and the runtime of Unio 0.1
+
+Version 0.1-draft. Russian localization: [ru/runtime.md](ru/runtime.md). Basis: concept sections 2–4, requirements L-10 to L-21, C-13 to C-20, S-9 to S-12, SB-1, T-4, T-5a; [semantics.md](semantics.md) for what is checked before a program runs. This document is the reference for the interpreter of sprint S5 and for the native runtime of sprint S6.
+
+A program that reaches the runtime has passed `unio check`: names resolve, types agree, errors are handled, resources stay in their blocks. The runtime therefore checks only what cannot be known before execution: faults, exhaustion, and the outside world.
+
+## 1. Evaluation
+
+1. Evaluation is strict and goes from left to right: the operands of an operator, the arguments of a call, the fields of a struct construction, the items of a list or map literal, and the parts of a text with interpolations are evaluated in the order they are written.
+2. `and` and `or` evaluate their right operand only when it decides the result; `a or b` on an `Option` evaluates `b` only for `none`. `x if c else y` evaluates `c` and then one branch.
+3. A default value of a parameter is evaluated at each call that omits the argument, after the arguments that precede it, and can use the parameters before it.
+4. A `for` loop evaluates its collection once, before the first iteration; changing the source variable inside the loop does not change the iteration, because the loop holds the value it started with.
+5. A comprehension `[e for x in c if g]` evaluates `c` once, then `g` and `e` for each item in order.
+
+## 2. Values
+
+1. `Int` is a 64-bit two's-complement integer; overflow of `+`, `-`, `*`, `**`, division by zero, and `%` by zero are faults (L-17). `/` truncates toward zero, and `%` has the sign of the left operand.
+2. `Float` is IEEE 754 binary64 with round-to-nearest-even; no operation on `Float` faults.
+3. `Text` is an immutable sequence of Unicode scalar values stored as UTF-8 with an index of character positions, so that `length`, `slice`, and `char_at` take constant time.
+4. Structs, enums, tuples, lists, maps, sets, `Bytes`, and texts are values (L-11a). A value is shared between names until it is changed; changing a shared value first copies the level that changes, and changing an unshared value happens in place (L-11b). Map and set iterate in the order keys were first inserted, and hashing does not depend on the run, so the output of a program is the same on every run.
+5. Function values capture the values of the names they use when they are created (L-11a).
+6. A resource is not a value: it has identity, is never copied, and its `release` runs exactly once (section 5).
+
+## 3. Memory
+
+1. Because values never share mutable state and closures capture copies, a value can never reach itself: there are no reference cycles. The interpreter of S5 therefore manages memory by reference counting, which frees each value when its last name goes away and also tells the copy-on-write rule when a value is unshared.
+2. Requirement C-13 asks for a precise, tracing, non-moving collector. Reference counting is precise and non-moving, has no collection pauses at all, and needs no tracing because cycles cannot occur. Whether the native runtime of S6 keeps reference counting or adds tracing is decided by the measurements of section 7.1 of the requirements; replacing C-13 needs an RFC.
+3. The runtime counts the memory it holds. When it exceeds the heap limit of the policy (SB-3) or the memory the system grants, the program ends with code 102 (C-18). Recursion deeper than the stack limit also ends with code 102.
+
+## 4. Errors and faults
+
+1. A function with `fails with` ends either with its result or with one of its errors. `try` passes an error on unchanged; `on E as e` receives it; `fail e` ends the function with `e`. An error is a value and never unwinds past a function that does not list it, which the checker guarantees.
+2. A fault (L-17) stops the program at its point. The runtime records a trace of function names, files, and lines (C-14), unwinds the stack, calls `release` of every open `using` block in reverse order (C-17), writes the diagnostic and the trace to standard error, and ends with code 101. A fault inside `release` during this unwinding is reported and the remaining resources are still released.
+3. A fault cannot be received by `on`. `expect_fault(action)` in a `test` block runs `action` and succeeds only if it ends with a fault; the resources opened inside `action` are released before `expect_fault` returns.
+4. `assert c` and `assert_fail(m)` are faults with the text of the condition or the message.
+
+## 5. Resources
+
+1. `using r = e:` evaluates `e`, binds `r`, and runs the block. When the block ends, normally, through `return`, `break`, `continue`, an error, or a fault, `release` of `r` runs; several `using` blocks release in reverse order of opening.
+2. `release` cannot fail: its signature has no `fails with`, and an error that happens inside it is the resource's own business (for example, `AtomicFile` ignores errors of removing a temporary file).
+3. On emergency termination (code 102) and abnormal termination, `release` does not run (C-18, C-19).
+
+## 6. Programs and tests
+
+1. A program starts at `public function main()` of the module given to `unio run`. Without a result, the exit code is 0; with an `Int` result, it is that value, which must be 0–100, otherwise it is a fault (C-15).
+2. `unio test` runs every `test` block of the given modules, each in a fresh state; the order of the blocks does not matter, because there is no global mutable state. The result of each test is passed, failed with the fault that ended it, or failed with the diagnostics that keep it from compiling (T-5a), in text or JSON with name, status, time, and output (T-4).
+3. Top-level constants are evaluated once, in dependency order, before `main` or before the first test that needs them; a constant whose evaluation faults ends the program with that fault.
+
+## 7. External functions
+
+1. The standard library declares 70 external functions, all in `unsafe module` files (S-7, S-10). Each is bound by its full name, such as `std.files.system_rename` or the method `Text.slice`, to a function of the runtime. The documentation comment of the declaration is its specification.
+2. A test of the runtime checks that every external declaration has a binding and every binding has a declaration, so that the library and the runtime cannot drift apart.
+3. The groups and the layer each needs:
+
+| Group | Externals | Layer |
+|---|---|---|
+| Faults, identity, checked arithmetic, `Float` classification and total order | `assert_fail`, `expect_fault`, `is_same`, `Int.checked_*`, `Int.to_float`, `Float.is_nan`, `Float.is_finite`, `total_order_key` | core |
+| Text, bytes, lists, maps, sets, numbers as text, code points | 29 methods and constructors in `alloc/builtin/*`, and `std.text.from_code_point` | alloc |
+| JSON conversions generated for each type | `std.json.to_value`, `std.json.from_value` (implemented by the compiler, not by hand) | alloc |
+| Standard output, arguments, environment, paths | `write_output`, `write_error`, `std.args.list`, `std.env.*`, `Path`, `Path.to_text`, `separator` | std |
+| Files and the atomic commit protocol | 19 functions of `std.files` | std |
+| Processes | `std.process.run` | std |
+
+4. Until the sandbox of sprint S6 exists, `unio run` and `unio test` run programs without the restrictions of SB-1 and say so in a warning on standard error. This is the only stage in which a Unio program runs unsandboxed, and it is used for the project's own tests in CI.
+
+## 8. The interpreter of sprint S5
+
+1. The checked syntax tree is lowered to an intermediate representation with resolved names, slots for local values, explicit error edges after every call that can fail, explicit release points of `using`, and the source position of every operation that can fault.
+2. The interpreter executes that representation directly. It is the reference for the meaning of programs: the native code of S6 must give the same output, exit code, and diagnostics for every test of the repository.
+3. Exit criterion of S5: every `test` block of `stdlib/`, `examples/`, `docs/examples/`, and `tools/` runs and passes; the tools in `tools/` run in the interpreter and give the same results as the Python checkers, which CI then stops using and the repository deletes (plan section 12).
