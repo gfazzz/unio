@@ -1,0 +1,12 @@
+[package]
+name = "unio-runtime"
+version = "0.1.0-dev"
+edition = "2021"
+description = "The Unio runtime: values, faults, termination, and the external functions of the standard library"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

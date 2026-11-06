@@ -1,0 +1,746 @@
+//! Values of Unio programs (docs/runtime.md, sections 2 and 3).
+//!
+//! Structs, enums, tuples, lists, maps, sets, bytes, and texts are values: a value is shared
+//! between names through reference counting until it is changed, and changing a shared value
+//! first copies the level that changes (`Rc::make_mut`). Because values never share mutable state
+//! and function values capture copies, a value can never reach itself: there are no reference
+//! cycles, so reference counting frees every value and no cycle collector is needed.
+//!
+//! Resources are the exception: they have identity, are never copied, and live in a
+//! [`ResourceCell`] that names the same object from every place that holds it.
+
+use crate::fault::Outcome;
+use crate::heap::Counted;
+use crate::runtime::Runtime;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::fmt;
+use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::rc::Rc;
+
+/// A value of a Unio program.
+#[derive(Clone)]
+pub enum Value {
+    /// The result of a function without a result.
+    Unit,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Text(Text),
+    Bytes(Rc<Counted<Vec<u8>>>),
+    Path(Text),
+    List(Rc<Counted<Vec<Value>>>),
+    Tuple(Rc<Counted<Vec<Value>>>),
+    Map(Rc<Counted<OrderedMap>>),
+    Set(Rc<Counted<OrderedSet>>),
+    Struct(Rc<StructValue>),
+    Enum(Rc<EnumValue>),
+    Function(Rc<dyn Callable>),
+    Resource(Rc<ResourceCell>),
+}
+
+/// A function value. The interpreter implements it for closures and named functions.
+pub trait Callable {
+    /// Calls the function. `var` parameters are changed in place in `arguments`.
+    fn call(&self, runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome;
+    /// The name used in fault traces.
+    fn name(&self) -> &str;
+}
+
+/// A value of a struct or an `error` declaration: the type name and the fields in declaration
+/// order.
+#[derive(Clone, Debug)]
+pub struct StructValue {
+    pub type_name: Rc<str>,
+    pub fields: Vec<(Rc<str>, Value)>,
+}
+
+/// A value of an enum: the type name, the variant, and its fields in declaration order.
+#[derive(Clone, Debug)]
+pub struct EnumValue {
+    pub type_name: Rc<str>,
+    pub variant: Rc<str>,
+    pub fields: Vec<(Rc<str>, Value)>,
+}
+
+/// A resource: an object with identity, released exactly once.
+pub struct ResourceCell {
+    pub id: u64,
+    pub value: RefCell<Value>,
+    pub released: Cell<bool>,
+}
+
+impl Value {
+    pub fn text(text: impl Into<String>) -> Value {
+        Value::Text(Text::new(text))
+    }
+
+    pub fn path(text: impl Into<String>) -> Value {
+        Value::Path(Text::new(text))
+    }
+
+    pub fn bytes(data: Vec<u8>) -> Value {
+        Value::Bytes(Rc::new(Counted::new(data)))
+    }
+
+    pub fn list(items: Vec<Value>) -> Value {
+        Value::List(Rc::new(Counted::new(items)))
+    }
+
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Rc::new(Counted::new(items)))
+    }
+
+    pub fn map(map: OrderedMap) -> Value {
+        Value::Map(Rc::new(Counted::new(map)))
+    }
+
+    pub fn set(set: OrderedSet) -> Value {
+        Value::Set(Rc::new(Counted::new(set)))
+    }
+
+    /// A struct or error value with named fields in declaration order.
+    pub fn record(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
+        Value::Struct(Rc::new(StructValue {
+            type_name: Rc::from(type_name),
+            fields: fields.into_iter().map(|(n, v)| (Rc::from(n), v)).collect(),
+        }))
+    }
+
+    /// An enum value.
+    pub fn variant(type_name: &str, variant: &str, fields: Vec<(&str, Value)>) -> Value {
+        Value::Enum(Rc::new(EnumValue {
+            type_name: Rc::from(type_name),
+            variant: Rc::from(variant),
+            fields: fields.into_iter().map(|(n, v)| (Rc::from(n), v)).collect(),
+        }))
+    }
+
+    pub fn some(value: Value) -> Value {
+        Value::variant("Option", "some", vec![("value", value)])
+    }
+
+    pub fn none() -> Value {
+        Value::variant("Option", "none", vec![])
+    }
+
+    pub fn option(value: Option<Value>) -> Value {
+        match value {
+            Some(v) => Value::some(v),
+            None => Value::none(),
+        }
+    }
+
+    pub fn ok(value: Value) -> Value {
+        Value::variant("Result", "ok", vec![("value", value)])
+    }
+
+    pub fn error(value: Value) -> Value {
+        Value::variant("Result", "error", vec![("value", value)])
+    }
+
+    /// The name of the kind of value, for internal error messages.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Value::Unit => "nothing",
+            Value::Int(_) => "Int",
+            Value::Float(_) => "Float",
+            Value::Bool(_) => "Bool",
+            Value::Text(_) => "Text",
+            Value::Bytes(_) => "Bytes",
+            Value::Path(_) => "Path",
+            Value::List(_) => "List",
+            Value::Tuple(_) => "Tuple",
+            Value::Map(_) => "Map",
+            Value::Set(_) => "Set",
+            Value::Struct(_) => "struct",
+            Value::Enum(_) => "enum",
+            Value::Function(_) => "Function",
+            Value::Resource(_) => "resource",
+        }
+    }
+
+    /// The field of a struct or enum value with this name.
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        let fields = match self {
+            Value::Struct(s) => &s.fields,
+            Value::Enum(e) => &e.fields,
+            _ => return None,
+        };
+        fields.iter().find(|(n, _)| &**n == name).map(|(_, v)| v)
+    }
+
+    /// The variant name of an enum value.
+    pub fn variant_name(&self) -> Option<&str> {
+        match self {
+            Value::Enum(e) => Some(&e.variant),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Unit => write!(f, "()"),
+            Value::Int(i) => write!(f, "{i}"),
+            Value::Float(x) => write!(f, "{}", crate::externs::float_text::float_to_text(*x)),
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Text(t) => write!(f, "{:?}", t.as_str()),
+            Value::Bytes(b) => write!(f, "Bytes({})", b.len()),
+            Value::Path(p) => write!(f, "Path({:?})", p.as_str()),
+            Value::List(items) => f.debug_list().entries(items.iter()).finish(),
+            Value::Tuple(items) => {
+                let mut t = f.debug_tuple("");
+                for item in items.iter() {
+                    t.field(item);
+                }
+                t.finish()
+            }
+            Value::Map(m) => f.debug_map().entries(m.entries()).finish(),
+            Value::Set(s) => f.debug_set().entries(s.items()).finish(),
+            Value::Struct(s) => {
+                let mut d = f.debug_struct(&s.type_name);
+                for (n, v) in &s.fields {
+                    d.field(n, v);
+                }
+                d.finish()
+            }
+            Value::Enum(e) => {
+                write!(f, "{}.{}", e.type_name, e.variant)?;
+                if !e.fields.is_empty() {
+                    let mut t = f.debug_tuple("");
+                    for (_, v) in &e.fields {
+                        t.field(v);
+                    }
+                    t.finish()?;
+                }
+                Ok(())
+            }
+            Value::Function(c) => write!(f, "function {}", c.name()),
+            Value::Resource(r) => write!(f, "resource #{}", r.id),
+        }
+    }
+}
+
+/// Structural equality as `==` defines it: `Float` follows IEEE 754, resources and functions
+/// have no `==` (the checker rejects it), so they compare by identity here.
+pub fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Unit, Value::Unit) => true,
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Text(x), Value::Text(y)) | (Value::Path(x), Value::Path(y)) => x == y,
+        (Value::Bytes(x), Value::Bytes(y)) => x[..] == y[..],
+        (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
+        }
+        (Value::Map(x), Value::Map(y)) => {
+            x.len() == y.len()
+                && x.entries()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| values_equal(v, w)))
+        }
+        (Value::Set(x), Value::Set(y)) => {
+            x.len() == y.len() && x.items().all(|item| y.contains(item))
+        }
+        (Value::Struct(x), Value::Struct(y)) => {
+            x.type_name == y.type_name && fields_equal(&x.fields, &y.fields)
+        }
+        (Value::Enum(x), Value::Enum(y)) => {
+            x.type_name == y.type_name
+                && x.variant == y.variant
+                && fields_equal(&x.fields, &y.fields)
+        }
+        (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
+        (Value::Resource(x), Value::Resource(y)) => Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+fn fields_equal(a: &[(Rc<str>, Value)], b: &[(Rc<str>, Value)]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|((_, x), (_, y))| values_equal(x, y))
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Value) -> bool {
+        values_equal(self, other)
+    }
+}
+
+// ---------------------------------------------------------------- text
+
+/// Immutable text: UTF-8 with an index of character positions, so that length, slicing, and
+/// character access take constant time. A slice shares the storage of the text it comes from.
+#[derive(Clone)]
+pub struct Text {
+    data: Rc<Counted<TextData>>,
+    start: usize,
+    end: usize,
+}
+
+/// The storage of a text: the string and the byte offset of every character, plus the length.
+#[derive(Clone)]
+pub struct TextData {
+    string: String,
+    offsets: Vec<usize>,
+}
+
+impl TextData {
+    fn new(string: String) -> TextData {
+        let mut offsets: Vec<usize> = string.char_indices().map(|(i, _)| i).collect();
+        offsets.push(string.len());
+        TextData { string, offsets }
+    }
+}
+
+impl crate::heap::Measure for TextData {
+    fn measure(&self) -> usize {
+        self.string.capacity() + self.offsets.capacity() * std::mem::size_of::<usize>()
+    }
+}
+
+impl Text {
+    /// A text; the index of characters is built once, in time proportional to its length.
+    pub fn new(text: impl Into<String>) -> Text {
+        let data = TextData::new(text.into());
+        let end = data.offsets.len() - 1;
+        Text {
+            data: Rc::new(Counted::new(data)),
+            start: 0,
+            end,
+        }
+    }
+
+    /// The text as a string slice.
+    pub fn as_str(&self) -> &str {
+        let offsets = &self.data.offsets;
+        &self.data.string[offsets[self.start]..offsets[self.end]]
+    }
+
+    /// The number of characters.
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Characters from `start` up to, but not including, `end`; none outside `0..=len()` or
+    /// when `start > end`. Constant time; the result shares storage.
+    pub fn slice(&self, start: usize, end: usize) -> Option<Text> {
+        if start > end || end > self.len() {
+            return None;
+        }
+        Some(Text {
+            data: Rc::clone(&self.data),
+            start: self.start + start,
+            end: self.start + end,
+        })
+    }
+
+    /// The character at the position as a text of length 1.
+    pub fn char_at(&self, index: usize) -> Option<Text> {
+        self.slice(index, index + 1)
+    }
+
+    /// The character index of a byte offset inside this text, if it is a character boundary.
+    pub fn char_index_of_byte(&self, byte: usize) -> Option<usize> {
+        let base = self.data.offsets[self.start];
+        let offsets = &self.data.offsets[self.start..=self.end];
+        offsets.binary_search(&(base + byte)).ok()
+    }
+
+    /// The byte offset of a character index inside this text.
+    pub fn byte_of_char(&self, index: usize) -> usize {
+        self.data.offsets[self.start + index] - self.data.offsets[self.start]
+    }
+}
+
+impl PartialEq for Text {
+    fn eq(&self, other: &Text) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for Text {}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+impl crate::heap::Measure for Vec<Value> {
+    fn measure(&self) -> usize {
+        self.capacity() * std::mem::size_of::<Value>()
+    }
+}
+
+impl crate::heap::Measure for Vec<u8> {
+    fn measure(&self) -> usize {
+        self.capacity()
+    }
+}
+
+// ---------------------------------------------------------------- hashing
+
+/// FNV-1a: a hash that does not depend on the run, so that maps and sets behave the same on
+/// every run (docs/runtime.md, section 2.4).
+#[derive(Default)]
+pub struct Fnv(u64);
+
+impl Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        };
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+}
+
+type FnvBuild = BuildHasherDefault<Fnv>;
+
+/// A value used as a key: structural equality where `Float` compares by bits, so that equality
+/// is reflexive. The checker already forbids `Float` keys (L-9).
+#[derive(Clone, Debug)]
+pub struct Key(pub Value);
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        key_equal(&self.0, &other.0)
+    }
+}
+
+impl Eq for Key {}
+
+fn key_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
+        (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| key_equal(a, b))
+        }
+        (Value::Struct(x), Value::Struct(y)) => {
+            x.type_name == y.type_name
+                && x.fields.len() == y.fields.len()
+                && x.fields
+                    .iter()
+                    .zip(&y.fields)
+                    .all(|((_, a), (_, b))| key_equal(a, b))
+        }
+        (Value::Enum(x), Value::Enum(y)) => {
+            x.type_name == y.type_name
+                && x.variant == y.variant
+                && x.fields.len() == y.fields.len()
+                && x.fields
+                    .iter()
+                    .zip(&y.fields)
+                    .all(|((_, a), (_, b))| key_equal(a, b))
+        }
+        _ => values_equal(a, b),
+    }
+}
+
+impl Hash for Key {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_value(&self.0, state);
+    }
+}
+
+fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
+    match value {
+        Value::Unit => state.write_u8(0),
+        Value::Int(i) => {
+            state.write_u8(1);
+            state.write_i64(*i);
+        }
+        Value::Float(x) => {
+            state.write_u8(2);
+            state.write_u64(x.to_bits());
+        }
+        Value::Bool(b) => {
+            state.write_u8(3);
+            state.write_u8(u8::from(*b));
+        }
+        Value::Text(t) | Value::Path(t) => {
+            state.write_u8(4);
+            state.write(t.as_str().as_bytes());
+            state.write_u8(0xff);
+        }
+        Value::Bytes(b) => {
+            state.write_u8(5);
+            state.write(&b[..]);
+            state.write_usize(b.len());
+        }
+        Value::List(items) | Value::Tuple(items) => {
+            state.write_u8(6);
+            state.write_usize(items.len());
+            for item in items.iter() {
+                hash_value(item, state);
+            }
+        }
+        Value::Map(m) => {
+            state.write_u8(7);
+            state.write_usize(m.len());
+        }
+        Value::Set(s) => {
+            state.write_u8(8);
+            state.write_usize(s.len());
+        }
+        Value::Struct(s) => {
+            state.write_u8(9);
+            state.write(s.type_name.as_bytes());
+            for (_, v) in &s.fields {
+                hash_value(v, state);
+            }
+        }
+        Value::Enum(e) => {
+            state.write_u8(10);
+            state.write(e.type_name.as_bytes());
+            state.write(e.variant.as_bytes());
+            for (_, v) in &e.fields {
+                hash_value(v, state);
+            }
+        }
+        Value::Function(_) => state.write_u8(11),
+        Value::Resource(r) => {
+            state.write_u8(12);
+            state.write_u64(r.id);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- map and set
+
+/// A map that iterates in the order keys were first inserted. Removed entries leave a hole
+/// that is compacted when holes outnumber entries.
+#[derive(Clone, Default)]
+pub struct OrderedMap {
+    entries: Vec<Option<(Value, Value)>>,
+    index: HashMap<Key, usize, FnvBuild>,
+}
+
+impl OrderedMap {
+    pub fn new() -> OrderedMap {
+        OrderedMap::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    pub fn get(&self, key: &Value) -> Option<&Value> {
+        let position = *self.index.get(&Key(key.clone()))?;
+        self.entries[position].as_ref().map(|(_, v)| v)
+    }
+
+    /// Sets the value; an existing key keeps its position.
+    pub fn put(&mut self, key: Value, value: Value) {
+        match self.index.get(&Key(key.clone())) {
+            Some(&position) => self.entries[position] = Some((key, value)),
+            None => {
+                self.index.insert(Key(key.clone()), self.entries.len());
+                self.entries.push(Some((key, value)));
+            }
+        }
+    }
+
+    pub fn remove(&mut self, key: &Value) -> Option<Value> {
+        let position = self.index.remove(&Key(key.clone()))?;
+        let removed = self.entries[position].take().map(|(_, v)| v);
+        if self.entries.len() > 8 && self.entries.len() > 2 * self.index.len() {
+            self.compact();
+        }
+        removed
+    }
+
+    fn compact(&mut self) {
+        let entries: Vec<Option<(Value, Value)>> =
+            self.entries.drain(..).filter(Option::is_some).collect();
+        self.entries = entries;
+        self.index.clear();
+        for (position, entry) in self.entries.iter().enumerate() {
+            if let Some((k, _)) = entry {
+                self.index.insert(Key(k.clone()), position);
+            }
+        }
+    }
+
+    /// Pairs in insertion order.
+    pub fn entries(&self) -> impl Iterator<Item = (&Value, &Value)> {
+        self.entries.iter().flatten().map(|(k, v)| (k, v))
+    }
+}
+
+impl crate::heap::Measure for OrderedMap {
+    fn measure(&self) -> usize {
+        self.entries.capacity() * 2 * std::mem::size_of::<Value>()
+            + self.index.capacity() * (std::mem::size_of::<Value>() + 16)
+    }
+}
+
+/// A set that iterates in insertion order.
+#[derive(Clone, Default)]
+pub struct OrderedSet {
+    map: OrderedMap,
+}
+
+impl OrderedSet {
+    pub fn new() -> OrderedSet {
+        OrderedSet::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn contains(&self, item: &Value) -> bool {
+        self.map.get(item).is_some()
+    }
+
+    /// Adds the item; an item already present keeps its position.
+    pub fn insert(&mut self, item: Value) {
+        if !self.contains(&item) {
+            self.map.put(item, Value::Unit);
+        }
+    }
+
+    /// Removes the item and tells whether it was present.
+    pub fn remove(&mut self, item: &Value) -> bool {
+        self.map.remove(item).is_some()
+    }
+
+    pub fn items(&self) -> impl Iterator<Item = &Value> {
+        self.map.entries().map(|(k, _)| k)
+    }
+}
+
+impl crate::heap::Measure for OrderedSet {
+    fn measure(&self) -> usize {
+        self.map.measure()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_indexes_characters_not_bytes() {
+        let text = Text::new("ёж и 😀!");
+        assert_eq!(text.len(), 7);
+        assert_eq!(text.as_str().len(), 13);
+        assert_eq!(text.char_at(5).unwrap().as_str(), "😀");
+        let slice = text.slice(1, 6).unwrap();
+        assert_eq!(slice.as_str(), "ж и 😀");
+        assert_eq!(slice.slice(2, 3).unwrap().as_str(), "и");
+        assert!(text.slice(3, 8).is_none());
+        assert!(text.slice(4, 3).is_none());
+        assert_eq!(slice.byte_of_char(2), "ж ".len());
+        assert_eq!(slice.char_index_of_byte("ж ".len()), Some(2));
+    }
+
+    #[test]
+    fn slices_share_storage() {
+        let text = Text::new("abcdef");
+        let slice = text.slice(2, 4).unwrap();
+        assert!(Rc::ptr_eq(&text.data, &slice.data));
+    }
+
+    #[test]
+    fn maps_keep_insertion_order_and_positions() {
+        let mut map = OrderedMap::new();
+        for word in ["b", "a", "c"] {
+            map.put(Value::text(word), Value::Int(1));
+        }
+        map.put(Value::text("a"), Value::Int(2));
+        let keys: Vec<String> = map
+            .entries()
+            .map(|(k, _)| match k {
+                Value::Text(t) => t.as_str().to_string(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(keys, ["b", "a", "c"]);
+        assert_eq!(map.get(&Value::text("a")), Some(&Value::Int(2)));
+        assert_eq!(map.remove(&Value::text("b")), Some(Value::Int(1)));
+        assert_eq!(map.len(), 2);
+        assert!(map.get(&Value::text("b")).is_none());
+    }
+
+    #[test]
+    fn many_removals_compact_without_losing_order() {
+        let mut map = OrderedMap::new();
+        for i in 0..100 {
+            map.put(Value::Int(i), Value::Int(i * 10));
+        }
+        for i in 0..90 {
+            map.remove(&Value::Int(i));
+        }
+        let keys: Vec<Value> = map.entries().map(|(k, _)| k.clone()).collect();
+        assert_eq!(keys, (90..100).map(Value::Int).collect::<Vec<_>>());
+        assert_eq!(map.get(&Value::Int(95)), Some(&Value::Int(950)));
+    }
+
+    #[test]
+    fn hashing_does_not_depend_on_the_run() {
+        let mut a = Fnv::default();
+        Key(Value::text("unio")).hash(&mut a);
+        let mut b = Fnv::default();
+        Key(Value::text("unio")).hash(&mut b);
+        assert_eq!(a.finish(), b.finish());
+        // FNV-1a of the tag 4, the bytes of "unio", and the terminator 0xff.
+        assert_eq!(a.finish(), 0xd0b2_323b_fec6_ad65);
+        let mut c = Fnv::default();
+        Key(Value::text("Unio")).hash(&mut c);
+        assert_ne!(a.finish(), c.finish());
+    }
+
+    #[test]
+    fn copy_on_write_copies_only_shared_values() {
+        let original = Value::list(vec![Value::Int(1)]);
+        let mut copy = original.clone();
+        if let Value::List(items) = &mut copy {
+            let items = Rc::make_mut(items);
+            items.push(Value::Int(2));
+            items.recount();
+        }
+        match (&original, &copy) {
+            (Value::List(a), Value::List(b)) => {
+                assert_eq!(a.len(), 1);
+                assert_eq!(b.len(), 2);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn float_equality_follows_ieee_but_keys_are_reflexive() {
+        assert_ne!(Value::Float(f64::NAN), Value::Float(f64::NAN));
+        assert_eq!(Key(Value::Float(f64::NAN)), Key(Value::Float(f64::NAN)));
+        assert_eq!(Value::Float(0.0), Value::Float(-0.0));
+    }
+}
