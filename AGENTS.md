@@ -8,8 +8,9 @@ of plan section 12): `unio check`, `fmt`, `outline`, `explain`, `symbol`, `run`,
 and `test`, with an interpreter. Native code generation and the OS sandbox
 (sprint S6) are not implemented yet. Report which checks ran: `unio test`
 executes Unio code, while parsing or `unio check` only checks it statically.
-The Python checkers in `spec/` and `.github/scripts/` are temporary and give the
-same results as the Unio tools in `tools/`.
+The project's checks run in Unio (`tools/`). The Python checkers in `spec/` and
+`.github/scripts/` stay as a reference: they must give the same results as the
+Unio tools, and they serve in performance comparisons with other languages.
 
 Read the relevant sources before changing language behavior:
 
@@ -71,9 +72,9 @@ Report which checks actually ran and distinguish static validation from executio
   invalid files begin with `# expect-error: LINE` or `# expect-error: LINE CODE`.
 - Grammar alternatives are ordered choices. Preserve their intended precedence,
   and keep the lexical implementation consistent with section L of the EBNF.
-- Keep the temporary Python checkers and their Unio counterparts in `tools/`
-  consistent when changing checker behavior. Retain the Python checkers until
-  the stage 3 interpreter can run equivalent Unio checks.
+- Keep the Python checkers and their Unio counterparts in `tools/` consistent
+  when changing checker behavior; the parity test in CI compares them. Do not
+  delete the Python checkers: they are the reference for parity and benchmarks.
 - Write library, utility, and project tool code in Unio according to the plan.
   Put behavioral `test` blocks alongside that code even while execution awaits
   the interpreter; do not describe those tests as passing based on parsing alone.

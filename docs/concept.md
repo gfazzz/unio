@@ -43,7 +43,7 @@ Consequences of the principle, against which every language decision is checked:
 
 Unio is developed in Unio wherever that is possible: the standard library, the project tools, the reference utilities, and, by 1.0, the compiler. Every gap found while doing this is closed in the language or in the library, and the improved language is then used to write the next part. The language thus improves recursively, and every decision is tested on real code before it is fixed.
 
-Where Unio cannot be used yet, a temporary implementation in another language does the work and is removed as soon as Unio can replace it: the compiler and the runtime are in Rust until self-hosting, the checkers in `spec/` are in Python until the interpreter of stage 3 runs their Unio versions in `tools/`. A part written in another language needs a stated reason and a stated end.
+Where Unio cannot be used yet, a temporary implementation in another language does the work and is removed as soon as Unio can replace it: the compiler and the runtime are in Rust until self-hosting, the checkers in `spec/` were in Python until the interpreter ran their Unio versions in `tools/`. A part written in another language needs a stated reason and a stated end. Once the Unio version does the work, the other implementation may stay only as a reference with a stated purpose: the Python checkers remain to confirm that the Unio tools give the same results and to compare performance, while the project's own checks run in Unio (plan section 12).
 
 This has already paid off: writing the standard library and the checkers in Unio exposed the explicit commit of atomic files, contextual keywords, `pass`, package modules, and missing library functions, all settled in version 0.4.
 
