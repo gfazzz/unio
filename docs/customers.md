@@ -8,7 +8,7 @@ Today tanstaafl has a website in plain HTML; the Rails portal it started with is
 
 ## 1. Rules
 
-- A scenario program lives in [../examples](../examples), uses only the standard library in [../stdlib](../stdlib), and follows the rules of the reference utilities: its usage and exit codes in the documentation comment, `test` blocks written before the code. CI checks it with the Rust front end (`unio check`, `unio fmt --check`) and checks its API use; its tests run once the interpreter of sprint S5 works (plan, section 12).
+- A scenario program lives in [../examples](../examples), uses only the standard library in [../stdlib](../stdlib), and follows the rules of the reference utilities: its usage and exit codes in the documentation comment, `test` blocks written before the code. CI checks it with the Rust front end (`unio check`, `unio fmt --check`), checks its API use, and runs its tests with `unio test` in the interpreter of sprint S5 (plan, section 12).
 - A gap is recorded in section 4 with its target: the existing requirement it waits for, a release, or an RFC. Closing a gap changes the concept, the requirements, or the library by the usual process (concept section 1.2, [rfcs/README.md](rfcs/README.md)); this document only points to where it landed.
 - The customer adds no requirement by itself. A gap becomes a requirement when the release it targets is specified.
 
