@@ -51,22 +51,57 @@ fn injected(p: &str) -> Unwind {
     io_error(p, "Other", "injected failure")
 }
 
+/// The error of an operation the sandbox denies (SB-6): kind PermissionDenied, naming the
+/// permission that is missing.
+fn permit(allowed: bool, permission: &str, p: &str) -> Result<(), Unwind> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(io_error(
+            p,
+            "PermissionDenied",
+            crate::sandbox::denied(permission, p),
+        ))
+    }
+}
+
+fn permit_read(p: &Text) -> Result<(), Unwind> {
+    permit(
+        crate::sandbox::may_read(p.as_str()),
+        "files.read",
+        p.as_str(),
+    )
+}
+
+fn permit_write(p: &Text) -> Result<(), Unwind> {
+    permit(
+        crate::sandbox::may_write(p.as_str()),
+        "files.write",
+        p.as_str(),
+    )
+}
+
 /// Whether the path exists and is accessible.
+/// A path the sandbox hides is reported as absent (S-8).
 fn exists(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let p = path(runtime, arguments, 0)?;
     Ok(Value::Bool(
-        fs::metadata(native(&path(runtime, arguments, 0)?)).is_ok(),
+        crate::sandbox::may_read(p.as_str()) && fs::metadata(native(&p)).is_ok(),
     ))
 }
 
 /// Whether the path is an accessible directory.
 fn is_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
-    let p = native(&path(runtime, arguments, 0)?);
-    Ok(Value::Bool(fs::metadata(p).is_ok_and(|m| m.is_dir())))
+    let p = path(runtime, arguments, 0)?;
+    Ok(Value::Bool(
+        crate::sandbox::may_read(p.as_str()) && fs::metadata(native(&p)).is_ok_and(|m| m.is_dir()),
+    ))
 }
 
 /// The whole file as text; kind InvalidData if it is not UTF-8.
 fn read_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    permit_read(&p)?;
     let data = fs::read(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
     let text = String::from_utf8(data)
         .map_err(|_| io_error(p.as_str(), "InvalidData", "the file is not valid UTF-8"))?;
@@ -78,6 +113,7 @@ fn read_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// The whole file as bytes.
 fn read_bytes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    permit_read(&p)?;
     let data = fs::read(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
     let value = Value::bytes(data);
     runtime.check_heap()?;
@@ -87,6 +123,7 @@ fn read_bytes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// Opens a file for reading; no content is read ahead.
 fn system_open_read(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    permit_read(&p)?;
     let file = File::open(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::Int(runtime.add_descriptor(file)))
 }
@@ -137,6 +174,7 @@ fn system_read_chunk(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome 
 /// Resolves an existing path through the file system, including links.
 fn resolve(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    permit_read(&p)?;
     let resolved = fs::canonicalize(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::path(path_text(&resolved)))
 }
@@ -145,6 +183,7 @@ fn resolve(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// Unicode are written with replacement characters.
 fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    permit_read(&p)?;
     let directory = native(&p);
     let mut names: Vec<String> = fs::read_dir(&directory)
         .map_err(|e| os_error(p.as_str(), &e))?
@@ -167,6 +206,8 @@ fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let source = path(runtime, arguments, 0)?;
     let target = path(runtime, arguments, 1)?;
+    permit_write(&source)?;
+    permit_write(&target)?;
     rename_without_replacing(&native(&source), &native(&target))
         .map_err(|e| os_error(target.as_str(), &e))?;
     Ok(Value::Unit)
@@ -216,6 +257,7 @@ fn rename_without_replacing(source: &Path, target: &Path) -> std::io::Result<()>
 /// Creates one directory; AlreadyExists if it exists, NotFound if its parent does not.
 fn create_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    permit_write(&p)?;
     fs::create_dir(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::Unit)
 }
@@ -231,6 +273,7 @@ fn system_supports_durability(runtime: &mut Runtime, arguments: &mut [Value]) ->
 /// Creates .<name>.unio-tmp-<id> next to the target and opens it for writing.
 fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let target = path(runtime, arguments, 0)?;
+    permit_write(&target)?;
     let target_path = native(&target);
     let directory = match target_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -264,6 +307,16 @@ fn write_all(runtime: &mut Runtime, descriptor: i64, data: &[u8]) -> Outcome {
     let file = runtime
         .descriptor(descriptor)
         .ok_or_else(|| io_error(&label, "Other", "the descriptor is not open"))?;
+    if let Some(limit) = crate::sandbox::file_size_limit() {
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if size.saturating_add(data.len() as u64) > limit {
+            return Err(io_error(
+                &label,
+                "Other",
+                format!("the policy limits written files to {limit} bytes"),
+            ));
+        }
+    }
     file.write_all(data).map_err(|e| os_error(&label, &e))?;
     Ok(Value::Unit)
 }
@@ -338,6 +391,12 @@ fn close(file: File) -> std::io::Result<()> {
 fn system_rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let temporary = path(runtime, arguments, 0)?;
     let target = path(runtime, arguments, 1)?;
+    permit(
+        crate::sandbox::may_write_temporary(temporary.as_str()),
+        "files.write",
+        temporary.as_str(),
+    )?;
+    permit_write(&target)?;
     if runtime.fails_at(FailPoint::Rename) {
         return Err(injected(target.as_str()));
     }
@@ -373,6 +432,11 @@ fn replace(temporary: &Path, target: &Path) -> std::io::Result<()> {
 /// and macOS; on Windows MOVEFILE_WRITE_THROUGH has done this already.
 fn system_sync_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let directory = path(runtime, arguments, 0)?;
+    permit(
+        crate::sandbox::may_sync_directory(directory.as_str()),
+        "files.write",
+        directory.as_str(),
+    )?;
     if runtime.fails_at(FailPoint::SyncDirectory) {
         return Err(injected(directory.as_str()));
     }
@@ -418,6 +482,8 @@ fn sync_directory(_: &Path) -> std::io::Result<()> {
 /// Removes the file; errors are ignored.
 fn system_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    let _ = fs::remove_file(native(&p));
+    if crate::sandbox::may_write_temporary(p.as_str()) {
+        let _ = fs::remove_file(native(&p));
+    }
     Ok(Value::Unit)
 }

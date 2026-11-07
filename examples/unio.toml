@@ -1,0 +1,15 @@
+# The reference programs. They work on the files of the directory they are started in, so
+# that each program can run in the sandbox without seeing the rest of the system (SB-2).
+# env-check reads the variables and starts the programs that its requirements file names; only
+# the ones listed here are visible to it.
+
+[package]
+name = "unio-examples"
+version = "0.1.0"
+
+[permissions]
+files.read = ["$CWD/**"]
+files.write = ["$CWD/**"]
+env = ["HOME", "PATH", "LANG"]
+process = ["git", "python3"]
+network = false

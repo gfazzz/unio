@@ -1,0 +1,639 @@
+//! The sandbox suite of SB-8: Unio programs that attempt forbidden actions through every module
+//! of the standard library that reaches the system and through child processes, each of which
+//! must be denied; and the policy of SB-3 and SB-5: narrowing, warnings, limits, and failing
+//! closed with code 103.
+//!
+//! Every program runs in its own package in a temporary directory, with `open/` granted by its
+//! manifest and `closed/` holding a file the program must never see.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const SECRET: &str = "SECRET-CONTENT";
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+/// A package with a manifest, a program `main.unio`, and the files the programs try to reach.
+fn package(name: &str, manifest: &str, program: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("unio-sandbox-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("open/sub")).unwrap();
+    fs::create_dir_all(dir.join("closed")).unwrap();
+    fs::write(dir.join("open/a.txt"), "alpha").unwrap();
+    fs::write(dir.join("open/sub/b.txt"), "beta").unwrap();
+    fs::write(dir.join("closed/secret.txt"), SECRET).unwrap();
+    fs::write(dir.join("unio.toml"), with_decoys(manifest)).unwrap();
+    fs::write(dir.join("main.unio"), program).unwrap();
+    fs::canonicalize(dir).unwrap()
+}
+
+/// The manifest with a harmless grant for every kind of permission it does not list: the
+/// programs share helpers that use every kind, and the compile-time check (E0085, SB-7) would
+/// otherwise reject them before the sandbox is reached. A manifest without `[permissions]`
+/// stays as it is: it permits nothing, and the compiler does not check it.
+fn with_decoys(manifest: &str) -> String {
+    if !manifest.contains("[permissions]") {
+        return manifest.to_string();
+    }
+    let mut out = manifest.to_string();
+    for (key, decoy) in [
+        ("files.read", "[\"$CWD/unio-decoy/**\"]"),
+        ("files.write", "[\"$CWD/unio-decoy/**\"]"),
+        ("env", "[\"UNIO_DECOY\"]"),
+        ("process", "[\"unio-decoy\"]"),
+    ] {
+        if !manifest.lines().any(|l| l.starts_with(&format!("{key} "))) {
+            out.push_str(&format!("{key} = {decoy}\n"));
+        }
+    }
+    out
+}
+
+/// A policy file; on Windows, where the operating system part of the sandbox is missing, the
+/// tests act as the operator and allow the weaker sandbox (SB-5).
+fn policy(dir: &Path, body: &str) -> PathBuf {
+    let path = dir.join("policy.toml");
+    let weaker = if cfg!(windows) {
+        "allow_weaker = true\n"
+    } else {
+        ""
+    };
+    fs::write(&path, format!("{weaker}{body}")).unwrap();
+    path
+}
+
+/// Runs `main.unio` of the package in its directory, with sandbox options before the file.
+fn run(dir: &Path, options: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
+    command
+        .current_dir(dir)
+        .env_remove("UNIO_POLICY")
+        .arg("run");
+    if cfg!(windows) && !options.iter().any(|o| o.starts_with("--policy")) {
+        command.arg("--allow-weaker-sandbox");
+    }
+    command.args(options).arg("main.unio");
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+#[track_caller]
+fn lines_of(output: &Output) -> Vec<String> {
+    let out = text(&output.stdout);
+    let err = text(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+    out.lines().map(String::from).collect()
+}
+
+/// Checks that every attempt was denied and every granted operation worked.
+#[track_caller]
+fn assert_denied(output: &Output, expected: &[&str]) {
+    let lines = lines_of(output);
+    let all = text(&output.stdout) + &text(&output.stderr);
+    assert!(!all.contains(SECRET), "the secret leaked:\n{all}");
+    let breaches: Vec<&String> = lines.iter().filter(|l| l.starts_with("BREACH")).collect();
+    assert!(breaches.is_empty(), "{all}");
+    for name in expected {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == &format!("denied {name}") || l == &format!("granted {name}")),
+            "no result for {name}:\n{all}"
+        );
+    }
+}
+
+const PROGRAM_HEAD: &str = "import std.env
+import std.files
+import std.process
+from std.files import IoErrorKind
+from std.process import ProcessErrorKind
+
+function report(name as Text, denied as Bool):
+    if denied:
+        print(\"denied {name}\")
+    else:
+        print(\"BREACH {name}\")
+
+function granted(name as Text, worked as Bool):
+    if worked:
+        print(\"granted {name}\")
+    else:
+        print(\"BREACH {name} does not work\")
+
+function is_denied(e as IoError) returns Bool:
+    return e.kind == IoErrorKind.PermissionDenied and e.reason.contains(\"denied by the sandbox\")
+
+function read_text_denied(path as Path) returns Bool:
+    try:
+        print(try files.read_text(path))
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function read_bytes_denied(path as Path) returns Bool:
+    try:
+        print(\"{(try files.read_bytes(path)).length()} bytes\")
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function open_reader_denied(path as Path) returns Bool:
+    try:
+        using reader = try files.open_reader(path):
+            print(\"opened {path.to_text()}\")
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function list_directory_denied(path as Path) returns Bool:
+    try:
+        for entry in try files.list_directory(path):
+            print(entry.to_text())
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function resolve_denied(path as Path) returns Bool:
+    try:
+        print((try files.resolve(path)).to_text())
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function write_text_denied(path as Path) returns Bool:
+    try:
+        try files.write_text(path, \"written\")
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function write_bytes_denied(path as Path) returns Bool:
+    try:
+        try files.write_bytes(path, Bytes())
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function copy_denied(source as Path, target as Path) returns Bool:
+    try:
+        try files.copy_file(source, target)
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function rename_denied(source as Path, target as Path) returns Bool:
+    try:
+        try files.rename(source, target)
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function create_directory_denied(path as Path) returns Bool:
+    try:
+        try files.create_directory(path)
+        return false
+    on IoError as e:
+        return is_denied(e)
+
+function run_denied(program as Text, arguments as List[Text]) returns Bool:
+    try:
+        let output = try process.run(program, arguments, timeout_seconds = 10)
+        print(output.stdout)
+        return false
+    on ProcessError as e:
+        return e.kind == ProcessErrorKind.PermissionDenied
+
+";
+
+#[test]
+fn every_module_of_the_standard_library_denies_what_the_manifest_does_not_permit() {
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nfiles.write = [\"$CWD/open/out.txt\"]\nenv = [\"UNIO_ALLOWED\"]\nprocess = [\"unio-listed-program\"]\n";
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():
+    let secret = Path(\"closed/secret.txt\")
+    report(\"files.read_text\", read_text_denied(secret))
+    report(\"files.read_text through ..\", read_text_denied(Path(\"open/../closed/secret.txt\")))
+    report(\"files.read_bytes\", read_bytes_denied(secret))
+    report(\"files.open_reader\", open_reader_denied(secret))
+    report(\"files.list_directory\", list_directory_denied(Path(\"closed\")))
+    report(\"files.list_directory of the package\", list_directory_denied(Path(\".\")))
+    report(\"files.resolve\", resolve_denied(secret))
+    report(\"files.exists\", not files.exists(secret))
+    report(\"files.is_directory\", not files.is_directory(Path(\"closed\")))
+    report(\"files.write_text\", write_text_denied(Path(\"closed/new.txt\")))
+    report(\"files.write_text in a read scope\", write_text_denied(Path(\"open/a.txt\")))
+    report(\"files.write_text of the manifest\", write_text_denied(Path(\"unio.toml\")))
+    report(\"files.write_bytes\", write_bytes_denied(Path(\"closed/new.bin\")))
+    report(\"files.copy_file out\", copy_denied(Path(\"open/a.txt\"), Path(\"closed/copy.txt\")))
+    report(\"files.copy_file in\", copy_denied(secret, Path(\"open/out.txt\")))
+    report(\"files.rename\", rename_denied(Path(\"open/a.txt\"), Path(\"closed/a.txt\")))
+    report(\"files.rename of a secret\", rename_denied(secret, Path(\"open/out.txt\")))
+    report(\"files.create_directory\", create_directory_denied(Path(\"closed/dir\")))
+    report(\"env.get\", env.get(\"UNIO_SECRET\").is_none())
+    report(\"process.run of an unlisted program\", run_denied(\"unio-unlisted-program\", []))
+    report(\"process.run of a listed name by path\", run_denied(\"/usr/bin/unio-listed-program\", []))
+    granted(\"files.read_text\", not read_text_denied(Path(\"open/a.txt\")))
+    granted(\"files.exists\", files.exists(Path(\"open/sub/b.txt\")))
+    granted(\"files.list_directory\", not list_directory_denied(Path(\"open\")))
+    granted(\"files.write_text\", not write_text_denied(Path(\"open/out.txt\")))
+    granted(\"env.get\", env.get(\"UNIO_ALLOWED\") == some(\"yes\"))
+"
+    );
+    let dir = package("modules", manifest, &program);
+    let output = run(
+        &dir,
+        &[],
+        &[("UNIO_SECRET", SECRET), ("UNIO_ALLOWED", "yes")],
+    );
+    assert_denied(
+        &output,
+        &[
+            "files.read_text",
+            "files.read_text through ..",
+            "files.read_bytes",
+            "files.open_reader",
+            "files.list_directory",
+            "files.list_directory of the package",
+            "files.resolve",
+            "files.exists",
+            "files.is_directory",
+            "files.write_text",
+            "files.write_text in a read scope",
+            "files.write_text of the manifest",
+            "files.write_bytes",
+            "files.copy_file out",
+            "files.copy_file in",
+            "files.rename",
+            "files.rename of a secret",
+            "files.create_directory",
+            "env.get",
+            "process.run of an unlisted program",
+            "process.run of a listed name by path",
+        ],
+    );
+    // Nothing was created or moved outside the scopes, and the granted file was written.
+    assert!(!dir.join("closed/new.txt").exists() && !dir.join("closed/a.txt").exists());
+    assert!(dir.join("open/a.txt").exists() && dir.join("closed/secret.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir.join("open/out.txt")).unwrap(),
+        "written"
+    );
+    let leftovers: Vec<_> = fs::read_dir(dir.join("open"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains("unio-tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files are left: {leftovers:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn without_permissions_a_program_only_has_its_arguments_and_standard_streams() {
+    let program = format!(
+        "{PROGRAM_HEAD}import std.args
+
+public function main():
+    print(\"arguments {{args.list().length()}}\")
+    report(\"files.read_text\", read_text_denied(Path(\"open/a.txt\")))
+    report(\"files.write_text\", write_text_denied(Path(\"open/new.txt\")))
+    report(\"files.exists\", not files.exists(Path(\"open/a.txt\")))
+    report(\"env.get\", env.get(\"PATH\").is_none())
+    report(\"process.run\", run_denied(\"git\", [\"--version\"]))
+"
+    );
+    let dir = package("none", "[package]\nname = \"none\"\n", &program);
+    let output = run(&dir, &[], &[]);
+    assert_denied(
+        &output,
+        &[
+            "files.read_text",
+            "files.write_text",
+            "files.exists",
+            "env.get",
+            "process.run",
+        ],
+    );
+    assert!(!dir.join("open/new.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_inside_a_scope_does_not_lead_out_of_it() {
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():
+    report(\"files.read_text through a link\", read_text_denied(Path(\"open/link\")))
+    report(\"files.write_text through a link\", write_text_denied(Path(\"open/dir-link/x.txt\")))
+"
+    );
+    let manifest =
+        "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nfiles.write = [\"$CWD/open/**\"]\n";
+    let dir = package("link", manifest, &program);
+    std::os::unix::fs::symlink(dir.join("closed/secret.txt"), dir.join("open/link")).unwrap();
+    std::os::unix::fs::symlink(dir.join("closed"), dir.join("open/dir-link")).unwrap();
+    let output = run(&dir, &[], &[]);
+    assert_denied(
+        &output,
+        &[
+            "files.read_text through a link",
+            "files.write_text through a link",
+        ],
+    );
+    assert!(!dir.join("closed/x.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A child process is not checked by the runtime: only the operating system stops it, so this
+/// is where the restrictions of SB-1 and SB-4 show. Linux and macOS enforce them; Windows does
+/// not yet (docs/runtime.md 7.4).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn child_processes_inherit_the_sandbox() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let python =
+        Command::new("python3").arg("--version").output().is_ok() && cfg!(target_os = "linux");
+    let program = format!(
+        "{PROGRAM_HEAD}function child(name as Text, program as Text, arguments as List[Text]):
+    let output = try process.run(program, arguments, timeout_seconds = 30) on ProcessError as e:
+        print(\"BREACH {{name}}: the child does not start: {{e.reason}}\")
+        return
+    print(output.stdout)
+    if output.status != 0:
+        print(\"denied {{name}}\")
+    else:
+        print(\"BREACH {{name}}\")
+
+public function main():
+    let output = try process.run(\"cat\", [\"open/a.txt\"]) on ProcessError as e:
+        print(\"BREACH cat does not start: {{e.reason}}\")
+        return
+    granted(\"process.run\", output.stdout == \"alpha\")
+    child(\"a child reads a closed file\", \"cat\", [\"closed/secret.txt\"])
+    child(\"a child reads through ..\", \"cat\", [\"open/../closed/secret.txt\"])
+    if {python}:
+        child(\"a child writes a closed file\", \"python3\", [\"-c\", \"open('closed/new.txt', 'w').write('x')\"])
+        child(\"a child connects to the network\", \"python3\", [\"-c\", \"import socket; socket.create_connection(('127.0.0.1', {port}), 5)\"])
+        child(\"a grandchild reads a closed file\", \"python3\", [\"-c\", \"import subprocess, sys; sys.exit(subprocess.call(['/bin/sh', '-c', 'cat closed/secret.txt']))\"])
+    else:
+        print(\"denied a child writes a closed file\")
+        print(\"denied a child connects to the network\")
+        print(\"denied a grandchild reads a closed file\")
+"
+    );
+    let manifest =
+        "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nprocess = [\"cat\", \"python3\"]\n";
+    let dir = package("children", manifest, &program);
+    let output = run(&dir, &[], &[]);
+    assert_denied(
+        &output,
+        &[
+            "process.run",
+            "a child reads a closed file",
+            "a child reads through ..",
+            "a child writes a closed file",
+            "a child connects to the network",
+            "a grandchild reads a closed file",
+        ],
+    );
+    assert!(!dir.join("closed/new.txt").exists());
+    drop(listener);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_policy_narrows_the_manifest_and_warns_about_extra_permissions() {
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():
+    report(\"files.read_text outside the policy\", read_text_denied(Path(\"open/a.txt\")))
+    granted(\"files.read_text inside the policy\", not read_text_denied(Path(\"open/sub/b.txt\")))
+    report(\"files.read_text of a policy-only path\", read_text_denied(Path(\"closed/secret.txt\")))
+    report(\"env.get not in the policy\", env.get(\"UNIO_ALLOWED\").is_none())
+"
+    );
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nenv = [\"UNIO_ALLOWED\"]\n";
+    let dir = package("narrow", manifest, &program);
+    let file = policy(
+        &dir,
+        "[permissions]\nfiles.read = [\"$CWD/open/sub/**\", \"$CWD/closed/**\"]\n",
+    );
+    let file = file.to_string_lossy().into_owned();
+    let output = run(&dir, &["--policy", &file], &[("UNIO_ALLOWED", "yes")]);
+    assert_denied(
+        &output,
+        &[
+            "files.read_text outside the policy",
+            "files.read_text inside the policy",
+            "files.read_text of a policy-only path",
+            "env.get not in the policy",
+        ],
+    );
+    let err = text(&output.stderr);
+    assert!(
+        err.contains("warning: the policy permits files.read") && err.contains("closed"),
+        "SB-3: an extra permission of the policy gives a warning:\n{err}"
+    );
+    // UNIO_POLICY gives the same policy.
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
+    let again = command
+        .current_dir(&dir)
+        .env("UNIO_POLICY", &file)
+        .env("UNIO_ALLOWED", "yes")
+        .args(["run", "main.unio"])
+        .output()
+        .unwrap();
+    assert_eq!(lines_of(&again), lines_of(&output));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_limits_of_a_policy_end_the_program_or_fail_the_operation() {
+    let manifest = "[permissions]\nfiles.write = [\"$CWD/open/**\"]\nprocess = [\"cat\"]\n";
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "heap",
+            "limits.heap_bytes = 1_000_000",
+            "public function main():\n    var all as List[List[Int]] = []\n    while true:\n        all.append([n for n in range(0, 10000)])\n",
+        ),
+        (
+            "wall",
+            "limits.wall_seconds = 1",
+            "public function main():\n    while true:\n        pass\n",
+        ),
+        (
+            "cpu",
+            "limits.cpu_seconds = 1",
+            "public function main():\n    var n = 0\n    while true:\n        n = (n + 1) % 1000\n",
+        ),
+        (
+            "file size",
+            "limits.file_size_bytes = 10",
+            "import std.files\n\npublic function main():\n    try:\n        try files.write_text(Path(\"open/big.txt\"), \"0123456789abcdef\")\n        print(\"BREACH\")\n    on IoError as e:\n        print(\"denied: {e.reason}\")\n",
+        ),
+    ];
+    for (name, limit, program) in cases {
+        let dir = package(
+            &format!("limit-{}", name.replace(' ', "-")),
+            manifest,
+            program,
+        );
+        let file = policy(
+            &dir,
+            &format!("[limits]\n{}\n", limit.trim_start_matches("limits.")),
+        );
+        let file = file.to_string_lossy().into_owned();
+        let started = std::time::Instant::now();
+        let output = run(&dir, &["--policy", &file], &[]);
+        let out = text(&output.stdout);
+        let err = text(&output.stderr);
+        if name == "file size" {
+            assert_eq!(output.status.code(), Some(0), "{out}{err}");
+            assert!(
+                out.contains("denied: the policy limits written files to 10 bytes"),
+                "{out}{err}"
+            );
+            assert!(!dir.join("open/big.txt").exists());
+        } else {
+            assert_eq!(output.status.code(), Some(102), "{name}: {out}{err}");
+            assert!(started.elapsed().as_secs() < 60, "{name} took too long");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():\n    report(\"process.run over the limit\", run_denied(\"cat\", [\"unio.toml\"]))\n"
+    );
+    let dir = package("limit-processes", manifest, &program);
+    let file = policy(&dir, "[limits]\nprocesses = 0\n");
+    let output = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+    assert_denied(&output, &["process.run over the limit"]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_policy_or_manifest_that_cannot_be_used_stops_the_start_with_code_103() {
+    let program = "public function main():\n    print(\"ran\")\n";
+    let dir = package("closed", "[package]\nname = \"x\"\n", program);
+    let missing = dir
+        .join("no-such-policy.toml")
+        .to_string_lossy()
+        .into_owned();
+    let cases: Vec<(Vec<String>, &str)> = vec![
+        (vec!["--policy".into(), missing.clone()], "cannot be read"),
+        (vec![format!("--policy={missing}")], "cannot be read"),
+    ];
+    for (options, message) in cases {
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        let output = run(&dir, &options, &[]);
+        assert_eq!(output.status.code(), Some(103), "{}", text(&output.stderr));
+        assert!(
+            text(&output.stderr).contains(message),
+            "{}",
+            text(&output.stderr)
+        );
+        assert!(text(&output.stdout).is_empty());
+    }
+    for body in [
+        "[limits]\nheap = 1\n",
+        "[limits\n",
+        "[permissions]\nnetwork = true\n",
+    ] {
+        let file = policy(&dir, body);
+        let output = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(103),
+            "{body}: {}",
+            text(&output.stderr)
+        );
+        assert!(
+            text(&output.stderr).contains("is invalid"),
+            "{}",
+            text(&output.stderr)
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+        .current_dir(&dir)
+        .env("UNIO_POLICY", &missing)
+        .args(["run", "main.unio"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(103));
+    fs::write(
+        dir.join("unio.toml"),
+        "[permissions]\nfiles.read = \"$CWD\"\n",
+    )
+    .unwrap();
+    let output = run(&dir, &[], &[]);
+    assert_eq!(output.status.code(), Some(103), "{}", text(&output.stderr));
+    assert!(text(&output.stderr).contains("unio.toml is invalid"));
+    // unio test applies the same sandbox and the same rule.
+    let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+        .current_dir(&dir)
+        .args(["test", "--policy", &missing, "main.unio"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(103));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Without the mechanisms of the operating system the sandbox fails closed unless the operator
+/// allows a weaker one, which then names what is missing (SB-5).
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn a_missing_mechanism_fails_closed() {
+    let dir = package(
+        "weaker",
+        "[package]\nname = \"x\"\n",
+        "public function main():\n    print(\"ran\")\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+        .current_dir(&dir)
+        .env_remove("UNIO_POLICY")
+        .args(["run", "main.unio"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(103));
+    assert!(text(&output.stderr).contains("--allow-weaker-sandbox"));
+    let output = run(&dir, &[], &[]);
+    assert_eq!(text(&output.stdout), "ran\n");
+    assert!(text(&output.stderr).contains("missing"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tests_run_in_the_sandbox_of_their_package() {
+    let program = format!(
+        "{PROGRAM_HEAD}test \"the sandbox applies to tests\":
+    assert read_text_denied(Path(\"closed/secret.txt\"))
+    assert not read_text_denied(Path(\"open/a.txt\"))
+"
+    );
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\n";
+    let dir = package("tests", manifest, &program);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
+    command
+        .current_dir(&dir)
+        .env_remove("UNIO_POLICY")
+        .arg("test");
+    if cfg!(windows) {
+        command.arg("--allow-weaker-sandbox");
+    }
+    let output = command.arg("main.unio").output().unwrap();
+    let out = text(&output.stdout);
+    assert!(output.status.success(), "{out}{}", text(&output.stderr));
+    assert!(out.contains("1 passed, 0 failed"), "{out}");
+    let _ = fs::remove_dir_all(&dir);
+}

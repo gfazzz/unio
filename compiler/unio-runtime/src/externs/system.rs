@@ -47,17 +47,23 @@ fn args_list(runtime: &mut Runtime, _: &mut [Value]) -> Outcome {
 /// UTF-8.
 fn env_get(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let name = text(runtime, arguments, 0)?;
+    if !crate::sandbox::may_use_env(name.as_str()) {
+        return Ok(Value::none());
+    }
     let value = std::env::var_os(name.as_str()).and_then(|v| v.into_string().ok());
     Ok(Value::option(value.map(Value::text)))
 }
 
 /// The home directory as the operating system reports it, not from $HOME.
 fn env_home_dir(_: &mut Runtime, _: &mut [Value]) -> Outcome {
-    Ok(Value::option(home_dir().map(Value::path)))
+    // In the sandbox the system may no longer answer (Landlock hides /etc/passwd); the home
+    // directory was asked before the restrictions applied.
+    let home = crate::sandbox::home_dir().unwrap_or_else(home_dir);
+    Ok(Value::option(home.map(Value::path)))
 }
 
 #[cfg(unix)]
-fn home_dir() -> Option<String> {
+pub(crate) fn home_dir() -> Option<String> {
     use std::ffi::CStr;
     use std::os::raw::c_char;
 
@@ -110,12 +116,12 @@ fn home_dir() -> Option<String> {
 /// On Windows the profile directory of the user, as `std::env::home_dir` reports it.
 #[cfg(windows)]
 #[allow(deprecated)]
-fn home_dir() -> Option<String> {
+pub(crate) fn home_dir() -> Option<String> {
     std::env::home_dir().and_then(|p| p.into_os_string().into_string().ok())
 }
 
 #[cfg(not(any(unix, windows)))]
-fn home_dir() -> Option<String> {
+pub(crate) fn home_dir() -> Option<String> {
     None
 }
 

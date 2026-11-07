@@ -4,11 +4,13 @@ use std::process::ExitCode;
 
 use unio::Lang;
 
+mod sandbox_cli;
+
 const USAGE: &str = "Usage:
     unio check [--diagnostics=json] [--lang=en|ru] [--profile=application|core] FILE...
     unio fmt [--check] FILE...
-    unio run FILE [-- ARGS...]
-    unio test [--json] [FILTER] FILE...
+    unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]
+    unio test [--json] [--policy FILE] [--allow-weaker-sandbox] [FILTER] FILE...
     unio outline [--json] FILE
     unio symbol [--json] MODULE.NAME
     unio parse --ast FILE
@@ -21,6 +23,14 @@ fn main() -> ExitCode {
     if arguments.first().map(String::as_str) == Some("run") {
         return run(&arguments[1..]);
     }
+    let (sandbox, arguments) = if arguments.first().map(String::as_str) == Some("test") {
+        match sandbox_cli::take(&arguments) {
+            Ok(taken) => taken,
+            Err(problem) => return usage(&problem),
+        }
+    } else {
+        (sandbox_cli::Options::default(), arguments)
+    };
     let mut lang = std::env::var("UNIO_LANG")
         .ok()
         .and_then(|v| Lang::parse(&v))
@@ -73,7 +83,7 @@ fn main() -> ExitCode {
         "symbol" if files.len() == 1 => symbol(&files[0], json),
         "parse" if ast && files.len() == 1 => parse(&files[0], lang),
         "fmt" => fmt(files, check_only, lang),
-        "test" => test(files, json, lang),
+        "test" => test(files, json, lang, &sandbox),
         "outline" if files.len() == 1 => outline(&files[0], json, lang),
         "explain" if files.len() == 1 => match unio::catalog::explain(&files[0], lang) {
             Some(text) => {
@@ -273,10 +283,11 @@ fn report_errors(files: &[std::path::PathBuf], lang: Lang) -> bool {
     failed
 }
 
-const UNSANDBOXED: &str =
-    "unio: warning: until sprint S6 the program runs without the sandbox of SB-1\n";
-
 fn run(arguments: &[String]) -> ExitCode {
+    let (sandbox, arguments) = match sandbox_cli::take_run(arguments) {
+        Ok(taken) => taken,
+        Err(problem) => return usage(&problem),
+    };
     let (file, rest) = match arguments.split_first() {
         Some((file, rest)) => (std::path::PathBuf::from(file), rest),
         None => return usage("unio run needs a file"),
@@ -286,6 +297,10 @@ fn run(arguments: &[String]) -> ExitCode {
         Some(_) => rest.to_vec(),
         None => Vec::new(),
     };
+    let plan = match sandbox_cli::prepare(std::slice::from_ref(&file), &sandbox, false) {
+        Ok(plan) => plan,
+        Err(code) => return ExitCode::from(code as u8),
+    };
     if report_errors(std::slice::from_ref(&file), Lang::En) {
         return ExitCode::from(1);
     }
@@ -293,8 +308,9 @@ fn run(arguments: &[String]) -> ExitCode {
         let program = unio::load_checked(&[file], unio::effects::Profile::Application);
         let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
         let interp = unio::interp::Interp::new(program);
+        // SB-1: the sandbox applies after the sources are loaded and before main runs.
+        let _sandbox = sandbox_cli::enter_or_exit(&plan, 0);
         let mut rt = unio_runtime::Runtime::new(program_args);
-        rt.write_error(UNSANDBOXED);
         unio::interp::run_main(&interp, &mut rt, module)
     });
     ExitCode::from(code.clamp(0, 255) as u8)
@@ -318,7 +334,7 @@ fn json_text(s: &str) -> String {
 }
 
 /// `unio test [--json] [FILTER] FILE...` (T-4, T-5, T-5a).
-fn test(arguments: &[String], json: bool, lang: Lang) -> ExitCode {
+fn test(arguments: &[String], json: bool, lang: Lang, sandbox: &sandbox_cli::Options) -> ExitCode {
     let (filter, files): (Option<String>, Vec<std::path::PathBuf>) = match arguments.split_first() {
         Some((first, rest))
             if !first.ends_with(".unio") && !std::path::Path::new(first).is_file() =>
@@ -336,11 +352,13 @@ fn test(arguments: &[String], json: bool, lang: Lang) -> ExitCode {
     if files.is_empty() {
         return usage("unio test needs files");
     }
-    // Runtime 7.4: tests run without the sandbox until S6, and say so.
-    eprint!("{UNSANDBOXED}");
+    let plan = match sandbox_cli::prepare(&files, sandbox, true) {
+        Ok(plan) => plan,
+        Err(code) => return ExitCode::from(code as u8),
+    };
     let mut records = Vec::new();
     let (mut passed, mut failed) = (0, 0);
-    for file in files {
+    for (index, file) in files.into_iter().enumerate() {
         let display = file.display().to_string();
         let analyses = unio::check_files(std::slice::from_ref(&file));
         let Some(analysis) = analyses.into_iter().next() else {
@@ -392,8 +410,11 @@ fn test(arguments: &[String], json: bool, lang: Lang) -> ExitCode {
             .collect();
         let path = file.clone();
         let filter = filter.clone();
+        let plan = plan.clone();
         let results = on_run_stack(move || {
             let program = unio::load_checked(&[path], unio::effects::Profile::Application);
+            // SB-1: each file's tests run in the sandbox of its package.
+            let _sandbox = sandbox_cli::enter_or_exit(&plan, index);
             let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
             let interp = unio::interp::Interp::new(program);
             let mut results = Vec::new();

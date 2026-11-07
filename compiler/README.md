@@ -3,13 +3,17 @@
 The front end of the Unio compiler, written in Rust (requirements, section 10): the lexer, the
 parser, the syntax tree, diagnostics and their catalog, the formatter, the outline, the static
 checks of [docs/semantics.md](../docs/semantics.md), `unio symbol`, and the interpreter of
-[docs/runtime.md](../docs/runtime.md) behind `unio run` and `unio test`. These are sprints S1 to
-S5 of the plan; the native runtime, the sandbox, and code generation follow in sprint S6.
+[docs/runtime.md](../docs/runtime.md) behind `unio run` and `unio test`, which run every program
+in the sandbox of SB-1. These are sprints S1 to S5 of the plan and the sandbox part of S6; the
+native runtime and code generation follow in sprint S6.
 
 ## Build and test
 
 Rust stable and the standard library only: there are no external crates, so the build needs no
-network and is reproducible (C-4).
+network and is reproducible (C-4). The sandbox keeps this: Landlock, seccomp, resource limits and
+Seatbelt are called through `extern` declarations in `unio-runtime/src/sandbox/`, as the runtime
+already does for `fsync`, `getpwuid` and `MoveFileExW`, so `libc` and `windows-sys` are not
+dependencies and the bill of materials stays empty (R-6).
 
 ```sh
 cd compiler
@@ -35,11 +39,55 @@ The workspace has two crates: `unio` (this front end, the interpreter, and the c
 | `unio outline [--json] FILE` | Lists the declarations with their signatures and lines; members of structs, enums, errors, interfaces, and extend blocks are indented (C-12) |
 | `unio parse --ast FILE` | Prints the syntax tree as an S-expression without spans; the form is stable and is used to compare parses |
 | `unio explain CODE` | Prints the explanation of a diagnostic code with an example of the error and the example fixed (C-9) |
-| `unio run FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`. Until the sandbox of S6 exists it writes a warning that the program runs without SB-1 (runtime 7.4). Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion, 1 if the program does not compile |
-| `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). It writes the same warning as `unio run`. Exit code 0 when every test passed, 1 otherwise |
+| `unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`, in the sandbox described below. The sandbox options come before FILE, or between FILE and `--`. Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion (heap, stack, wall or CPU time of the policy), 103 when the policy or the manifest cannot be read or parsed or the sandbox cannot be applied, 1 if the program does not compile |
+| `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). Each file's tests run in the sandbox of its package, with the same options and codes as `unio run`. Exit code 0 when every test passed, 1 otherwise |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,
 and is English otherwise (C-10). Codes and the JSON format do not depend on it.
+
+### The sandbox
+
+The permissions of a program are the `[permissions]` of the `unio.toml` nearest above its file
+(T-6), narrowed by the policy of `--policy FILE` or `UNIO_POLICY` (SB-2, SB-3). Without a
+manifest, or with one that has no `[permissions]`, a program has only its arguments and standard
+streams. `unio test` uses the same rule: a test that needs files declares them in its package.
+
+```toml
+# A policy. Without [permissions] it narrows nothing; with it, a kind it does not list is denied.
+allow_weaker = false        # true is the same as --allow-weaker-sandbox (SB-5)
+
+[permissions]
+files.read = ["$CWD/src/**"]
+
+[limits]
+heap_bytes = 268_435_456    # the runtime's count of live values; 102 when exceeded
+wall_seconds = 60           # 102 when exceeded
+cpu_seconds = 30            # 102 when exceeded; each child gets RLIMIT_CPU
+processes = 4               # process.run calls; more fail with PermissionDenied
+file_size_bytes = 1_048_576 # writes over it fail; RLIMIT_FSIZE on Linux and macOS
+```
+
+A permission of the policy that the manifest does not have is a warning and has no effect.
+Unknown keys are errors. Paths in either file may start with `$HOME`, `$CWD` or `$TEMP`, end
+with `/**` for a subtree, and are otherwise relative to the file's directory; links are resolved
+before a path is compared, so a link cannot lead out of a scope.
+
+Two layers enforce the permissions. The runtime checks every external function of `std.files`,
+`std.env` and `std.process` and reports a denied operation as `IoError` or `ProcessError` of kind
+`PermissionDenied` naming the permission, `none` from `env.get`, and `false` from `files.exists`
+and `files.is_directory` (SB-6, S-8). The operating system restricts the thread that runs the
+program, its threads and every child process (SB-1, SB-4), after the sources are loaded and
+before `main` or the first test:
+
+| System | Mechanisms | Not covered |
+|---|---|---|
+| Linux | `no_new_privs`; Landlock (ABI 1 to 7: files, TCP from ABI 4, signals and abstract sockets from ABI 6); seccomp-bpf: no sockets at all, no `ptrace`, `process_vm_*`, `mount`, `unshare`, `setns`, namespace flags of `clone`, `io_uring`, `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `open_by_handle_at`, `kexec`, modules, `TIOCSTI`; `RLIMIT_CORE` 0, `RLIMIT_FSIZE` | Landlock grants a scope of one written file on its directory, because the atomic commit creates a temporary file next to the target; scope roots that do not exist at the start grant nothing; with a `process` permission, children may read and execute the system directories (`/usr`, `/lib*`, `/bin`, `/etc/ld.so.*` and the like); `stat` is not restricted by Landlock |
+| macOS | a Seatbelt profile (`sandbox_init`, deny by default) and the same resource limits | Seatbelt applies to the whole process once, so `unio test` grants the union of its files' permissions plus reading their sources and the standard library; the runtime still keeps each file to its own |
+| Windows | none yet: AppContainer and Job Objects are not implemented | `unio run` and `unio test` stop with 103 unless the operator allows the weaker sandbox, which keeps only the runtime layer and the limits |
+
+A missing mechanism (no Landlock or seccomp in the kernel, Landlock below ABI 3, Windows) stops
+the start with 103; with `--allow-weaker-sandbox` or `allow_weaker = true` the program runs and
+the missing restrictions are printed (SB-5). The program itself cannot lift any of this.
 
 ## What is implemented
 
@@ -247,6 +295,15 @@ The tests were written before the code (concept, section 1.2):
   temporary directory) end to end with their output and exit codes; a fault that releases two
   `using` blocks in reverse order and ends with 101 and its trace, exit codes of `main` inside and
   outside 0–100, and recursion that ends with 102.
+- `tests/sandbox.rs` (SB-8): programs that try forbidden actions through `std.files`, `std.env`
+  and `std.process` (reading, listing, resolving, writing, copying, renaming, creating outside
+  the scopes, `..` and links out of a scope, hidden variables, unlisted programs), with no
+  permissions at all, and through child processes that read, write, connect and start
+  grandchildren (Linux and macOS); a policy that narrows and warns, through `--policy` and
+  `UNIO_POLICY`; the limits of heap, wall and CPU time (102), processes and file size; code 103
+  for an unreadable or invalid policy or manifest; and tests that run in their package's sandbox.
+  `unio-runtime` has unit tests for the TOML subset, scopes, narrowing, the runtime checks,
+  Landlock and seccomp on a thread, and Seatbelt in a child process.
 - `tests/tools.rs` (ignored by default, run in CI in a release build): `tools/check_docs.unio`,
   `tools/check_grammar.unio` (corpus, self-check, sources, invalid sources, parse trees) and
   `tools/check_api.unio` under `unio run` give the same output and exit code as the Python
@@ -260,5 +317,6 @@ The tests were written before the code (concept, section 1.2):
 - Methods are found by the short name of the receiver's type, so two types of one name in
   different modules would share an entry of the method table; no program of the repository has
   such types.
-- The sandbox of SB-1, the heap limit of a policy, the native runtime and code generation of S6,
-  and the other commands of requirement 6.1.
+- The sandbox of the operating system on Windows (AppContainer, Job Object), the isolated workers
+  of the tools (SB-10 to SB-13), the hostile projects of SB-15, the native runtime and code
+  generation of S6, and the other commands of requirement 6.1.

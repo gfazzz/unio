@@ -9,6 +9,7 @@ pub mod externs;
 pub mod fault;
 pub mod heap;
 pub mod runtime;
+pub mod sandbox;
 pub mod value;
 
 pub use externs::{bindings, call, ExternFn};

@@ -40,7 +40,11 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
             "timeout_seconds must be positive",
         ));
     }
-    let mut child = Command::new(program)
+    crate::sandbox::may_run(program)
+        .map_err(|reason| process_error(program, "PermissionDenied", reason))?;
+    let mut command = Command::new(program);
+    crate::sandbox::limit_child(&mut command);
+    let mut child = command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -75,7 +75,7 @@ impl Runtime {
             error: Sink::Stderr,
             frames: Vec::new(),
             stack_limit: 10_000,
-            heap_limit: None,
+            heap_limit: crate::sandbox::heap_limit(),
             descriptors: BTreeMap::new(),
             next_descriptor: 3,
             next_resource: 1,

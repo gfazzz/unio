@@ -14,7 +14,19 @@ use common::{repo_root, unio_files};
 fn unio() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
     command.current_dir(repo_root());
+    allow_weaker_on_windows(&mut command);
     command
+}
+
+/// Windows has no sandbox of the operating system yet (SB-4), so `unio run` and `unio test`
+/// refuse to start there (SB-5); the tests act as the operator and allow the weaker sandbox
+/// through a policy.
+fn allow_weaker_on_windows(command: &mut Command) {
+    if cfg!(windows) {
+        let policy = std::env::temp_dir().join(format!("unio-weaker-{}.toml", std::process::id()));
+        fs::write(&policy, "allow_weaker = true\n").unwrap();
+        command.env("UNIO_POLICY", policy);
+    }
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -96,8 +108,8 @@ fn unio_test_reports_a_failing_test_and_a_test_that_does_not_compile() {
     assert!(out.contains("the test does not compile"), "{out}");
     assert!(out.contains("1 passed, 2 failed"), "{out}");
     assert!(
-        text(&output.stderr).contains("runs without the sandbox of SB-1"),
-        "runtime 7.4: unio test warns that it runs unsandboxed"
+        !text(&output.stderr).contains("without the sandbox"),
+        "SB-1: tests run in the sandbox"
     );
     let filtered = unio().args(["test", "passes"]).arg(&file).output().unwrap();
     assert!(text(&filtered.stdout).contains("1 passed, 0 failed"));
@@ -114,6 +126,7 @@ fn run(program: &Path, args: &[&str], dir: &Path, env: &[(&str, &Path)]) -> Outp
         .arg(program)
         .arg("--")
         .args(args);
+    allow_weaker_on_windows(&mut command);
     for (name, value) in env {
         command.env(name, value);
     }
@@ -130,10 +143,7 @@ fn expect(output: &Output, code: i32, stdout: &str) {
         "stdout:\n{out}\nstderr:\n{err}"
     );
     assert_eq!(out, stdout, "stderr:\n{err}");
-    assert!(
-        err.starts_with("unio: warning: until sprint S6 the program runs without the sandbox"),
-        "{err}"
-    );
+    assert!(!err.contains("without the sandbox"), "{err}");
 }
 
 #[test]
@@ -210,7 +220,17 @@ fn reference_utilities_work_end_to_end() {
     expect(&conflict, 1, "");
     assert!(dir.join("a.txt").exists() && !dir.join("a.md").exists());
 
-    let todo = root.join("docs/examples/todo.unio");
+    // The task list keeps its tasks where TODO_FILE says; its package permits that variable
+    // and the files of the directory (SB-2).
+    let package = dir.join("todo");
+    fs::create_dir_all(&package).unwrap();
+    let todo = package.join("todo.unio");
+    fs::copy(root.join("docs/examples/todo.unio"), &todo).unwrap();
+    fs::write(
+        package.join("unio.toml"),
+        "[permissions]\nfiles.read = [\"$CWD/**\"]\nfiles.write = [\"$CWD/**\"]\nenv = [\"TODO_FILE\"]\n",
+    )
+    .unwrap();
     let store = dir.join("todo.json");
     let env = [("TODO_FILE", store.as_path())];
     expect(
