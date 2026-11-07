@@ -17,10 +17,37 @@ use common::repo_root;
 
 fn supported() -> bool {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        runtime_library();
         return true;
     }
     eprintln!("skipped: native executables are made for Linux on x86-64 only so far");
     false
+}
+
+/// `unio build` links with `libunio.a` next to the compiler. `cargo test` builds only the rlib
+/// of the crate, so the static library is built here once, with the profile of the tests.
+fn runtime_library() {
+    static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        let exe = Path::new(env!("CARGO_BIN_EXE_unio"));
+        if exe.with_file_name("libunio.a").is_file() {
+            return;
+        }
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut command = Command::new(cargo);
+        command
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["build", "-p", "unio", "--lib"]);
+        if exe.parent().and_then(|d| d.file_name()) == Some("release".as_ref()) {
+            command.arg("--release");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "building libunio.a failed:\n{}",
+            text(&output.stderr)
+        );
+    });
 }
 
 fn text(bytes: &[u8]) -> String {
