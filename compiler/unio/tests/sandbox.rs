@@ -381,6 +381,8 @@ public function main():
     let output = try process.run(\"cat\", [\"open/a.txt\"]) on ProcessError as e:
         print(\"BREACH cat does not start: {{e.reason}}\")
         return
+    if output.stdout != \"alpha\":
+        print(\"BREACH cat ended with {{output.status}}: {{output.stderr}}\")
     granted(\"process.run\", output.stdout == \"alpha\")
     child(\"a child reads a closed file\", \"cat\", [\"closed/secret.txt\"])
     child(\"a child reads through ..\", \"cat\", [\"open/../closed/secret.txt\"])

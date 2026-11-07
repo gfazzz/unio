@@ -117,14 +117,14 @@ pub fn profile(permissions: &Permissions) -> String {
     if !permissions.process.is_empty() {
         p.push_str("(allow process-fork)\n(allow signal (target same-sandbox))\n");
         p.push_str(
-            "(allow file-read* process-exec (subpath \"/usr/lib\") (subpath \"/usr/libexec\") \
+            "(allow file-read* file-map-executable process-exec (subpath \"/usr/lib\") (subpath \"/usr/libexec\") \
              (subpath \"/System\") (subpath \"/Library/Apple\") (subpath \"/private/var/db/dyld\") \
              (literal \"/private/etc/localtime\"))\n",
         );
         for program in &permissions.process {
             for path in program_paths(program) {
                 p.push_str(&format!(
-                    "(allow file-read* process-exec (literal {}))\n",
+                    "(allow file-read* file-map-executable process-exec (literal {}))\n",
                     quoted(&path)
                 ));
             }
