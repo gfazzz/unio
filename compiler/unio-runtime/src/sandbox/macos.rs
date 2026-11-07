@@ -121,7 +121,8 @@ pub fn profile(permissions: &Permissions) -> String {
              (subpath \"/System\") (subpath \"/Library/Apple\") (subpath \"/private/var/db/dyld\") \
              (subpath \"/private/preboot/Cryptexes\") (subpath \"/usr/share\") \
              (literal \"/private/etc/localtime\"))\n\
-             (allow process-info* (target self))\n",
+             (allow process-info* (target self))\n\
+             (allow file-read-data (literal \"/\"))\n",
         );
         for program in &permissions.process {
             for path in program_paths(program) {
