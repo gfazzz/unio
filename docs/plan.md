@@ -293,3 +293,23 @@ The stages of section 3 stay the acceptance criteria; this section orders the wo
 | S8 Editor, trials, release | Language server and the VS Code extension on top of the existing highlighting, the R-10 and readability trials, 24 hours of fuzzing, the guide with the chapter on classes, reproducible signed release | Acceptance of requirements section 9.2 | 6, 7 |
 
 Streams that run beside the critical path: the standard library and the reference programs grow with each sprint; documentation and its Russian localization follow every change; editor support started early, the syntax highlighting of `editors/` exists already and is tested against `spec/grammar.ebnf`.
+
+## 13. Path to the self-hosted compiler
+
+Concept section 1.1 asks for Unio to be built in Unio wherever possible, with the compiler self-hosted by 1.0. The compiler moves to Unio step by step and without hurry: a step starts only when it is ready and efficient, never by date.
+
+A step starts when all of the following hold:
+
+1. The Rust component it replaces is stable: its rules are settled in the documents and have not changed for a release.
+2. Running the Unio version is fast enough for daily use: it meets the requirement that the Rust version meets (for example T-3 for the formatter, 7.1 for `unio check`) on the interpreter or on native code.
+3. The language and the library have what the step needs without workarounds; a gap found on the way goes to the language as an RFC first.
+
+A step ends when the Unio version gives the same results as the Rust version on every source of the repository, checked by a parity test in CI, and is then the one CI uses. The Rust version stays as the reference, as the Python checkers do (section 1).
+
+| Step | Moves to Unio | Expected readiness |
+|---|---|---|
+| 1 | `unio fmt` and `unio outline` | After the performance work on the interpreter |
+| 2 | Lexer, parser, and diagnostics catalog | After native code (S6) |
+| 3 | Name and type checking | Release 0.3–0.4 |
+| 4 | Code generation and the runtime | With the `system` profile of release 0.5 |
+| 5 | The compiler builds itself; the Rust compiler remains as stage 0 for bootstrapping and for checking that two independent builds agree | 1.0 |
