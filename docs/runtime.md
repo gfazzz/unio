@@ -25,7 +25,7 @@ A program that reaches the runtime has passed `unio check`: names resolve, types
 
 1. Because values never share mutable state and closures capture copies, a value can never reach itself: there are no reference cycles. The interpreter of S5 therefore manages memory by reference counting, which frees each value when its last name goes away and also tells the copy-on-write rule when a value is unshared.
 2. Requirement C-13 asks for a precise, tracing, non-moving collector. Reference counting is precise and non-moving, has no collection pauses at all, and needs no tracing because cycles cannot occur. Whether the native runtime of S6 keeps reference counting or adds tracing is decided by the measurements of section 7.1 of the requirements; replacing C-13 needs an RFC.
-3. The runtime counts the memory it holds. When it exceeds the heap limit of the policy (SB-3) or the memory the system grants, the program ends with code 102 (C-18). Recursion deeper than the stack limit also ends with code 102.
+3. The runtime counts the memory it holds. When it exceeds the heap limit of the policy (`limits.heap_bytes`, SB-3a) or the memory the system grants, the program ends with code 102 (C-18). Recursion deeper than the stack limit also ends with code 102.
 
 ## 4. Errors and faults
 
@@ -61,7 +61,7 @@ A program that reaches the runtime has passed `unio check`: names resolve, types
 | Files and the atomic commit protocol | 19 functions of `std.files` | std |
 | Processes | `std.process.run` | std |
 
-4. Until the sandbox of sprint S6 exists, `unio run` and `unio test` run programs without the restrictions of SB-1 and say so in a warning on standard error. This is the only stage in which a Unio program runs unsandboxed, and it is used for the project's own tests in CI.
+4. `unio run` and `unio test` start every program inside the sandbox of requirements section 4.6: the permissions of the nearest `unio.toml`, narrowed by the policy, are applied before `main` or before the first test. Section 9 says how this works and where its limits are.
 5. Behavior fixed while implementing the externals, where the declarations were silent:
    - `Float.to_text` writes decimal notation for exponents from −6 to 20 and scientific notation otherwise (`1e+300`), always with a fraction for whole numbers (`2.0`), and `nan`, `inf`, `-inf` for non-finite values; `Text.to_float` does not read the last three back.
    - `Text.index_of` with a `start` outside `0..length()` is a fault, like `slice`. `Int ** n` with a negative `n` is a fault.
@@ -72,5 +72,24 @@ A program that reaches the runtime has passed `unio check`: names resolve, types
 ## 8. The interpreter of sprint S5
 
 1. The interpreter of S5 walks the checked syntax tree with the tables of the checker. The intermediate representation with resolved names, slots for local values, explicit error edges after every call that can fail, explicit release points of `using`, and the source position of every operation that can fault is built in S6, where code generation needs it and where it also makes the interpreter faster.
-2. The interpreter is the reference for the meaning of programs. It is the reference for the meaning of programs: the native code of S6 must give the same output, exit code, and diagnostics for every test of the repository.
+2. The interpreter is the reference for the meaning of programs: the native code of S6 must give the same output, exit code, and diagnostics for every test of the repository.
 3. Exit criterion of S5: every `test` block of `stdlib/`, `examples/`, `docs/examples/`, and `tools/` runs and passes; the tools in `tools/` run in the interpreter and give the same results as the Python checkers, which CI then stops using and the repository deletes (plan section 12).
+
+## 9. The sandbox in practice
+
+This section is the documentation of the limits of the sandbox that SB-9 requires.
+
+1. **Where permissions come from.** `unio run` and `unio test` read `[permissions]` from the nearest `unio.toml` above the program (T-6) and narrow it by the policy (SB-3a). Without a manifest, a program can read its arguments and standard input and write to standard output and standard error, nothing else (SB-2). Tests get the same permissions as the program; a test that needs files declares them, for example `files.write = ["$TEMP/**"]`.
+2. **Paths.** Relative entries are relative to the directory of the manifest or the policy. Links and `..` are resolved before a path is compared. Writing one file also permits the temporary files of its atomic commit next to it and syncing its directory. A program name without a path matches only a call by that name, never a path that ends in it.
+3. **Blocked operations** are the errors the functions declare, of kind `PermissionDenied`, naming the missing permission; `exists` and `is_directory` report `false`, and `env.get` reports `none` (SB-6).
+4. **Platforms.**
+   - Linux: the runtime checks every operation, and the operating system enforces the same scopes with `no_new_privs`, Landlock (files, TCP, signals), and seccomp (sockets, `ptrace`, mounts, namespaces, `io_uring`, `bpf`, and other dangerous calls); core dumps are disabled. Without Landlock ABI 3 or seccomp the start fails with code 103 unless the operator allows a weaker sandbox.
+   - macOS: a deny-by-default Seatbelt profile built from the scopes; it is checked in CI on macOS.
+   - Windows: AppContainer and Job Objects are not implemented yet. A program does not start (code 103) unless the operator passes `--allow-weaker-sandbox`; then only the checks of the runtime and the time and heap limits apply. SB-8 is not met on Windows until this is done.
+5. **Limits.** Wall and CPU time are enforced by a watchdog that ends the program with code 102; the CPU limit also applies to children. The process limit counts calls of `process.run`. The file-size limit is checked by the runtime and, on Linux and macOS, by the operating system.
+6. **What the sandbox does not do** (SB-9).
+   - It does not protect against vulnerabilities of the kernel, against side channels, or against misuse of what was granted: a program allowed to write `$HOME/**` can destroy those files.
+   - On Linux the operating-system rules are coarser than the checks of the runtime. Permission to write one file opens the directory of that file to writes at the operating-system level, because the atomic commit needs it; a scope whose directory does not exist at start grants nothing at that level; and any `process` permission lets children read and execute the system directories.
+   - On Linux the rules apply to the threads that run the program and to its children; the idle main thread of `unio run` is not restricted.
+   - For code written by AI, use a minimal manifest, a policy with limits, and a separate user, container, or virtual machine for untrusted code.
+

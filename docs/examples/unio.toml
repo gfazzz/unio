@@ -1,0 +1,12 @@
+# The todo example keeps its tasks in ~/.todo.json, so it may read and write that one file and
+# read the two variables that locate it (SB-2, T-6). A TODO_FILE elsewhere needs its path here.
+
+[package]
+name = "todo"
+version = "0.1.0"
+
+[permissions]
+files.read = ["$HOME/.todo.json"]
+files.write = ["$HOME/.todo.json"]
+env = ["TODO_FILE", "HOME"]
+network = false
