@@ -5,3 +5,6 @@ resolver = "2"
 [profile.release]
 codegen-units = 1
 incremental = false
+# The interpreter calls the runtime crate on every operation; inlining across the crates
+# makes it measurably faster (bench/README.md).
+lto = "fat"

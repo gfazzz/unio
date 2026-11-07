@@ -141,7 +141,7 @@ mod tests {
 
     fn fault_of(outcome: Outcome) -> Fault {
         match outcome {
-            Err(Unwind::Fault(f)) => f,
+            Err(Unwind::Fault(f)) => *f,
             other => panic!("expected a fault, got {other:?}"),
         }
     }

@@ -1,0 +1,9 @@
+# The Unio programs of the benchmarks (bench/README.md). They read only their input, which the
+# runner generates into bench/data/ and passes by a path below the directory they start in.
+
+[package]
+name = "unio-bench"
+version = "0.1.0"
+
+[permissions]
+files.read = ["$CWD/**"]

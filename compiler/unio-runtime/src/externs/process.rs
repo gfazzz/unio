@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 pub const BINDINGS: &[(&str, ExternFn)] = &[("std.process.run", run)];
 
 fn process_error(program: &str, kind: &str, reason: impl Into<String>) -> Unwind {
-    Unwind::Error(Value::record(
+    Unwind::Error(Box::new(Value::record(
         "ProcessError",
         vec![
             ("program", Value::text(program)),
             ("kind", Value::variant("ProcessErrorKind", kind, vec![])),
             ("reason", Value::text(reason.into())),
         ],
-    ))
+    )))
 }
 
 /// Runs the program with the arguments and waits at most timeout_seconds, which must be

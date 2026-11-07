@@ -1,0 +1,11 @@
+## Benchmark (a): lines, words, and UTF-8 bytes of a large text.
+import std.args
+import std.files
+
+public function main() returns Int:
+    let name = args.list().first() or ""
+    let text = try files.read_text(Path(name)) on IoError as e:
+        print_error(e.reason)
+        return 1
+    print("{text.count("\n")} {text.split_whitespace().length()} {text.byte_length()}")
+    return 0

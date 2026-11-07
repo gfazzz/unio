@@ -88,6 +88,8 @@ external function from_value[T](value as Value) returns T fails with DecodeError
 # ---------------------------------------------------------------- reading
 
 struct Reader:
+    ## The text being read and its characters: positions index both.
+    text as Text
     characters as List[Text]
     var position as Int = 0
     var line as Int = 1
@@ -104,7 +106,7 @@ public function parse(
 ) returns Value fails with ParseError:
     if max_depth <= 0 or max_bytes <= 0 or text.byte_length() > max_bytes:
         fail ParseError(line = 1, column = 1, message = "invalid or exceeded JSON size limit")
-    var reader = Reader(characters = text.chars(), max_depth = max_depth)
+    var reader = Reader(text = text, characters = text.chars(), max_depth = max_depth)
     let value = try read_value(reader)
     skip_space(reader)
     if not at_end(reader): fail error_at(reader, "unexpected text after the value")
@@ -204,13 +206,20 @@ function read_text(var reader as Reader) returns Text fails with ParseError:
     advance(reader)
     var result = ""
     while true:
+        # A run of characters that need no escape, which stays on one line, is copied at once.
+        let start = reader.position
+        while reader.position < reader.characters.length():
+            let character = reader.characters[reader.position]
+            if character == "\"" or character == "\\" or character < " ": break
+            reader.position = reader.position + 1
+        if reader.position > start:
+            reader.column = reader.column + reader.position - start
+            result = result + reader.text.slice(start, reader.position)
         if at_end(reader): fail error_at(reader, "unterminated text")
         let character = advance(reader)
         if character == "\"": return result
         if character == "\\": result = result + try read_escape(reader)
-        else if character.code_points()[0] < 0x20:
-            fail error_at(reader, "a control character must be escaped in text")
-        else: result = result + character
+        else: fail error_at(reader, "a control character must be escaped in text")
 
 function read_escape(var reader as Reader) returns Text fails with ParseError:
     let character = advance(reader)
@@ -324,9 +333,15 @@ function wrap(
 
 function quote(text as Text) returns Text:
     var result = "\""
+    var start = 0
+    var index = 0
     for character in text.chars():
-        result = result + escape(character)
-    return result + "\""
+        # Runs of characters that need no escape are copied at once.
+        if character == "\"" or character == "\\" or character < " ":
+            result = result + text.slice(start, index) + escape(character)
+            start = index + 1
+        index = index + 1
+    return result + text.slice(start, text.length()) + "\""
 
 function escape(character as Text) returns Text:
     match character:
@@ -336,8 +351,9 @@ function escape(character as Text) returns Text:
         case "\r": return "\\r"
         case "\t": return "\\t"
         case _:
-            let code = character.code_points()[0]
-            if code < 0x20: return "\\u" + hex4(code)
+            # Texts compare by code point, so a character before " " is a control character.
+            if character < " ":
+                return "\\u" + hex4(character.code_points()[0])
             return character
 
 function hex4(code as Int) returns Text:

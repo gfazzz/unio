@@ -52,7 +52,13 @@ pub struct Runtime {
     pub args: Vec<String>,
     output: Sink,
     error: Sink,
-    frames: Vec<Frame>,
+    /// The function and file of each place a call can be in, named once (see [`Runtime::site`]).
+    sites: Vec<(Rc<str>, Rc<str>)>,
+    /// The call stack: a site and the current line of each call. Names are looked up only
+    /// when a fault needs a trace, so that a call costs two integers.
+    frames: Vec<(u32, u32)>,
+    /// The first site of the table installed by [`Runtime::site_base`].
+    base: Option<u32>,
     /// The deepest call stack allowed before code 102 (C-18).
     pub stack_limit: usize,
     /// The heap limit of the policy in bytes (SB-3); `None` leaves the system to decide.
@@ -73,7 +79,9 @@ impl Runtime {
             args,
             output: Sink::Stdout,
             error: Sink::Stderr,
+            sites: Vec::new(),
             frames: Vec::new(),
+            base: None,
             stack_limit: 10_000,
             heap_limit: crate::sandbox::heap_limit(),
             descriptors: BTreeMap::new(),
@@ -112,34 +120,75 @@ impl Runtime {
         file: impl Into<std::rc::Rc<str>>,
         line: u32,
     ) -> Result<(), Unwind> {
+        let site = self.site(function.into(), file.into());
+        self.enter_site(site, line)
+    }
+
+    /// Names a function and its file for [`Runtime::enter_site`].
+    pub fn site(&mut self, function: Rc<str>, file: Rc<str>) -> u32 {
+        self.sites.push((function, file));
+        (self.sites.len() - 1) as u32
+    }
+
+    /// The first site of a table of sites that the caller makes once per runtime, such as
+    /// one site per function of a program; the table is made by `make` on the first call.
+    #[inline]
+    pub fn site_base(&mut self, make: impl FnOnce() -> Vec<(Rc<str>, Rc<str>)>) -> u32 {
+        match self.base {
+            Some(base) => base,
+            None => {
+                let base = self.sites.len() as u32;
+                self.sites.extend(make());
+                self.base = Some(base);
+                base
+            }
+        }
+    }
+
+    /// Enters a call of a site made by [`Runtime::site`].
+    #[inline]
+    pub fn enter_site(&mut self, site: u32, line: u32) -> Result<(), Unwind> {
         if self.frames.len() >= self.stack_limit {
             return Err(Unwind::Exhausted(Exhaustion::Stack));
         }
-        self.frames.push(Frame {
-            function: function.into(),
-            file: file.into(),
-            line,
-        });
+        self.frames.push((site, line));
         Ok(())
     }
 
     /// Leaves the innermost call.
+    #[inline]
     pub fn leave(&mut self) {
         self.frames.pop();
     }
 
     /// Moves the line of the innermost call, so that a trace names the current line.
+    #[inline]
     pub fn at_line(&mut self, line: u32) {
         if let Some(frame) = self.frames.last_mut() {
-            frame.line = line;
+            frame.1 = line;
         }
+    }
+
+    /// The current call stack with names, outermost first.
+    pub fn trace(&self) -> Vec<Frame> {
+        self.frames
+            .iter()
+            .map(|&(site, line)| {
+                let (function, file) = &self.sites[site as usize];
+                Frame {
+                    function: Rc::clone(function),
+                    file: Rc::clone(file),
+                    line,
+                }
+            })
+            .collect()
     }
 
     /// A fault with the current trace.
     pub fn fault(&self, kind: FaultKind, message: impl Into<String>) -> Unwind {
         let mut fault = Fault::new(kind, message);
-        fault.trace = self.frames.clone();
-        Unwind::Fault(fault)
+        fault.trace = self.trace();
+        Unwind::Fault(Box::new(fault))
     }
 
     // ---------------------------------------------------------------- memory

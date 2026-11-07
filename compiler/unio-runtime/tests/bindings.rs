@@ -89,7 +89,7 @@ fn bindings_and_declarations_agree() {
     assert!(extra.is_empty(), "bound but not declared: {extra:?}");
     assert_eq!(
         declared.len(),
-        70,
-        "docs/runtime.md, section 7.1, counts 70 externals"
+        83,
+        "docs/runtime.md, section 7.1, counts 83 externals"
     );
 }

@@ -1,17 +1,23 @@
-//! The interpreter of sprint S5 (docs/runtime.md). It evaluates a checked program directly on
-//! its syntax tree, using the resolved declarations of the checker (`Program`) for names,
-//! methods, constants, and defaults, and the value model, faults, and external functions of
-//! `unio-runtime`. Evaluation is strict and left to right (section 1).
+//! The interpreter of sprint S5 (docs/runtime.md). It runs a checked program in the lowered
+//! form of [`crate::lower`]: local names are slots of a frame, calls know their function and
+//! the parameter of each argument, and literals are values. It uses the resolved declarations of
+//! the checker (`Program`) for methods, constants, and defaults, and the value model, faults,
+//! and external functions of `unio-runtime`. Evaluation is strict and left to right (section 1).
 //!
-//! The "IR" of runtime.md 8.1 is, in this first interpreter, the checked tree together with the
-//! tables built in [`Interp::new`]: methods by type and name, signatures and declarations by
-//! position, variants by name. Lowering to a separate representation is left to the native
-//! code generator of S6, which needs it anyway.
+//! The frequent paths are kept short (bench/README.md): calls put their slots on one stack of
+//! values shared with the caller, method and field lookups remember what they found at each
+//! place in the code, integer expressions of locals and literals are computed without building
+//! values, and a few small prelude functions run natively ([`Intrinsic`]) with the results of
+//! their Unio definitions.
 
 use crate::ast::*;
+use crate::lower::{
+    Block, CallCode, Code, ConstructCode, ExprCode, LambdaCode, ListPat, Lowering, MethodArg,
+    MethodCode, NameFallback, Node, Op, PStep, ParamCode, Part, Pat, Place, Slot, S,
+};
 use crate::program::{DefKind, Owner, Program, Symbol};
 use crate::types::Ty;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use unio_runtime::fault::{self as rf, Fault, FaultKind, Outcome, Unwind};
@@ -44,23 +50,106 @@ pub enum RtTy {
 
 type Types = Rc<HashMap<String, RtTy>>;
 
-#[derive(Clone)]
+/// A hasher for the interpreter's own tables, keyed by small integers, addresses in the tree,
+/// and names (the multiplicative hash of rustc, FxHash). Values of programs are hashed by
+/// `unio-runtime`, whose hash does not depend on the run.
+#[derive(Default, Clone, Copy)]
+struct Fx(u64);
+
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(u64::from(i));
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(u64::from(i));
+    }
+}
+
+type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+
+/// The frame of a running function: its slots, its module, and its type arguments.
 pub struct Env {
-    vars: Vec<(Rc<str>, Value)>,
+    vars: Slots,
     module: ModId,
     types: Types,
 }
 
-impl Env {
-    fn find(&self, name: &str) -> Option<usize> {
-        self.vars.iter().rposition(|(n, _)| &**n == name)
+/// The slots of the running function: a window from `base` into a stack of values that the
+/// calls made from it share, so that a call pushes its slots and truncates them afterwards
+/// instead of allocating a frame.
+pub(crate) struct Slots {
+    stack: Vec<Value>,
+    base: usize,
+}
+
+impl Slots {
+    fn new(values: Vec<Value>) -> Slots {
+        Slots {
+            stack: values,
+            base: 0,
+        }
     }
-    fn get(&self, name: &str) -> Option<&Value> {
-        self.find(name).map(|i| &self.vars[i].1)
+}
+
+impl std::ops::Index<usize> for Slots {
+    type Output = Value;
+    #[inline]
+    fn index(&self, slot: usize) -> &Value {
+        &self.stack[self.base + slot]
     }
-    fn bind(&mut self, name: &str, value: Value) {
-        self.vars.push((Rc::from(name), value));
+}
+
+impl std::ops::IndexMut<usize> for Slots {
+    #[inline]
+    fn index_mut(&mut self, slot: usize) -> &mut Value {
+        &mut self.stack[self.base + slot]
     }
+}
+
+impl std::ops::Index<std::ops::Range<usize>> for Slots {
+    type Output = [Value];
+    fn index(&self, slots: std::ops::Range<usize>) -> &[Value] {
+        &self.stack[self.base + slots.start..self.base + slots.end]
+    }
+}
+
+impl std::ops::IndexMut<std::ops::Range<usize>> for Slots {
+    fn index_mut(&mut self, slots: std::ops::Range<usize>) -> &mut [Value] {
+        &mut self.stack[self.base + slots.start..self.base + slots.end]
+    }
+}
+
+/// What a name written as a callee or a value means outside the local names.
+#[derive(Clone, Copy)]
+pub(crate) enum Global {
+    Func(FnId),
+    Def(DefId),
+    Const(usize),
+    /// A variant written by its short name.
+    Variant(DefId),
+    Unknown,
+}
+
+/// The names of one variant of an enum, shared by all its values.
+struct Shape {
+    variant: Rc<str>,
+    fields: Vec<Rc<str>>,
 }
 
 enum Flow {
@@ -72,8 +161,8 @@ enum Flow {
 
 type Exec = Result<Flow, Unwind>;
 
-/// Arguments in parameter order, and the places that `var` arguments are written back to.
-type BoundArgs = (Vec<Value>, Vec<(usize, Expr)>);
+/// The frame of a method call and the places that its `var` arguments go back to.
+type MethodFrame<'c> = (Vec<Value>, Vec<(usize, &'c Place)>);
 
 #[derive(Clone)]
 enum Step {
@@ -100,22 +189,51 @@ fn traced(rt: &Runtime, fault: Fault) -> Unwind {
 pub struct Interp {
     me: Weak<Interp>,
     pub program: Program,
-    methods: HashMap<String, HashMap<String, FnId>>,
+    methods: FxMap<String, FxMap<String, FnId>>,
     /// Trace label `module.function` of each function.
     labels: Vec<Rc<str>>,
     /// Binding-table name of each function, used for externals.
     external_names: Vec<String>,
-    signatures: HashMap<(ModId, usize), (usize, Option<usize>)>,
-    decls: HashMap<(ModId, String), usize>,
-    variants: HashMap<String, Vec<DefId>>,
-    consts: RefCell<HashMap<usize, Value>>,
-    lambdas: RefCell<HashMap<usize, Rc<Expr>>>,
+    variants: FxMap<String, Vec<DefId>>,
+    /// The value of each top-level constant, evaluated at its first use.
+    consts: Vec<std::cell::OnceCell<Value>>,
     files: Vec<Rc<str>>,
+    /// The declaration of each function: its item and member (`signatures` by function).
+    sig_of: Vec<Option<(usize, Option<usize>)>>,
+    /// The bound external of each function without a body.
+    externs: Vec<Option<unio_runtime::externs::ExternFn>>,
+    /// The item of each struct or error declaration.
+    decl_of: Vec<Option<usize>>,
+    /// The type name of each declaration, shared by its values.
+    def_names: Vec<Rc<str>>,
+    /// The variants of each enum.
+    shapes: Vec<Vec<Shape>>,
+    /// The field names of each struct or error.
+    field_names: Vec<Vec<Rc<str>>>,
+    empty_types: Types,
+    /// Names shared by the values and the lowered code that use them.
+    names: RefCell<FxMap<String, Rc<str>>>,
+    /// The lowered body of each function, made at its first call.
+    codes: Vec<std::cell::OnceCell<Rc<Code>>>,
+    /// Storage of frames that ended, for the next calls.
+    pool: RefCell<Vec<Vec<Value>>>,
+    /// Library functions of the prelude that the interpreter runs natively, with the same
+    /// result as their Unio definitions (see [`Intrinsic`]).
+    intrinsics: Vec<Option<Intrinsic>>,
+    /// Whether a function has a `var` parameter other than `self`.
+    var_params: Vec<bool>,
+    /// 1 for the JSON conversions that the interpreter provides, 0 for other functions.
+    externs_json: Vec<u8>,
+    /// Lowered constants (by `(usize::MAX, constant)`) and defaults of externals (by function
+    /// and parameter).
+    default_codes: RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
+    /// Lowered defaults of fields, by declaration and field.
+    field_codes: RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
 }
 
 impl Interp {
     pub fn new(program: Program) -> Rc<Interp> {
-        let mut methods = HashMap::new();
+        let mut methods: FxMap<String, FxMap<String, FnId>> = FxMap::default();
         for imp in &program.impls {
             let Some(key) = ty_key(&program, &imp.target) else {
                 continue;
@@ -123,7 +241,7 @@ impl Interp {
             for &f in &imp.methods {
                 methods
                     .entry(key.clone())
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .insert(program.funcs[f].name.clone(), f);
             }
         }
@@ -137,7 +255,7 @@ impl Interp {
                         if program.funcs[f].body.is_some() {
                             methods
                                 .entry(key.clone())
-                                .or_insert_with(HashMap::new)
+                                .or_default()
                                 .entry(program.funcs[f].name.clone())
                                 .or_insert(f);
                         }
@@ -145,8 +263,8 @@ impl Interp {
                 }
             }
         }
-        let mut signatures = HashMap::new();
-        let mut decls = HashMap::new();
+        let mut signatures = FxMap::default();
+        let mut decls = FxMap::default();
         for (m, module) in program.modules.iter().enumerate() {
             for (i, item) in module.analysis.file.items.iter().enumerate() {
                 match item {
@@ -180,7 +298,7 @@ impl Interp {
                 }
             }
         }
-        let mut variants: HashMap<String, Vec<DefId>> = HashMap::new();
+        let mut variants: FxMap<String, Vec<DefId>> = FxMap::default();
         for (d, def) in program.defs.iter().enumerate() {
             if let DefKind::Enum(vs) = &def.kind {
                 for v in vs {
@@ -193,36 +311,190 @@ impl Interp {
             .iter()
             .map(|m| Rc::from(m.path.display().to_string()))
             .collect();
-        let labels = program
+        let labels: Vec<Rc<str>> = program
             .funcs
             .iter()
             .map(|f| Rc::from(format!("{}.{}", program.modules[f.module].name, f.name)))
             .collect();
-        let external_names = (0..program.funcs.len())
+        let external_names: Vec<String> = (0..program.funcs.len())
             .map(|f| Interp::external_name(&program, f))
             .collect();
+        let sig_of = program
+            .funcs
+            .iter()
+            .map(|def| {
+                signatures
+                    .get(&(def.module, def.span.start.offset))
+                    .copied()
+            })
+            .collect();
+        let externs = program
+            .funcs
+            .iter()
+            .zip(&external_names)
+            .map(|(def, name)| match def.body {
+                Some(_) => None,
+                None => unio_runtime::externs::lookup(name),
+            })
+            .collect();
+        let decl_of = program
+            .defs
+            .iter()
+            .map(|def| decls.get(&(def.module, def.name.clone())).copied())
+            .collect();
+        let mut names: FxMap<String, Rc<str>> = FxMap::default();
+        let mut shared = |name: &str| -> Rc<str> {
+            if let Some(n) = names.get(name) {
+                return Rc::clone(n);
+            }
+            let n = unio_runtime::value::names::get(name).unwrap_or_else(|| Rc::from(name));
+            names.insert(name.to_string(), Rc::clone(&n));
+            n
+        };
+        let def_names: Vec<Rc<str>> = program.defs.iter().map(|def| shared(&def.name)).collect();
+        let shapes: Vec<Vec<Shape>> = program
+            .defs
+            .iter()
+            .map(|def| match &def.kind {
+                DefKind::Enum(vs) => vs
+                    .iter()
+                    .map(|v| Shape {
+                        variant: shared(&v.name),
+                        fields: v.fields.iter().map(|(n, _)| shared(n)).collect(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let field_names: Vec<Vec<Rc<str>>> = program
+            .defs
+            .iter()
+            .map(|def| match &def.kind {
+                DefKind::Struct(fs) | DefKind::Error(fs) => {
+                    fs.iter().map(|f| shared(&f.name)).collect()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        for name in program
+            .defs
+            .iter()
+            .flat_map(|def| match &def.kind {
+                DefKind::Enum(vs) => vs
+                    .iter()
+                    .flat_map(|v| std::iter::once(&v.name).chain(v.fields.iter().map(|(n, _)| n)))
+                    .collect::<Vec<_>>(),
+                DefKind::Struct(fs) | DefKind::Error(fs) => fs.iter().map(|f| &f.name).collect(),
+                _ => Vec::new(),
+            })
+            .chain(program.defs.iter().map(|def| &def.name))
+        {
+            shared(name);
+        }
+        let codes = program
+            .funcs
+            .iter()
+            .map(|_| std::cell::OnceCell::new())
+            .collect();
+        let range_def = program.defs.iter().position(|d| {
+            d.name == "Range" && program.modules[d.module].name == "prelude:core/prelude"
+        });
+        let intrinsics = labels
+            .iter()
+            .map(|label: &Rc<str>| Intrinsic::of(label, range_def))
+            .collect();
+        let var_params = program
+            .funcs
+            .iter()
+            .map(|f| f.params.iter().any(|p| p.var))
+            .collect();
+        let consts = program
+            .consts
+            .iter()
+            .map(|_| std::cell::OnceCell::new())
+            .collect();
         Rc::new_cyclic(|me| Interp {
+            var_params,
+            intrinsics,
+            sig_of,
+            externs,
+            decl_of,
+            def_names,
+            shapes,
+            field_names,
+            empty_types: Rc::new(HashMap::new()),
+            names: RefCell::new(names),
+            codes,
+            pool: RefCell::new(Vec::new()),
+            externs_json: external_names
+                .iter()
+                .map(|n| u8::from(n == "std.json.to_value" || n == "std.json.from_value"))
+                .collect(),
+            default_codes: RefCell::new(FxMap::default()),
+            field_codes: RefCell::new(FxMap::default()),
             labels,
             external_names,
             me: me.clone(),
             program,
             methods,
-            signatures,
-            decls,
             variants,
-            consts: RefCell::new(HashMap::new()),
-            lambdas: RefCell::new(HashMap::new()),
+            consts,
             files,
         })
+    }
+
+    /// The function and file of every function, for the call stack of a runtime.
+    fn sites(&self) -> Vec<(Rc<str>, Rc<str>)> {
+        self.program
+            .funcs
+            .iter()
+            .enumerate()
+            .map(|(f, def)| {
+                (
+                    Rc::clone(&self.labels[f]),
+                    Rc::clone(&self.files[def.module]),
+                )
+            })
+            .collect()
     }
 
     fn rc(&self) -> Rc<Interp> {
         self.me.upgrade().expect("the interpreter is alive")
     }
 
-    fn signature(&self, f: FnId) -> Option<(&Signature, Option<&Block>)> {
+    /// The shared name for a text: values and lowered code use one allocation per name.
+    pub(crate) fn shared(&self, name: &str) -> Rc<str> {
+        if let Some(n) = self.names.borrow().get(name) {
+            return Rc::clone(n);
+        }
+        let n: Rc<str> = Rc::from(name);
+        self.names
+            .borrow_mut()
+            .insert(name.to_string(), Rc::clone(&n));
+        n
+    }
+
+    /// What a name means outside the local names of a module (a callee or a name used as a
+    /// value): a variant of the module first, which hides a prelude name, then a declaration,
+    /// then a variant of any visible enum.
+    pub(crate) fn global(&self, module: ModId, name: &str) -> Global {
+        if let Some(d) = self.local_variant(module, name) {
+            return Global::Variant(d);
+        }
+        match self.program.lookup(module, name) {
+            Some((_, Symbol::Func(f))) => Global::Func(f),
+            Some((_, Symbol::Def(d))) => Global::Def(d),
+            Some((_, Symbol::Const(c))) => Global::Const(c),
+            None => match self.variant(module, name) {
+                Some(d) => Global::Variant(d),
+                None => Global::Unknown,
+            },
+        }
+    }
+
+    fn signature(&self, f: FnId) -> Option<(&Signature, Option<&crate::ast::Block>)> {
         let def = &self.program.funcs[f];
-        let &(item, member) = self.signatures.get(&(def.module, def.span.start.offset))?;
+        let (item, member) = self.sig_of[f]?;
         let items = &self.program.modules[def.module].analysis.file.items;
         match (&items[item], member) {
             (Item::Declaration(d), None) => match &d.kind {
@@ -247,7 +519,7 @@ impl Interp {
 
     fn fields_of(&self, d: DefId) -> Option<&Vec<Field>> {
         let def = &self.program.defs[d];
-        let &i = self.decls.get(&(def.module, def.name.clone()))?;
+        let i = self.decl_of[d]?;
         match &self.program.modules[def.module].analysis.file.items[i] {
             Item::Declaration(decl) => match &decl.kind {
                 DeclarationKind::Struct(s) => s.fields.as_ref(),
@@ -258,15 +530,7 @@ impl Interp {
         }
     }
 
-    fn env(&self, module: ModId) -> Env {
-        Env {
-            vars: Vec::new(),
-            module,
-            types: Rc::new(HashMap::new()),
-        }
-    }
-
-    fn source_text(&self, module: ModId, span: crate::diag::Span) -> String {
+    pub(crate) fn source_text(&self, module: ModId, span: crate::diag::Span) -> String {
         let source = &self.program.modules[module].analysis.source;
         source
             .get(span.start.offset..span.end.offset)
@@ -274,10 +538,20 @@ impl Interp {
             .to_string()
     }
 
-    // ---------------------------------------------------------------- calls
+    // ---------------------------------------------------------------- methods
 
-    fn method(&self, key: &str, name: &str) -> Option<FnId> {
+    pub(crate) fn method(&self, key: &str, name: &str) -> Option<FnId> {
         self.methods.get(key)?.get(name).copied()
+    }
+
+    /// The method `name` of the type of a value, found without building the name of the type.
+    fn method_of(&self, value: &Value, name: &str) -> Option<FnId> {
+        match value {
+            Value::Struct(s) => self.method(&s.type_name, name),
+            Value::Enum(e) => self.method(&e.type_name, name),
+            Value::Resource(cell) => self.method_of(&cell.value.borrow(), name),
+            other => self.method(static_key(other), name),
+        }
     }
 
     /// External name of a function without a body (unio-runtime README, binding table).
@@ -299,62 +573,18 @@ impl Interp {
         }
     }
 
-    /// Calls a function with its arguments in parameter order (`self` first); `var`
-    /// parameters are written back into `args`.
-    pub fn call_fn(&self, rt: &mut Runtime, f: FnId, args: &mut [Value], types: Types) -> Outcome {
-        let def = &self.program.funcs[f];
-        let Some((sig, body)) = self.signature(f) else {
-            return Err(internal(rt, format!("no declaration for {}", def.name)));
-        };
-        let Some(body) = body else {
-            let name = self.external_names[f].as_str();
-            // Defaults of externals are evaluated here, in the declaring module.
-            let mut env = self.env(def.module);
-            let offset = usize::from(def.self_param.is_some());
-            for (i, param) in sig
-                .params
-                .iter()
-                .filter(|p| !matches!(p, Param::SelfParam { .. }))
-                .enumerate()
-            {
-                let default = match param {
-                    Param::Named { default, .. } | Param::Plain { default, .. } => default.as_ref(),
-                    Param::SelfParam { .. } => None,
-                };
-                if let (Some(slot), Some(e)) = (args.get(offset + i), default) {
-                    if matches!(slot, Value::Unit) {
-                        let v = self.eval(rt, &mut env, e)?;
-                        args[offset + i] = v;
-                    }
-                }
-            }
-            return match name {
-                "std.json.to_value" => {
-                    let v = args.first().cloned().unwrap_or(Value::Unit);
-                    self.encode_json(rt, &v)
-                }
-                "std.json.from_value" => {
-                    let ty = types.values().next().cloned().unwrap_or(RtTy::Unknown);
-                    let v = args.first().cloned().unwrap_or(Value::Unit);
-                    self.decode_json(rt, &ty, &v, "")
-                }
-                _ => unio_runtime::externs::call(rt, name, args),
-            };
-        };
-        let module = def.module;
-        let line = def.span.start.line as u32;
-        rt.enter(
-            Rc::clone(&self.labels[f]),
-            Rc::clone(&self.files[module]),
-            line,
-        )?;
-        let mut env = Env {
-            vars: Vec::new(),
-            module,
-            types: types.clone(),
-        };
-        let mut var_slots: Vec<(usize, usize)> = Vec::new();
-        for (index, param) in sig.params.iter().enumerate() {
+    // ---------------------------------------------------------------- lowered code
+
+    /// The lowered body of a function, made the first time it is called.
+    fn code(&self, f: FnId) -> Option<&Code> {
+        if let Some(code) = self.codes[f].get() {
+            return Some(code);
+        }
+        let (sig, body) = self.signature(f)?;
+        let body = body?;
+        let mut lower = Lowering::new(self, self.program.funcs[f].module);
+        let mut params = Vec::with_capacity(sig.params.len());
+        for param in &sig.params {
             let (name, var, default) = match param {
                 Param::SelfParam { var, .. } => ("self", *var, None),
                 Param::Named { name, default, .. } => (name.text.as_str(), false, default.as_ref()),
@@ -362,39 +592,253 @@ impl Interp {
                     var, name, default, ..
                 } => (name.text.as_str(), *var, default.as_ref()),
             };
-            let provided = args.get_mut(index).map(take);
-            let value = match provided {
-                Some(Value::Unit) | None => match default {
-                    Some(expr) => match self.eval(rt, &mut env, expr) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            rt.leave();
-                            return Err(e);
-                        }
-                    },
-                    None => Value::Unit,
-                },
-                Some(v) => v,
-            };
-            if var {
-                var_slots.push((index, env.vars.len()));
-            }
-            env.bind(name, value);
+            // A default sees the parameters before it (runtime 1.3).
+            let default = default.map(|e| lower.expr(e));
+            lower.bind(name);
+            params.push(ParamCode { var, default });
         }
-        let result = self.exec_block(rt, &mut env, body);
-        for (arg, slot) in var_slots {
-            if arg < args.len() {
-                args[arg] = take(&mut env.vars[slot].1);
+        let body = lower.block(body);
+        let _ = self.codes[f].set(Rc::new(Code {
+            slots: lower.slots(),
+            defaults: params.iter().any(|p| p.default.is_some()),
+            params,
+            body,
+        }));
+        self.codes[f].get().map(|c| &**c)
+    }
+
+    /// A lowered expression evaluated alone in the module: a constant or a default of an
+    /// external or of a field, kept by `key` in `cache`.
+    fn expr_code(
+        &self,
+        cache: &RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
+        key: (usize, usize),
+        module: ModId,
+        expr: &Expr,
+    ) -> Rc<ExprCode> {
+        if let Some(code) = cache.borrow().get(&key) {
+            return Rc::clone(code);
+        }
+        let mut lower = Lowering::new(self, module);
+        let body = lower.expr(expr);
+        let code = Rc::new(ExprCode {
+            slots: lower.slots(),
+            body,
+        });
+        cache.borrow_mut().insert(key, Rc::clone(&code));
+        code
+    }
+
+    fn eval_code(&self, rt: &mut Runtime, module: ModId, code: &ExprCode) -> Outcome {
+        let mut env = Env {
+            vars: Slots::new(vec![Value::Unit; code.slots]),
+            module,
+            types: Rc::clone(&self.empty_types),
+        };
+        self.eval(rt, &mut env, &code.body)
+    }
+
+    // ---------------------------------------------------------------- calls
+
+    /// Calls a function with its arguments in parameter order (`self` first); `var`
+    /// parameters are written back into `args`.
+    pub fn call_fn(&self, rt: &mut Runtime, f: FnId, args: &mut [Value], types: Types) -> Outcome {
+        if self.program.funcs[f].body.is_none() {
+            return self.call_external(rt, f, args, &types);
+        }
+        let mut frame: Vec<Value> = args.iter_mut().map(take).collect();
+        let result = self.invoke(rt, f, &mut frame, types);
+        if let Some(code) = self.codes[f].get() {
+            for (i, p) in code.params.iter().enumerate() {
+                if p.var && i < args.len() && i < frame.len() {
+                    args[i] = take(&mut frame[i]);
+                }
             }
         }
+        result
+    }
+
+    /// Runs a function whose arguments are in the first slots of `frame`; `Unit` marks a
+    /// missing argument. After the call, the slots of `var` parameters hold their values.
+    fn invoke(&self, rt: &mut Runtime, f: FnId, frame: &mut Vec<Value>, types: Types) -> Outcome {
+        let def = &self.program.funcs[f];
+        if def.body.is_none() {
+            return self.call_external(rt, f, frame, &types);
+        }
+        if let Some(intrinsic) = self.intrinsics[f] {
+            if let Some(result) = self.intrinsic(rt, intrinsic, frame) {
+                return result;
+            }
+        }
+        let Some(code) = self.code(f) else {
+            return Err(internal(rt, format!("no declaration for {}", def.name)));
+        };
+        let module = def.module;
+        let base = rt.site_base(|| self.sites());
+        rt.enter_site(base + f as u32, def.span.start.line as u32)?;
+        let mut env = Env {
+            vars: Slots::new(std::mem::take(frame)),
+            module,
+            types,
+        };
+        while env.vars.stack.len() < code.slots {
+            env.vars.stack.push(Value::Unit);
+        }
+        for (i, p) in code.params.iter().enumerate().filter(|_| code.defaults) {
+            if let (Value::Unit, Some(default)) = (&env.vars[i], &p.default) {
+                match self.eval(rt, &mut env, default) {
+                    Ok(v) => env.vars[i] = v,
+                    Err(e) => {
+                        rt.leave();
+                        *frame = env.vars.stack;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        let result = self.run_block(rt, &mut env, &code.body);
         rt.leave();
+        *frame = env.vars.stack;
         match result? {
             Flow::Return(v) => Ok(v),
             _ => Ok(Value::Unit),
         }
     }
 
+    /// Runs a library function natively; `None` when the arguments need its Unio definition
+    /// (for example `contains` on items whose equality a program defines).
+    fn intrinsic(
+        &self,
+        rt: &mut Runtime,
+        intrinsic: Intrinsic,
+        frame: &mut [Value],
+    ) -> Option<Outcome> {
+        let arg = |i: usize| frame.get(i);
+        Some(Ok(match (intrinsic, arg(0)?) {
+            (Intrinsic::IsEmpty, Value::Text(t)) => Value::Bool(t.is_empty()),
+            (Intrinsic::IsEmpty, Value::List(l)) => Value::Bool(l.is_empty()),
+            (Intrinsic::IsEmpty, Value::Map(m)) => Value::Bool(m.is_empty()),
+            (Intrinsic::IsEmpty, Value::Set(s)) => Value::Bool(s.is_empty()),
+            (Intrinsic::IsEmpty, Value::Bytes(b)) => Value::Bool(b.is_empty()),
+            // A sign, then ASCII digits, without overflow: what `i64::from_str` accepts.
+            (Intrinsic::ToInt, Value::Text(t)) => {
+                Value::option(t.as_str().parse::<i64>().ok().map(Value::Int))
+            }
+            (Intrinsic::First, Value::List(l)) => Value::option(l.first().cloned()),
+            (Intrinsic::Last, Value::List(l)) => Value::option(l.last().cloned()),
+            (Intrinsic::Enumerate, Value::List(l)) => {
+                let start = match arg(1)? {
+                    Value::Int(i) => *i,
+                    Value::Unit => 0,
+                    _ => return None,
+                };
+                let mut pairs = Vec::with_capacity(l.len());
+                for (i, item) in l.iter().enumerate() {
+                    let index = match rf::int_add(start, i as i64) {
+                        Ok(index) => index,
+                        Err(fault) => return Some(Err(traced(rt, fault))),
+                    };
+                    pairs.push(Value::tuple(vec![Value::Int(index), item.clone()]));
+                }
+                if let Err(e) = rt.check_heap() {
+                    return Some(Err(e));
+                }
+                Value::list(pairs)
+            }
+            (Intrinsic::Contains, Value::List(l)) => match arg(1)? {
+                item @ (Value::Text(_) | Value::Int(_) | Value::Bool(_)) => {
+                    Value::Bool(l.iter().any(|x| values_equal(x, item)))
+                }
+                _ => return None,
+            },
+            (Intrinsic::Contains, Value::Map(m)) => Value::Bool(m.get(arg(1)?).is_some()),
+            (Intrinsic::Keys, Value::Map(m)) => {
+                Value::list(m.entries().map(|(k, _)| k.clone()).collect())
+            }
+            (Intrinsic::Values, Value::Map(m)) => {
+                Value::list(m.entries().map(|(_, v)| v.clone()).collect())
+            }
+            (Intrinsic::AppendAll, Value::List(_)) => {
+                let Some(Value::List(items)) = frame.get(1).cloned() else {
+                    return None;
+                };
+                let Value::List(l) = &mut frame[0] else {
+                    return None;
+                };
+                Rc::make_mut(l).extend(items.iter().cloned());
+                Value::Unit
+            }
+            (Intrinsic::Range(d), Value::Int(start)) => {
+                let Some(Value::Int(end)) = arg(1) else {
+                    return None;
+                };
+                let values = vec![Some(Value::Int(*start)), Some(Value::Int(*end))];
+                return Some(self.finish_struct(rt, d, values));
+            }
+            _ => return None,
+        }))
+    }
+
+    fn call_external(
+        &self,
+        rt: &mut Runtime,
+        f: FnId,
+        args: &mut [Value],
+        types: &Types,
+    ) -> Outcome {
+        let def = &self.program.funcs[f];
+        if !def.params.iter().any(|p| p.has_default) {
+            if let (0, Some(function)) = (self.externs_json[f], self.externs[f]) {
+                return function(rt, args);
+            }
+        }
+        let Some((sig, _)) = self.signature(f) else {
+            return Err(internal(rt, format!("no declaration for {}", def.name)));
+        };
+        // Defaults of externals are evaluated here, in the declaring module.
+        let offset = usize::from(def.self_param.is_some());
+        for (i, param) in sig
+            .params
+            .iter()
+            .filter(|p| !matches!(p, Param::SelfParam { .. }))
+            .enumerate()
+        {
+            let default = match param {
+                Param::Named { default, .. } | Param::Plain { default, .. } => default.as_ref(),
+                Param::SelfParam { .. } => None,
+            };
+            if let (Some(Value::Unit), Some(e)) = (args.get(offset + i), default) {
+                let code = self.expr_code(&self.default_codes, (f, i), def.module, e);
+                args[offset + i] = self.eval_code(rt, def.module, &code)?;
+            }
+        }
+        if self.externs_json[f] == 0 {
+            return match self.externs[f] {
+                Some(function) => function(rt, args),
+                None => unio_runtime::externs::call(rt, &self.external_names[f], args),
+            };
+        }
+        match self.external_names[f].as_str() {
+            "std.json.to_value" => {
+                let v = args.first().cloned().unwrap_or(Value::Unit);
+                self.encode_json(rt, &v)
+            }
+            "std.json.from_value" => {
+                let ty = types.values().next().cloned().unwrap_or(RtTy::Unknown);
+                let v = args.first().cloned().unwrap_or(Value::Unit);
+                self.decode_json(rt, &ty, &v, "")
+            }
+            name => match self.externs[f] {
+                Some(function) => function(rt, args),
+                None => unio_runtime::externs::call(rt, name, args),
+            },
+        }
+    }
+
     fn generic_types(&self, env: &Env, f: FnId, types: &[Type]) -> Result<Types, Unwind> {
+        if types.is_empty() || self.program.funcs[f].generics.is_empty() {
+            return Ok(Rc::clone(&self.empty_types));
+        }
         let mut map = HashMap::new();
         for (p, t) in self.program.funcs[f].generics.iter().zip(types) {
             map.insert(self.program.params[*p].name.clone(), self.rt_type(env, t)?);
@@ -402,68 +846,401 @@ impl Interp {
         Ok(Rc::new(map))
     }
 
-    /// Binds the arguments of a call to the parameters of `f`: positional first, then named
-    /// by name. Missing ones are `Unit`, which the callee replaces by the default.
-    fn bind_args(
+    /// The frame of a call to `f`: arguments in parameter order, `Unit` where missing, and
+    /// the places that `var` arguments come from and go back to.
+    #[inline]
+    fn new_frame(&self, f: FnId, count: usize) -> Vec<Value> {
+        let slots = self.codes[f].get().map_or(count, |c| c.slots.max(count));
+        let mut frame = self.pool.borrow_mut().pop().unwrap_or_default();
+        frame.reserve(slots);
+        for _ in 0..count {
+            frame.push(Value::Unit);
+        }
+        frame
+    }
+
+    /// Returns the storage of a frame for the next call, so that calls do not allocate.
+    fn recycle(&self, mut frame: Vec<Value>) {
+        frame.clear();
+        let mut pool = self.pool.borrow_mut();
+        if pool.len() < 256 && frame.capacity() <= 1024 {
+            pool.push(frame);
+        }
+    }
+
+    fn call_known(&self, rt: &mut Runtime, env: &mut Env, call: &CallCode) -> Outcome {
+        if call.types.is_empty() {
+            if let Some(code) = self.codes[call.f].get() {
+                if !code.defaults && self.intrinsics[call.f].is_none() {
+                    return self.call_lowered(rt, env, call, code);
+                }
+            }
+        }
+        let mut frame = self.new_frame(call.f, call.count);
+        let mut places: Vec<(usize, &Place)> = Vec::new();
+        for arg in &call.args {
+            frame[arg.target] = match &arg.place {
+                Some(place) => {
+                    places.push((arg.target, place));
+                    self.take_place(rt, env, place)?
+                }
+                None => self.eval(rt, env, &arg.value)?,
+            };
+        }
+        let types = self.generic_types(env, call.f, &call.types)?;
+        let result = self.invoke(rt, call.f, &mut frame, types);
+        for (i, place) in places {
+            let v = take(&mut frame[i]);
+            self.put_place(rt, env, place, v)?;
+        }
+        self.recycle(frame);
+        result
+    }
+
+    /// A call of a function whose body is lowered, without defaults to fill or type
+    /// arguments: the arguments go straight into the callee's slots on the shared stack.
+    #[inline]
+    fn call_lowered(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        call: &CallCode,
+        code: &Code,
+    ) -> Outcome {
+        let base = env.vars.stack.len();
+        env.vars
+            .stack
+            .resize_with(base + code.slots.max(call.count), || Value::Unit);
+        let mut places = false;
+        for arg in &call.args {
+            let value = match &arg.place {
+                Some(place) => {
+                    places = true;
+                    self.take_place(rt, env, place)
+                }
+                None => self.eval(rt, env, &arg.value),
+            };
+            match value {
+                Ok(v) => env.vars.stack[base + arg.target] = v,
+                Err(e) => {
+                    env.vars.stack.truncate(base);
+                    return Err(e);
+                }
+            }
+        }
+        let result = self.run_on_stack(rt, env, call.f, code, base);
+        if places {
+            for arg in &call.args {
+                if let Some(place) = &arg.place {
+                    let v = take(&mut env.vars.stack[base + arg.target]);
+                    if let Err(e) = self.put_place(rt, env, place, v) {
+                        env.vars.stack.truncate(base);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        env.vars.stack.truncate(base);
+        result
+    }
+
+    /// Runs the lowered body of `f` with its slots at `base` of the shared stack, which the
+    /// caller has filled with the arguments; the slots stay for the caller to read `var`
+    /// parameters back and to truncate.
+    #[inline]
+    fn run_on_stack(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
         f: FnId,
-        receiver: Option<Value>,
-        arguments: &[Argument],
-    ) -> Result<BoundArgs, Unwind> {
+        code: &Code,
+        base: usize,
+    ) -> Outcome {
         let def = &self.program.funcs[f];
-        let offset = usize::from(def.self_param.is_some());
-        let count = offset + def.params.len();
-        let mut args = vec![Value::Unit; count];
-        let mut places = Vec::new();
-        if let Some(r) = receiver {
-            if !args.is_empty() {
-                args[0] = r;
-            }
+        let sites = rt.site_base(|| self.sites());
+        rt.enter_site(sites + f as u32, def.span.start.line as u32)?;
+        let caller_base = std::mem::replace(&mut env.vars.base, base);
+        let caller_module = std::mem::replace(&mut env.module, def.module);
+        let caller_types = std::mem::replace(&mut env.types, Rc::clone(&self.empty_types));
+        let result = self.run_block(rt, env, &code.body);
+        env.vars.base = caller_base;
+        env.module = caller_module;
+        env.types = caller_types;
+        rt.leave();
+        match result? {
+            Flow::Return(v) => Ok(v),
+            _ => Ok(Value::Unit),
         }
-        let mut position = offset;
-        for argument in arguments {
-            let target = match &argument.name {
-                Some(n) => match def.params.iter().position(|p| p.name == n.text) {
-                    Some(i) => i + offset,
-                    None => return Err(internal(rt, format!("no parameter {}", n.text))),
+    }
+
+    /// The arguments of a method call matched to the parameters of the method found.
+    fn method_frame<'c>(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        f: FnId,
+        args: &'c [MethodArg],
+    ) -> Result<MethodFrame<'c>, Unwind> {
+        let def = &self.program.funcs[f];
+        let count = 1 + def.params.len();
+        let mut frame = self.new_frame(f, count);
+        let mut places = Vec::new();
+        let mut position = 1;
+        for arg in args {
+            let target = match &arg.name {
+                Some(n) => match def.params.iter().position(|p| p.name == *n) {
+                    Some(i) => i + 1,
+                    None => return Err(internal(rt, format!("no parameter {n}"))),
                 },
                 None => {
-                    let p = position;
                     position += 1;
-                    p
+                    position - 1
                 }
             };
             if target >= count {
                 return Err(internal(rt, "too many arguments"));
             }
-            let var = def.params[target - offset].var;
-            if var && is_place(&argument.value) {
-                args[target] = self.take_place(rt, env, &argument.value)?;
-                places.push((target, argument.value.clone()));
-            } else {
-                args[target] = self.eval(rt, env, &argument.value)?;
-            }
+            frame[target] = match &arg.place {
+                Some(place) if def.params[target - 1].var => {
+                    places.push((target, place));
+                    self.take_place(rt, env, place)?
+                }
+                _ => self.eval(rt, env, &arg.value)?,
+            };
         }
-        Ok((args, places))
+        Ok((frame, places))
     }
 
-    fn call_bound(
+    fn method_call(&self, rt: &mut Runtime, env: &mut Env, m: &MethodCode) -> Outcome {
+        if let Node::Local(slot) = m.receiver {
+            if let Some(result) = self.local_method_call(rt, env, m, slot as usize) {
+                return result;
+            }
+        }
+        let receiver = self.eval(rt, env, &m.receiver)?;
+        self.method_call_on(rt, env, m, receiver)
+    }
+
+    /// A method call on a local name with positional arguments and no `var` parameters
+    /// besides `self`: the method is found from the value in place, and a `var self` method
+    /// moves the value into the call and back without copying. `None` leaves the call to the
+    /// general path, before anything is evaluated.
+    #[inline]
+    fn local_method_call(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        m: &MethodCode,
+        slot: usize,
+    ) -> Option<Outcome> {
+        let receiver = &env.vars[slot];
+        if matches!(receiver, Value::Resource(_)) || !m.positional {
+            return None;
+        }
+        let f = self.cached_method(m, receiver)?;
+        let def = &self.program.funcs[f];
+        if self.var_params[f] || m.args.len() > def.params.len() {
+            return None;
+        }
+        let in_place = def.self_param == Some(true);
+        if in_place && !matches!(&m.place, Some(p) if p.steps.is_empty() && p.root as usize == slot)
+        {
+            return None;
+        }
+        let count = 1 + def.params.len();
+        let code = match def.body {
+            Some(_) => match self.codes[f].get() {
+                Some(code) if !code.defaults && self.intrinsics[f].is_none() => Some(&**code),
+                _ => None,
+            },
+            None => None,
+        };
+        let external = match (def.body.is_none(), self.externs[f]) {
+            (true, Some(function))
+                if self.externs_json[f] == 0 && m.args.len() == def.params.len() =>
+            {
+                Some(function)
+            }
+            _ => None,
+        };
+        if code.is_some() || external.is_some() {
+            // The callee's slots go on the shared stack: arguments first, then the receiver,
+            // which a `var self` method takes from its name only after the arguments.
+            let base = env.vars.stack.len();
+            let slots = code.map_or(count, |c| c.slots.max(count));
+            env.vars.stack.resize_with(base + slots, || Value::Unit);
+            for (i, arg) in m.args.iter().enumerate() {
+                match self.eval(rt, env, &arg.value) {
+                    Ok(v) => env.vars.stack[base + 1 + i] = v,
+                    Err(e) => {
+                        env.vars.stack.truncate(base);
+                        return Some(Err(e));
+                    }
+                }
+            }
+            env.vars.stack[base] = if in_place {
+                take(&mut env.vars[slot])
+            } else {
+                env.vars[slot].clone()
+            };
+            let result = match (code, external) {
+                (Some(code), _) => self.run_on_stack(rt, env, f, code, base),
+                (None, Some(function)) => function(rt, &mut env.vars.stack[base..base + count]),
+                (None, None) => unreachable!("a lowered body or an external"),
+            };
+            if in_place {
+                env.vars[slot] = take(&mut env.vars.stack[base]);
+            }
+            env.vars.stack.truncate(base);
+            return Some(result);
+        }
+        let mut frame = self.new_frame(f, count);
+        for (i, arg) in m.args.iter().enumerate() {
+            match self.eval(rt, env, &arg.value) {
+                Ok(v) => frame[1 + i] = v,
+                Err(e) => {
+                    self.recycle(frame);
+                    return Some(Err(e));
+                }
+            }
+        }
+        let types = Rc::clone(&self.empty_types);
+        let result = if in_place {
+            frame[0] = take(&mut env.vars[slot]);
+            let result = self.invoke(rt, f, &mut frame, types);
+            env.vars[slot] = take(&mut frame[0]);
+            result
+        } else {
+            frame[0] = env.vars[slot].clone();
+            self.invoke(rt, f, &mut frame, types)
+        };
+        self.recycle(frame);
+        Some(result)
+    }
+
+    fn method_call_on(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        m: &MethodCode,
+        receiver: Value,
+    ) -> Outcome {
+        let Some(f) = self.cached_method(m, &receiver) else {
+            // A field that holds a function value: `self.steps.write_data(...)` is not a method.
+            if let Ok(Value::Function(_)) = field_of(rt, &receiver, &m.name) {
+                let function = field_of(rt, &receiver, &m.name)?;
+                let args = self.positional(rt, env, &m.args)?;
+                return self.call_value(rt, &function, args);
+            }
+            let args = self.positional(rt, env, &m.args)?;
+            return self.call_method_value(rt, receiver, &m.name, args);
+        };
+        let var_self = self.program.funcs[f].self_param == Some(true);
+        if !var_self && m.positional && !matches!(receiver, Value::Resource(_)) {
+            if let Some(result) = self.external_method(rt, env, f, m, receiver.clone()) {
+                return result;
+            }
+        }
+        let empty = || Rc::clone(&self.empty_types);
+        if let (true, Some(place), false) =
+            (var_self, &m.place, matches!(receiver, Value::Resource(_)))
+        {
+            drop(receiver);
+            let (mut frame, places) = self.method_frame(rt, env, f, &m.args)?;
+            let steps = self.steps(rt, env, place)?;
+            let result = self.with_resolved(rt, env, place.root, &steps, |interp, rt, slot| {
+                frame[0] = take(slot);
+                let r = interp.invoke(rt, f, &mut frame, Rc::clone(&interp.empty_types));
+                *slot = take(&mut frame[0]);
+                Ok(r)
+            })?;
+            for (i, place) in places {
+                let v = take(&mut frame[i]);
+                self.put_place(rt, env, place, v)?;
+            }
+            self.recycle(frame);
+            return result;
+        }
+        let (mut frame, places) = self.method_frame(rt, env, f, &m.args)?;
+        let result = if let Value::Resource(cell) = &receiver {
+            if var_self {
+                frame[0] = take(&mut cell.value.borrow_mut());
+                let r = self.invoke(rt, f, &mut frame, empty());
+                *cell.value.borrow_mut() = take(&mut frame[0]);
+                r
+            } else {
+                frame[0] = cell.value.borrow().clone();
+                self.invoke(rt, f, &mut frame, empty())
+            }
+        } else {
+            frame[0] = receiver;
+            self.invoke(rt, f, &mut frame, empty())
+        };
+        for (i, place) in places {
+            let v = take(&mut frame[i]);
+            self.put_place(rt, env, place, v)?;
+        }
+        self.recycle(frame);
+        result
+    }
+
+    /// A method bound to an external function with every argument given positionally and at
+    /// most three of them: the arguments are passed in a small array, without a frame.
+    #[inline]
+    fn external_method(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
         f: FnId,
-        receiver: Option<Value>,
-        arguments: &[Argument],
-        types: Types,
-    ) -> Outcome {
-        let (mut args, places) = self.bind_args(rt, env, f, receiver, arguments)?;
-        let result = self.call_fn(rt, f, &mut args, types);
-        for (i, place) in places {
-            self.put_place(rt, env, &place, take(&mut args[i]))?;
+        m: &MethodCode,
+        receiver: Value,
+    ) -> Option<Outcome> {
+        let def = &self.program.funcs[f];
+        let function = self.externs[f]?;
+        if def.body.is_some()
+            || self.externs_json[f] != 0
+            || self.var_params[f]
+            || m.args.len() != def.params.len()
+            || m.args.len() > 3
+        {
+            return None;
         }
-        result
+        let mut args = [receiver, Value::Unit, Value::Unit, Value::Unit];
+        for (i, arg) in m.args.iter().enumerate() {
+            match self.eval(rt, env, &arg.value) {
+                Ok(v) => args[1 + i] = v,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(function(rt, &mut args[..1 + m.args.len()]))
+    }
+
+    /// The method of a call site for the type of the receiver, remembered for the last type.
+    fn cached_method(&self, m: &MethodCode, receiver: &Value) -> Option<FnId> {
+        let key = match receiver {
+            Value::Struct(s) => Rc::as_ptr(&s.type_name) as *const u8 as usize,
+            Value::Enum(e) => Rc::as_ptr(&e.type_name) as *const u8 as usize,
+            Value::Resource(_) => 0,
+            other => static_key(other).as_ptr() as usize,
+        };
+        let (k, f) = m.cache.get();
+        if key != 0 && k == key {
+            return Some(f);
+        }
+        let f = self.method_of(receiver, &m.name)?;
+        if key != 0 {
+            m.cache.set((key, f));
+        }
+        Some(f)
+    }
+
+    fn positional(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        args: &[MethodArg],
+    ) -> Result<Vec<Value>, Unwind> {
+        args.iter().map(|a| self.eval(rt, env, &a.value)).collect()
     }
 
     /// Calls a method on a value that is not a place: the receiver is not written back.
@@ -487,9 +1264,8 @@ impl Interp {
         rest: Vec<Value>,
     ) -> Result<(Outcome, Value), Unwind> {
         if let Value::Resource(cell) = &receiver {
-            let key = value_key(&cell.value.borrow());
             let var_self = self
-                .method(&key, name)
+                .method_of(&cell.value.borrow(), name)
                 .as_ref()
                 .is_some_and(|f| self.program.funcs[*f].self_param == Some(true));
             if !var_self {
@@ -502,18 +1278,19 @@ impl Interp {
             *cell.value.borrow_mut() = after;
             return Ok((result, receiver));
         }
-        let key = value_key(&receiver);
-        match self.method(&key, name) {
+        match self.method_of(&receiver, name) {
             Some(f) => {
-                let mut args = Vec::with_capacity(rest.len() + 1);
+                let total = 1 + self.program.funcs[f].params.len();
+                let mut args = self.new_frame(f, 0);
                 args.push(receiver);
                 args.extend(rest);
-                let total = 1 + self.program.funcs[f].params.len();
                 while args.len() < total {
                     args.push(Value::Unit);
                 }
-                let result = self.call_fn(rt, f, &mut args, Rc::new(HashMap::new()));
-                Ok((result, take(&mut args[0])))
+                let result = self.invoke(rt, f, &mut args, Rc::clone(&self.empty_types));
+                let after = take(&mut args[0]);
+                self.recycle(args);
+                Ok((result, after))
             }
             None => {
                 let result = match (name, &receiver) {
@@ -525,7 +1302,10 @@ impl Interp {
                         &receiver,
                         rest.first().unwrap_or(&Value::Unit),
                     ))),
-                    _ => Err(internal(rt, format!("no method {name} for {key}"))),
+                    _ => Err(internal(
+                        rt,
+                        format!("no method {name} for {}", value_key(&receiver)),
+                    )),
                 };
                 Ok((result, receiver))
             }
@@ -551,47 +1331,16 @@ impl Interp {
 
     // ---------------------------------------------------------------- places
 
-    fn place(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        expr: &Expr,
-    ) -> Result<(usize, Vec<Step>), Unwind> {
-        match &expr.kind {
-            ExprKind::Paren(e) => self.place(rt, env, e),
-            ExprKind::Name(n) => env
-                .find(n)
-                .map(|i| (i, Vec::new()))
-                .ok_or_else(|| internal(rt, format!("{n} is not a local name"))),
-            ExprKind::SelfValue => env
-                .find("self")
-                .map(|i| (i, Vec::new()))
-                .ok_or_else(|| internal(rt, "self outside a method")),
-            ExprKind::Field { target, name } => {
-                let (root, mut steps) = self.place(rt, env, target)?;
-                steps.push(Step::Field(Rc::from(name.text.as_str())));
-                Ok((root, steps))
-            }
-            ExprKind::Index { target, index } => {
-                let (root, mut steps) = self.place(rt, env, target)?;
-                let i = self.eval(rt, env, index)?;
-                steps.push(Step::Index(i));
-                Ok((root, steps))
-            }
-            _ => Err(internal(rt, "not a place")),
+    /// The steps of a place with its indices evaluated.
+    fn steps(&self, rt: &mut Runtime, env: &mut Env, place: &Place) -> Result<Vec<Step>, Unwind> {
+        let mut steps = Vec::with_capacity(place.steps.len());
+        for step in &place.steps {
+            steps.push(match step {
+                PStep::Field(n) => Step::Field(Rc::clone(n)),
+                PStep::Index(e) => Step::Index(self.eval(rt, env, e)?),
+            });
         }
-    }
-
-    /// Applies `f` to the value at a place, inside resources and with copy-on-write.
-    fn with_place<R>(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        expr: &Expr,
-        f: impl FnOnce(&Interp, &mut Runtime, &mut Value) -> Result<R, Unwind>,
-    ) -> Result<R, Unwind> {
-        let (root, steps) = self.place(rt, env, expr)?;
-        self.with_resolved(rt, env, root, &steps, f)
+        Ok(steps)
     }
 
     /// Runs `f` on the place `root` + `steps`, whose indices are already evaluated.
@@ -599,11 +1348,12 @@ impl Interp {
         &self,
         rt: &mut Runtime,
         env: &mut Env,
-        root: usize,
+        root: Slot,
         steps: &[Step],
         f: impl FnOnce(&Interp, &mut Runtime, &mut Value) -> Result<R, Unwind>,
     ) -> Result<R, Unwind> {
-        let mut value = take(&mut env.vars[root].1);
+        let root = root as usize;
+        let mut value = take(&mut env.vars[root]);
         let result = if let Value::Resource(cell) = &value {
             let cell = Rc::clone(cell);
             let mut inner = take(&mut cell.value.borrow_mut());
@@ -613,69 +1363,31 @@ impl Interp {
         } else {
             navigate(rt, &mut value, steps).and_then(|target| f(self, rt, target))
         };
-        env.vars[root].1 = value;
+        env.vars[root] = value;
         result
     }
 
-    fn take_place(&self, rt: &mut Runtime, env: &mut Env, expr: &Expr) -> Outcome {
-        self.with_place(rt, env, expr, |_, _, v| Ok(take(v)))
+    fn take_place(&self, rt: &mut Runtime, env: &mut Env, place: &Place) -> Outcome {
+        if place.steps.is_empty() && !matches!(env.vars[place.root as usize], Value::Resource(_)) {
+            return Ok(take(&mut env.vars[place.root as usize]));
+        }
+        let steps = self.steps(rt, env, place)?;
+        self.with_resolved(rt, env, place.root, &steps, |_, _, v| Ok(take(v)))
     }
 
     fn put_place(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
-        expr: &Expr,
+        place: &Place,
         value: Value,
     ) -> Result<(), Unwind> {
-        self.assign(rt, env, expr, |_, _, _| Ok(value))
-    }
-
-    /// Assigns to a place: the place and its indices are resolved first, then `value` is
-    /// evaluated (runtime 1.1), then the value is stored.
-    fn assign(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        expr: &Expr,
-        value: impl FnOnce(&Interp, &mut Runtime, &mut Env) -> Outcome,
-    ) -> Result<(), Unwind> {
-        // Map element assignment: m[k] = v.
-        if let ExprKind::Index { target, index } = &expr.kind {
-            let (root, steps) = self.place(rt, env, target)?;
-            let key = self.eval(rt, env, index)?;
-            let mut value = Some(value(self, rt, env)?);
-            return self.with_resolved(rt, env, root, &steps, |_, rt, container| match container {
-                Value::Map(m) => {
-                    Rc::make_mut(m).put(key, value.take().unwrap_or(Value::Unit));
-                    Ok(())
-                }
-                Value::List(l) => {
-                    let list = Rc::make_mut(l);
-                    let i = match key {
-                        Value::Int(i) => i,
-                        _ => return Err(internal(rt, "list index is not Int")),
-                    };
-                    match usize::try_from(i).ok().and_then(|i| list.get_mut(i)) {
-                        Some(slot) => {
-                            *slot = value.take().unwrap_or(Value::Unit);
-                            Ok(())
-                        }
-                        None => Err(rt.fault(
-                            FaultKind::IndexOutOfRange,
-                            format!("index {i} is outside 0..{}", list.len()),
-                        )),
-                    }
-                }
-                _ => Err(internal(
-                    rt,
-                    "indexed assignment to a value that is not a list or map",
-                )),
-            });
+        if place.steps.is_empty() && !matches!(env.vars[place.root as usize], Value::Resource(_)) {
+            env.vars[place.root as usize] = value;
+            return Ok(());
         }
-        let (root, steps) = self.place(rt, env, expr)?;
-        let value = value(self, rt, env)?;
-        self.with_resolved(rt, env, root, &steps, |_, _, slot| {
+        let steps = self.steps(rt, env, place)?;
+        self.with_resolved(rt, env, place.root, &steps, |_, _, slot| {
             *slot = value;
             Ok(())
         })
@@ -683,146 +1395,244 @@ impl Interp {
 
     // ---------------------------------------------------------------- statements
 
-    fn exec_block(&self, rt: &mut Runtime, env: &mut Env, block: &Block) -> Exec {
-        let mark = env.vars.len();
-        let mut flow = Ok(Flow::Normal);
-        for statement in block {
-            rt.at_line(statement.span.start.line as u32);
-            flow = self.exec(rt, env, statement);
-            match &flow {
+    fn run_block(&self, rt: &mut Runtime, env: &mut Env, block: &Block) -> Exec {
+        for statement in &block.stmts {
+            rt.at_line(statement.line);
+            match self.run(rt, env, &statement.kind) {
                 Ok(Flow::Normal) => {}
-                _ => break,
+                flow => {
+                    clear_block(env, block);
+                    return flow;
+                }
             }
         }
-        env.vars.truncate(mark);
-        flow
+        clear_block(env, block);
+        Ok(Flow::Normal)
     }
 
-    fn exec(&self, rt: &mut Runtime, env: &mut Env, statement: &Statement) -> Exec {
-        match &statement.kind {
-            StatementKind::Simple {
-                statement: simple,
-                handler,
-            } => {
-                let result = self.exec_simple(rt, env, simple, statement.span);
-                match (result, handler) {
-                    (Err(Unwind::Error(error)), Some(block)) => {
-                        let (ty, name) =
-                            find_handler(simple).ok_or_else(|| internal(rt, "inline handler"))?;
-                        if self.handles(env, ty, &error) {
-                            let mark = env.vars.len();
-                            if let Some(n) = name {
-                                env.bind(&n.text, error);
+    fn run(&self, rt: &mut Runtime, env: &mut Env, statement: &S) -> Exec {
+        match statement {
+            S::Let(slot, value) => {
+                env.vars[*slot as usize] = self.eval(rt, env, value)?;
+                Ok(Flow::Normal)
+            }
+            S::Assign(place, value) => {
+                if place.steps.is_empty()
+                    && !matches!(env.vars[place.root as usize], Value::Resource(_))
+                {
+                    env.vars[place.root as usize] = self.eval(rt, env, value)?;
+                    return Ok(Flow::Normal);
+                }
+                if place.steps.iter().all(|s| matches!(s, PStep::Field(_)))
+                    && !matches!(env.vars[place.root as usize], Value::Resource(_))
+                {
+                    // Fields only: nothing to evaluate in the place, and no steps to build.
+                    let value = self.eval(rt, env, value)?;
+                    let target =
+                        navigate_fields(rt, &mut env.vars[place.root as usize], &place.steps)?;
+                    *target = value;
+                    return Ok(Flow::Normal);
+                }
+                // The place and its indices are resolved first, then the value (runtime 1.1).
+                let steps = self.steps(rt, env, place)?;
+                let value = self.eval(rt, env, value)?;
+                self.with_resolved(rt, env, place.root, &steps, |_, _, slot| {
+                    *slot = value;
+                    Ok(())
+                })?;
+                Ok(Flow::Normal)
+            }
+            S::SetIndex(place, key, value) => {
+                let steps = self.steps(rt, env, place)?;
+                let key = self.eval(rt, env, key)?;
+                let mut value = Some(self.eval(rt, env, value)?);
+                self.with_resolved(
+                    rt,
+                    env,
+                    place.root,
+                    &steps,
+                    |_, rt, container| match container {
+                        Value::Map(m) => {
+                            Rc::make_mut(m).put(key, value.take().unwrap_or(Value::Unit));
+                            Ok(())
+                        }
+                        Value::List(l) => {
+                            let list = Rc::make_mut(l);
+                            let i = match key {
+                                Value::Int(i) => i,
+                                _ => return Err(internal(rt, "list index is not Int")),
+                            };
+                            match usize::try_from(i).ok().and_then(|i| list.get_mut(i)) {
+                                Some(slot) => {
+                                    *slot = value.take().unwrap_or(Value::Unit);
+                                    Ok(())
+                                }
+                                None => Err(rt.fault(
+                                    FaultKind::IndexOutOfRange,
+                                    format!("index {i} is outside 0..{}", list.len()),
+                                )),
                             }
-                            let flow = self.exec_block(rt, env, block);
-                            env.vars.truncate(mark);
-                            flow
-                        } else {
-                            Err(Unwind::Error(error))
+                        }
+                        _ => Err(internal(
+                            rt,
+                            "indexed assignment to a value that is not a list or map",
+                        )),
+                    },
+                )?;
+                Ok(Flow::Normal)
+            }
+            S::Concat(slot, parts, general) => {
+                let slot = *slot as usize;
+                if !matches!(env.vars[slot], Value::Text(_)) {
+                    env.vars[slot] = self.eval(rt, env, general)?;
+                    return Ok(Flow::Normal);
+                }
+                // The parts do not use the name, and text + text cannot fail, so evaluating
+                // them before taking the text out is not observable.
+                if let [part] = &parts[..] {
+                    let value = self.eval(rt, env, part)?;
+                    let Value::Text(text) = take(&mut env.vars[slot]) else {
+                        return Err(internal(rt, "concatenation"));
+                    };
+                    return match value {
+                        Value::Text(t) => {
+                            env.vars[slot] = Value::Text(text.append(t.as_str()));
+                            Ok(Flow::Normal)
+                        }
+                        other => {
+                            env.vars[slot] = Value::Text(text);
+                            Err(internal(rt, format!("text + {}", other.kind())))
+                        }
+                    };
+                }
+                let mut values = Vec::with_capacity(parts.len());
+                for part in parts {
+                    values.push(self.eval(rt, env, part)?);
+                }
+                let Value::Text(mut text) = take(&mut env.vars[slot]) else {
+                    return Err(internal(rt, "concatenation"));
+                };
+                for v in values {
+                    match v {
+                        Value::Text(t) => text = text.append(t.as_str()),
+                        other => {
+                            env.vars[slot] = Value::Text(text);
+                            return Err(internal(rt, format!("text + {}", other.kind())));
                         }
                     }
-                    (result, _) => result,
+                }
+                env.vars[slot] = Value::Text(text);
+                Ok(Flow::Normal)
+            }
+            S::Return(e) => Ok(Flow::Return(match e {
+                Some(e) => self.eval(rt, env, e)?,
+                None => Value::Unit,
+            })),
+            S::Fail(e) => Err(Unwind::Error(Box::new(self.eval(rt, env, e)?))),
+            S::Assert(e, text) => {
+                if self.truth(rt, env, e)? {
+                    Ok(Flow::Normal)
+                } else {
+                    Err(rt.fault(
+                        FaultKind::AssertionFailed,
+                        format!("assertion failed: {text}"),
+                    ))
                 }
             }
-            StatementKind::If {
-                branches,
-                otherwise,
-            } => {
-                for (condition, body) in branches {
-                    let mark = env.vars.len();
-                    if self.condition(rt, env, condition)? {
-                        let flow = self.exec_block(rt, env, body);
-                        env.vars.truncate(mark);
-                        return flow;
+            S::Break => Ok(Flow::Break),
+            S::Continue => Ok(Flow::Continue),
+            S::Pass => Ok(Flow::Normal),
+            S::Expr(e) => {
+                self.eval(rt, env, e)?;
+                Ok(Flow::Normal)
+            }
+            S::Handled {
+                inner,
+                ty,
+                bind,
+                block,
+            } => match self.run(rt, env, inner) {
+                Err(Unwind::Error(error)) if handles(ty, &error) => {
+                    if let Some(slot) = bind {
+                        env.vars[*slot as usize] = *error;
                     }
-                    env.vars.truncate(mark);
+                    self.run_block(rt, env, block)
+                }
+                other => other,
+            },
+            S::If(branches, otherwise) => {
+                for (condition, body) in branches {
+                    if self.truth(rt, env, condition)? {
+                        return self.run_block(rt, env, body);
+                    }
                 }
                 match otherwise {
-                    Some(body) => self.exec_block(rt, env, body),
+                    Some(body) => self.run_block(rt, env, body),
                     None => Ok(Flow::Normal),
                 }
             }
-            StatementKind::While { condition, body } => loop {
-                let mark = env.vars.len();
-                if !self.condition(rt, env, condition)? {
-                    env.vars.truncate(mark);
+            S::While(condition, body) => loop {
+                if !self.truth(rt, env, condition)? {
                     return Ok(Flow::Normal);
                 }
-                let flow = self.exec_block(rt, env, body)?;
-                env.vars.truncate(mark);
-                match flow {
+                match self.run_block(rt, env, body)? {
                     Flow::Break => return Ok(Flow::Normal),
                     Flow::Return(v) => return Ok(Flow::Return(v)),
                     _ => {}
                 }
             },
-            StatementKind::For {
-                names,
-                iterable,
-                body,
-            } => {
+            S::For(names, iterable, body) => {
                 let source = self.eval(rt, env, iterable)?;
                 let mut cursor = self.cursor(rt, source)?;
                 loop {
                     let Some(item) = self.next(rt, &mut cursor)? else {
                         return Ok(Flow::Normal);
                     };
-                    let mark = env.vars.len();
                     bind_names(rt, env, names, item)?;
-                    let flow = self.exec_block(rt, env, body);
-                    env.vars.truncate(mark);
-                    match flow? {
+                    match self.run_block(rt, env, body)? {
                         Flow::Break => return Ok(Flow::Normal),
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         _ => {}
                     }
                 }
             }
-            StatementKind::Match { subject, cases } => {
+            S::Match(subject, cases) => {
                 let value = self.eval(rt, env, subject)?;
                 for case in cases {
-                    let mark = env.vars.len();
                     if self.matches(rt, env, &case.pattern, &value)?
                         && match &case.guard {
                             Some(g) => self.truth(rt, env, g)?,
                             None => true,
                         }
                     {
-                        let flow = self.exec_block(rt, env, &case.body);
-                        env.vars.truncate(mark);
-                        return flow;
+                        return self.run_block(rt, env, &case.body);
                     }
-                    env.vars.truncate(mark);
                 }
                 Err(rt.fault(FaultKind::InvalidArgument, "internal: no case matched"))
             }
-            StatementKind::Try { body, handlers } => match self.exec_block(rt, env, body) {
+            S::Try(body, handlers) => match self.run_block(rt, env, body) {
                 Err(Unwind::Error(error)) => {
                     for handler in handlers {
-                        if self.handles(env, &handler.ty, &error) {
-                            let mark = env.vars.len();
-                            if let Some(n) = &handler.name {
-                                env.bind(&n.text, error);
+                        if handles(&handler.ty, &error) {
+                            if let Some(slot) = handler.bind {
+                                env.vars[slot as usize] = *error;
                             }
-                            let flow = self.exec_block(rt, env, &handler.body);
-                            env.vars.truncate(mark);
-                            return flow;
+                            return self.run_block(rt, env, &handler.body);
                         }
                     }
                     Err(Unwind::Error(error))
                 }
                 other => other,
             },
-            StatementKind::Using { name, value, body } => {
+            S::Using(slot, value, body) => {
                 let v = self.eval(rt, env, value)?;
                 let resource = match v {
                     Value::Resource(_) => v,
                     other => rt.new_resource(other),
                 };
-                let mark = env.vars.len();
-                env.bind(&name.text, resource.clone());
-                let flow = self.exec_block(rt, env, body);
-                env.vars.truncate(mark);
+                env.vars[*slot as usize] = resource.clone();
+                let flow = self.run_block(rt, env, body);
+                env.vars[*slot as usize] = Value::Unit;
                 if matches!(flow, Err(Unwind::Exhausted(_))) {
                     return flow;
                 }
@@ -845,7 +1655,7 @@ impl Interp {
                 return Ok(());
             }
         }
-        let has_release = self.method(&value_key(resource), "release").is_some();
+        let has_release = self.method_of(resource, "release").is_some();
         if !has_release {
             return Ok(());
         }
@@ -853,74 +1663,11 @@ impl Interp {
         result.map(|_| ())
     }
 
-    fn exec_simple(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        simple: &Simple,
-        span: crate::diag::Span,
-    ) -> Exec {
-        match simple {
-            Simple::Let { name, value, .. } => {
-                let v = self.eval(rt, env, value)?;
-                env.bind(&name.text, v);
-                Ok(Flow::Normal)
-            }
-            Simple::Assign { target, value } => {
-                self.assign(rt, env, target, |interp, rt, env| {
-                    interp.eval(rt, env, value)
-                })?;
-                Ok(Flow::Normal)
-            }
-            Simple::Return(e) => Ok(Flow::Return(match e {
-                Some(e) => self.eval(rt, env, e)?,
-                None => Value::Unit,
-            })),
-            Simple::Fail(e) => Err(Unwind::Error(self.eval(rt, env, e)?)),
-            Simple::Assert(e) => {
-                if self.truth(rt, env, e)? {
-                    Ok(Flow::Normal)
-                } else {
-                    let text = self.source_text(env.module, e.span);
-                    let _ = span;
-                    Err(rt.fault(
-                        FaultKind::AssertionFailed,
-                        format!("assertion failed: {text}"),
-                    ))
-                }
-            }
-            Simple::Break => Ok(Flow::Break),
-            Simple::Continue => Ok(Flow::Continue),
-            Simple::Pass => Ok(Flow::Normal),
-            Simple::Expr(e) => {
-                self.eval(rt, env, e)?;
-                Ok(Flow::Normal)
-            }
-        }
-    }
-
-    fn handles(&self, env: &Env, ty: &Type, error: &Value) -> bool {
-        let name = ty.path.last().map(|n| n.text.as_str()).unwrap_or("");
-        if name == "Error" {
-            return true;
-        }
-        match error {
-            Value::Struct(s) => &*s.type_name == name,
-            Value::Enum(e) => &*e.type_name == name,
-            _ => {
-                let _ = env;
-                false
-            }
-        }
-    }
-
     // ---------------------------------------------------------------- iteration
 
     fn cursor(&self, rt: &mut Runtime, source: Value) -> Result<Cursor, Unwind> {
         Ok(match source {
-            Value::List(l) | Value::Tuple(l) => {
-                Cursor::Items(l.iter().cloned().collect::<Vec<_>>().into_iter())
-            }
+            Value::List(l) | Value::Tuple(l) => Cursor::List(l, 0),
             Value::Set(s) => Cursor::Items(s.items().cloned().collect::<Vec<_>>().into_iter()),
             Value::Map(m) => Cursor::Items(
                 m.entries()
@@ -928,13 +1675,7 @@ impl Interp {
                     .collect::<Vec<_>>()
                     .into_iter(),
             ),
-            Value::Text(t) => Cursor::Items(
-                t.as_str()
-                    .chars()
-                    .map(|c| Value::text(c.to_string()))
-                    .collect::<Vec<_>>()
-                    .into_iter(),
-            ),
+            Value::Text(t) => Cursor::Text(t, 0),
             Value::Struct(s) if &*s.type_name == "Range" => {
                 let start = match s.fields.iter().find(|(n, _)| &**n == "start") {
                     Some((_, Value::Int(i))) => *i,
@@ -947,8 +1688,7 @@ impl Interp {
                 Cursor::Range(start, end)
             }
             other => {
-                let key = value_key(&other);
-                if self.method(&key, "next").is_some() {
+                if self.method_of(&other, "next").is_some() {
                     Cursor::Iterator(other)
                 } else {
                     let it = self.call_method_value(rt, other, "iterator", Vec::new())?;
@@ -960,6 +1700,16 @@ impl Interp {
 
     fn next(&self, rt: &mut Runtime, cursor: &mut Cursor) -> Result<Option<Value>, Unwind> {
         match cursor {
+            Cursor::List(items, i) => {
+                let item = items.get(*i).cloned();
+                *i += 1;
+                Ok(item)
+            }
+            Cursor::Text(t, i) => {
+                let item = t.char_at(*i).map(Value::Text);
+                *i += 1;
+                Ok(item)
+            }
             Cursor::Items(it) => Ok(it.next()),
             Cursor::Range(current, end) => {
                 if *current >= *end {
@@ -986,61 +1736,160 @@ impl Interp {
 
     // ---------------------------------------------------------------- expressions
 
-    fn truth(&self, rt: &mut Runtime, env: &mut Env, expr: &Expr) -> Result<bool, Unwind> {
-        match self.eval(rt, env, expr)? {
+    fn truth(&self, rt: &mut Runtime, env: &mut Env, node: &Node) -> Result<bool, Unwind> {
+        match node {
+            Node::Binary(op, left, right) => {
+                if let Some(Value::Bool(b)) = fast_binary(env, *op, left, right) {
+                    return Ok(b);
+                }
+                if let (Some(a), Some(b)) = (peek(env, left), peek(env, right)) {
+                    if let Some(result) = compare_simple(*op, a, b) {
+                        return Ok(result);
+                    }
+                }
+            }
+            Node::And(left, right) => {
+                return Ok(self.truth(rt, env, left)? && self.truth(rt, env, right)?)
+            }
+            Node::Not(operand) => return Ok(!self.truth(rt, env, operand)?),
+            Node::Value(Value::Bool(b)) => return Ok(*b),
+            Node::Or(left, right, _) if gives_bool(left) => {
+                return Ok(self.truth(rt, env, left)? || self.truth(rt, env, right)?)
+            }
+            _ => {}
+        }
+        match self.eval(rt, env, node)? {
             Value::Bool(b) => Ok(b),
             other => Err(internal(rt, format!("condition is a {}", other.kind()))),
         }
     }
 
-    /// A condition of `if` or `while`: `is` tests and the left operands of `and` bind their
-    /// names in the guarded branch (L-33).
-    fn condition(&self, rt: &mut Runtime, env: &mut Env, expr: &Expr) -> Result<bool, Unwind> {
-        match &expr.kind {
-            ExprKind::Paren(e) => self.condition(rt, env, e),
-            ExprKind::Is { value, pattern } => {
-                let v = self.eval(rt, env, value)?;
-                self.matches(rt, env, pattern, &v)
-            }
-            ExprKind::Binary {
-                op: "and",
-                left,
-                right,
-            } => Ok(self.condition(rt, env, left)? && self.condition(rt, env, right)?),
-            _ => self.truth(rt, env, expr),
+    /// Evaluates an expression. The common nodes are handled here and the rest in
+    /// [`Interp::eval_node`], so that the frequent paths stay short.
+    #[inline]
+    pub(crate) fn eval(&self, rt: &mut Runtime, env: &mut Env, node: &Node) -> Outcome {
+        match node {
+            Node::Local(slot) => Ok(env.vars[*slot as usize].clone()),
+            Node::Value(v) => Ok(v.clone()),
+            Node::Binary(op, left, right) => self.binary(rt, env, *op, left, right),
+            Node::Call(call) => self.call_known(rt, env, call),
+            Node::Method(m) => self.method_call(rt, env, m),
+            Node::Field(target, name, at) => match **target {
+                Node::Local(slot) => field_cached(rt, &env.vars[slot as usize], name, at),
+                _ => self.eval_node(rt, env, node),
+            },
+            _ => self.eval_node(rt, env, node),
         }
     }
 
-    pub fn eval(&self, rt: &mut Runtime, env: &mut Env, expr: &Expr) -> Outcome {
-        match &expr.kind {
-            ExprKind::Int(text) => parse_int(text)
-                .map(Value::Int)
-                .ok_or_else(|| internal(rt, "integer literal")),
-            ExprKind::Float(text) => text
-                .replace('_', "")
-                .parse::<f64>()
-                .map(Value::Float)
-                .map_err(|_| internal(rt, "float literal")),
-            ExprKind::Bool(b) => Ok(Value::Bool(*b)),
-            ExprKind::Text(parts) => {
+    /// A binary operator: integers that need no other evaluation first, then the general case.
+    #[inline(never)]
+    fn binary(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        op: Op,
+        left: &Node,
+        right: &Node,
+    ) -> Outcome {
+        if let Some(v) = fast_binary(env, op, left, right) {
+            return Ok(v);
+        }
+        if let (Some(a), Some(b)) = (peek(env, left), peek(env, right)) {
+            if let (Value::Int(a), Value::Int(b)) = (a, b) {
+                return int_op(rt, op, *a, *b);
+            }
+            if let Some(result) = compare_simple(op, a, b) {
+                return Ok(Value::Bool(result));
+            }
+        }
+        let l = self.eval(rt, env, left)?;
+        if let (Value::Int(a), Some(Value::Int(b))) = (&l, peek(env, right)) {
+            return int_op(rt, op, *a, *b);
+        }
+        let r = self.eval(rt, env, right)?;
+        if let (Value::Int(a), Value::Int(b)) = (&l, &r) {
+            return int_op(rt, op, *a, *b);
+        }
+        self.apply(rt, op, l, r)
+    }
+
+    #[inline(never)]
+    fn eval_node(&self, rt: &mut Runtime, env: &mut Env, node: &Node) -> Outcome {
+        match node {
+            Node::Value(v) => Ok(v.clone()),
+            Node::Local(slot) => Ok(env.vars[*slot as usize].clone()),
+            Node::Binary(op, left, right) => {
+                if let (Some(a), Some(b)) = (peek(env, left), peek(env, right)) {
+                    if let (Value::Int(a), Value::Int(b)) = (a, b) {
+                        return int_op(rt, *op, *a, *b);
+                    }
+                    if let Some(result) = compare_simple(*op, a, b) {
+                        return Ok(Value::Bool(result));
+                    }
+                }
+                let l = self.eval(rt, env, left)?;
+                if let (Value::Int(a), Some(Value::Int(b))) = (&l, peek(env, right)) {
+                    return int_op(rt, *op, *a, *b);
+                }
+                let r = self.eval(rt, env, right)?;
+                if let (Value::Int(a), Value::Int(b)) = (&l, &r) {
+                    return int_op(rt, *op, *a, *b);
+                }
+                self.apply(rt, *op, l, r)
+            }
+            Node::Call(call) => self.call_known(rt, env, call),
+            Node::Method(m) => self.method_call(rt, env, m),
+            Node::Field(target, name, at) => {
+                // A local struct is read in place, without copying the struct.
+                if let Node::Local(slot) = **target {
+                    return field_cached(rt, &env.vars[slot as usize], name, at);
+                }
+                let value = self.eval(rt, env, target)?;
+                field_cached(rt, &value, name, at)
+            }
+            Node::Index(target, index) => {
+                if let Node::Local(slot) = **target {
+                    let i = self.eval(rt, env, index)?;
+                    return index_value(rt, &env.vars[slot as usize], &i);
+                }
+                let t = self.eval(rt, env, target)?;
+                let i = self.eval(rt, env, index)?;
+                index_value(rt, &t, &i)
+            }
+            Node::And(left, right) => Ok(Value::Bool(
+                self.truth(rt, env, left)? && self.truth(rt, env, right)?,
+            )),
+            Node::Not(operand) => match self.eval(rt, env, operand)? {
+                Value::Bool(b) => Ok(Value::Bool(!b)),
+                v => Err(internal(rt, format!("unary not on {}", v.kind()))),
+            },
+            Node::Const(c) => self.constant(rt, *c),
+            Node::FnRef(f) => Ok(Value::Function(Rc::new(FnRef {
+                interp: self.rc(),
+                f: *f,
+            }))),
+            Node::Variant(d, name) => Ok(self.make_variant(*d, name, Vec::new())),
+            Node::Text(parts) => {
                 let mut out = String::new();
                 for part in parts {
                     match part {
-                        TextPart::Literal(s) => out.push_str(s),
-                        TextPart::Interpolation(e) => {
-                            let v = self.eval(rt, env, e)?;
-                            out.push_str(&self.display(rt, &v)?);
-                        }
+                        Part::Literal(s) => out.push_str(s),
+                        Part::Value(e) => match self.eval(rt, env, e)? {
+                            Value::Text(t) => out.push_str(t.as_str()),
+                            Value::Int(i) => {
+                                use std::fmt::Write;
+                                let _ = write!(out, "{i}");
+                            }
+                            v => out.push_str(&self.display(rt, &v)?),
+                        },
                     }
                 }
                 Ok(Value::text(out))
             }
-            ExprKind::SelfValue => env.get("self").cloned().ok_or_else(|| internal(rt, "self")),
-            ExprKind::Name(n) => self.name_value(rt, env, n),
-            ExprKind::Paren(e) => self.eval(rt, env, e),
-            ExprKind::Tuple(items) => Ok(Value::tuple(self.eval_all(rt, env, items)?)),
-            ExprKind::List(items) => Ok(Value::list(self.eval_all(rt, env, items)?)),
-            ExprKind::Map(entries) => {
+            Node::Tuple(items) => Ok(Value::tuple(self.eval_all(rt, env, items)?)),
+            Node::List(items) => Ok(Value::list(self.eval_all(rt, env, items)?)),
+            Node::Map(entries) => {
                 let mut map = OrderedMap::new();
                 for (k, v) in entries {
                     let key = self.eval(rt, env, k)?;
@@ -1049,80 +1898,79 @@ impl Interp {
                 }
                 Ok(Value::map(map))
             }
-            ExprKind::Comprehension {
-                element,
-                names,
-                iterable,
-                condition,
-            } => {
-                let source = self.eval(rt, env, iterable)?;
+            Node::Comprehension(c) => {
+                let source = self.eval(rt, env, &c.iterable)?;
                 let mut cursor = self.cursor(rt, source)?;
                 let mut out = Vec::new();
                 while let Some(item) = self.next(rt, &mut cursor)? {
-                    let mark = env.vars.len();
-                    bind_names(rt, env, names, item)?;
-                    let keep = match condition {
-                        Some(c) => self.truth(rt, env, c)?,
+                    bind_names(rt, env, &c.names, item)?;
+                    let keep = match &c.condition {
+                        Some(condition) => self.truth(rt, env, condition)?,
                         None => true,
                     };
                     if keep {
-                        out.push(self.eval(rt, env, element)?);
+                        out.push(self.eval(rt, env, &c.element)?);
                     }
-                    env.vars.truncate(mark);
+                }
+                for slot in &c.names {
+                    env.vars[*slot as usize] = Value::Unit;
                 }
                 rt.check_heap()?;
                 Ok(Value::list(out))
             }
-            ExprKind::Lambda { params, body, .. } => {
-                let key = &**body as *const Expr as usize;
-                let body = Rc::clone(
-                    self.lambdas
-                        .borrow_mut()
-                        .entry(key)
-                        .or_insert_with(|| Rc::new((**body).clone())),
-                );
-                Ok(Value::Function(Rc::new(Closure {
-                    interp: self.rc(),
-                    params: params
-                        .iter()
-                        .map(|p| Rc::from(p.name.text.as_str()))
-                        .collect(),
-                    body,
-                    env: env.clone(),
-                })))
-            }
-            ExprKind::Is { value, pattern } => {
+            Node::Lambda(code) => Ok(Value::Function(Rc::new(Closure {
+                interp: self.rc(),
+                captured: code
+                    .captures
+                    .iter()
+                    .map(|(outer, _)| env.vars[*outer as usize].clone())
+                    .collect(),
+                code: Rc::clone(code),
+                module: env.module,
+                types: Rc::clone(&env.types),
+            }))),
+            Node::Is(value, pattern) => {
                 let v = self.eval(rt, env, value)?;
-                let mark = env.vars.len();
-                let r = self.matches(rt, env, pattern, &v)?;
-                env.vars.truncate(mark);
-                Ok(Value::Bool(r))
+                Ok(Value::Bool(self.matches(rt, env, pattern, &v)?))
             }
-            ExprKind::Conditional {
-                then,
-                condition,
-                otherwise,
-            } => {
+            Node::Conditional(parts) => {
+                let [condition, then, otherwise] = &**parts;
                 if self.truth(rt, env, condition)? {
                     self.eval(rt, env, then)
                 } else {
                     self.eval(rt, env, otherwise)
                 }
             }
-            ExprKind::Binary { op, left, right } => self.binary(rt, env, op, left, right),
-            ExprKind::Unary { op, operand } => {
-                let v = self.eval(rt, env, operand)?;
-                match (*op, v) {
-                    ("not", Value::Bool(b)) => Ok(Value::Bool(!b)),
-                    ("-", Value::Int(i)) => rf::int_subtract(0, i)
-                        .map(Value::Int)
-                        .map_err(|f| traced(rt, f)),
-                    ("-", Value::Float(f)) => Ok(Value::Float(-f)),
-                    (op, v) => Err(internal(rt, format!("unary {op} on {}", v.kind()))),
+            Node::Or(left, right, yields_option) => {
+                // `items.get(i) or default` on a list: the item without building an Option.
+                if let (Node::Method(m), false) = (&**left, *yields_option) {
+                    if m.name == "get" && m.args.len() == 1 && m.args[0].name.is_none() {
+                        let receiver = self.eval(rt, env, &m.receiver)?;
+                        if let Value::List(items) = &receiver {
+                            if let Value::Int(i) = self.eval(rt, env, &m.args[0].value)? {
+                                return match usize::try_from(i).ok().and_then(|i| items.get(i)) {
+                                    Some(item) => Ok(item.clone()),
+                                    None => self.eval(rt, env, right),
+                                };
+                            }
+                            return Err(internal(rt, "List.get with an index that is not Int"));
+                        }
+                        let l = self.method_call_on(rt, env, m, receiver)?;
+                        return self.or_value(rt, env, l, right, false);
+                    }
                 }
+                let l = self.eval(rt, env, left)?;
+                self.or_value(rt, env, l, right, *yields_option)
             }
-            ExprKind::Try { operand, .. } => match self.eval(rt, env, operand)? {
-                Value::Enum(e) if &*e.type_name == "Result" && operand_is_value(operand) => {
+            Node::Negate(operand) => match self.eval(rt, env, operand)? {
+                Value::Int(i) => rf::int_subtract(0, i)
+                    .map(Value::Int)
+                    .map_err(|f| traced(rt, f)),
+                Value::Float(f) => Ok(Value::Float(-f)),
+                v => Err(internal(rt, format!("unary - on {}", v.kind()))),
+            },
+            Node::Try(operand, is_value) => match self.eval(rt, env, operand)? {
+                Value::Enum(e) if &*e.type_name == "Result" && *is_value => {
                     let inner = e
                         .fields
                         .first()
@@ -1131,24 +1979,18 @@ impl Interp {
                     if &*e.variant == "ok" {
                         Ok(inner)
                     } else {
-                        Err(Unwind::Error(inner))
+                        Err(Unwind::Error(Box::new(inner)))
                     }
                 }
                 v => Ok(v),
             },
-            ExprKind::Call { callee, arguments } => self.call(rt, env, callee, &[], arguments),
-            ExprKind::GenericCall {
-                callee,
-                types,
-                arguments,
-            } => self.call(rt, env, callee, types, arguments),
-            ExprKind::Index { target, index } => {
-                let t = self.eval(rt, env, target)?;
-                let i = self.eval(rt, env, index)?;
-                index_value(rt, &t, &i)
+            Node::CallValue(callee, args) => {
+                let function = self.eval(rt, env, callee)?;
+                let args = self.eval_all(rt, env, args)?;
+                self.call_value(rt, &function, args)
             }
-            ExprKind::Field { target, name } => self.field(rt, env, target, &name.text),
-            ExprKind::SafeField { target, name } => match self.eval(rt, env, target)? {
+            Node::Construct(c) => self.construct(rt, env, c),
+            Node::SafeField(target, name) => match self.eval(rt, env, target)? {
                 Value::Enum(e) if &*e.type_name == "Option" => {
                     if &*e.variant == "none" {
                         Ok(Value::none())
@@ -1158,12 +2000,40 @@ impl Interp {
                             .first()
                             .map(|(_, v)| v.clone())
                             .unwrap_or(Value::Unit);
-                        Ok(Value::some(field_of(rt, &inner, &name.text)?))
+                        Ok(Value::some(field_of(rt, &inner, name)?))
                     }
                 }
-                other => field_of(rt, &other, &name.text),
+                other => field_of(rt, &other, name),
             },
-            ExprKind::Error => Err(internal(rt, "expression with a syntax error")),
+            Node::Fault(message) => Err(rt.fault(FaultKind::InvalidArgument, message.clone())),
+        }
+    }
+
+    /// `l or right` once `l` is known: `right` only for `false` and `none` (runtime 1.2).
+    fn or_value(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        l: Value,
+        right: &Node,
+        yields_option: bool,
+    ) -> Outcome {
+        match l {
+            Value::Bool(true) => Ok(Value::Bool(true)),
+            Value::Bool(false) => self.eval(rt, env, right),
+            Value::Enum(e) if &*e.type_name == "Option" => {
+                if &*e.variant == "none" {
+                    self.eval(rt, env, right)
+                } else if yields_option {
+                    Ok(Value::Enum(e))
+                } else {
+                    Ok(e.fields
+                        .first()
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Unit))
+                }
+            }
+            other => Err(internal(rt, format!("or on {}", other.kind()))),
         }
     }
 
@@ -1171,33 +2041,17 @@ impl Interp {
         &self,
         rt: &mut Runtime,
         env: &mut Env,
-        items: &[Expr],
+        items: &[Node],
     ) -> Result<Vec<Value>, Unwind> {
-        items.iter().map(|e| self.eval(rt, env, e)).collect()
-    }
-
-    fn name_value(&self, rt: &mut Runtime, env: &mut Env, name: &str) -> Outcome {
-        if let Some(v) = env.get(name) {
-            return Ok(v.clone());
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(self.eval(rt, env, item)?);
         }
-        if let Some(d) = self.local_variant(env.module, name) {
-            return Ok(self.make_variant(d, name, Vec::new()));
-        }
-        match self.program.lookup(env.module, name) {
-            Some((_, Symbol::Const(c))) => self.constant(rt, c),
-            Some((_, Symbol::Func(f))) => Ok(Value::Function(Rc::new(FnRef {
-                interp: self.rc(),
-                f,
-            }))),
-            _ => match self.variant(env.module, name) {
-                Some(d) => Ok(self.make_variant(d, name, Vec::new())),
-                None => Err(internal(rt, format!("unknown name {name}"))),
-            },
-        }
+        Ok(out)
     }
 
     fn constant(&self, rt: &mut Runtime, c: usize) -> Outcome {
-        if let Some(v) = self.consts.borrow().get(&c) {
+        if let Some(v) = self.consts[c].get() {
             return Ok(v.clone());
         }
         let def = &self.program.consts[c];
@@ -1208,12 +2062,55 @@ impl Interp {
             },
             _ => return Err(internal(rt, "constant")),
         };
-        let mut env = self.env(def.module);
-        let value = self.eval(rt, &mut env, expr)?;
-        self.consts.borrow_mut().insert(c, value.clone());
+        let code = self.expr_code(&self.default_codes, (usize::MAX, c), def.module, expr);
+        let value = self.eval_code(rt, def.module, &code)?;
+        let _ = self.consts[c].set(value.clone());
         Ok(value)
     }
 
+    fn construct(&self, rt: &mut Runtime, env: &mut Env, c: &ConstructCode) -> Outcome {
+        match &c.variant {
+            Some(variant) if c.fields == 1 && c.args.len() == 1 && c.args[0].0 == 0 => {
+                let value = self.eval(rt, env, &c.args[0].1)?;
+                let shapes = &self.shapes[c.def];
+                let shape = shapes
+                    .iter()
+                    .find(|v| Rc::ptr_eq(&v.variant, variant))
+                    .or_else(|| shapes.iter().find(|v| v.variant == *variant));
+                Ok(match shape {
+                    Some(shape) if shape.fields.len() == 1 => Value::Enum(Rc::new(EnumValue {
+                        type_name: Rc::clone(&self.def_names[c.def]),
+                        variant: Rc::clone(&shape.variant),
+                        fields: unio_runtime::value::Fields::One([(
+                            Rc::clone(&shape.fields[0]),
+                            value,
+                        )]),
+                    })),
+                    _ => self.make_variant(c.def, variant, vec![value]),
+                })
+            }
+            Some(variant) => {
+                let mut values = vec![Value::Unit; c.fields];
+                for (i, node) in &c.args {
+                    let value = self.eval(rt, env, node)?;
+                    if *i < values.len() {
+                        values[*i] = value;
+                    }
+                }
+                Ok(self.make_variant(c.def, variant, values))
+            }
+            None => {
+                let mut values: Vec<Option<Value>> = vec![None; c.fields];
+                for (i, node) in &c.args {
+                    let value = self.eval(rt, env, node)?;
+                    if *i < values.len() {
+                        values[*i] = Some(value);
+                    }
+                }
+                self.finish_struct(rt, c.def, values)
+            }
+        }
+    }
     /// A variant declared in the module, which hides a prelude name (semantics 1.4).
     fn local_variant(&self, module: ModId, name: &str) -> Option<DefId> {
         self.variants
@@ -1223,7 +2120,7 @@ impl Interp {
             .copied()
     }
 
-    fn variant(&self, module: ModId, name: &str) -> Option<DefId> {
+    pub(crate) fn variant(&self, module: ModId, name: &str) -> Option<DefId> {
         let candidates = self.variants.get(name)?;
         candidates
             .iter()
@@ -1238,253 +2135,28 @@ impl Interp {
     }
 
     fn make_variant(&self, d: DefId, variant: &str, values: Vec<Value>) -> Value {
-        let names: Vec<String> = match &self.program.defs[d].kind {
-            DefKind::Enum(vs) => vs
-                .iter()
-                .find(|v| v.name == variant)
-                .map(|v| v.fields.iter().map(|(n, _)| n.clone()).collect())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        let fields = names
+        // Names are shared, so the same address finds the variant without comparing texts.
+        let shapes = &self.shapes[d];
+        let shape = shapes
             .iter()
-            .map(|n| Rc::from(n.as_str()))
-            .zip(values)
-            .collect();
+            .find(|v| std::ptr::eq(v.variant.as_ptr(), variant.as_ptr()))
+            .or_else(|| shapes.iter().find(|v| &*v.variant == variant));
+        let fields = match shape {
+            Some(shape) if shape.fields.len() == 1 && values.len() == 1 => {
+                let value = values.into_iter().next().unwrap_or(Value::Unit);
+                unio_runtime::value::Fields::One([(Rc::clone(&shape.fields[0]), value)])
+            }
+            Some(shape) => shape.fields.iter().cloned().zip(values).collect(),
+            None => unio_runtime::value::Fields::Zero,
+        };
         Value::Enum(Rc::new(EnumValue {
-            type_name: Rc::from(self.program.defs[d].name.as_str()),
-            variant: Rc::from(variant),
+            type_name: Rc::clone(&self.def_names[d]),
+            variant: match shape {
+                Some(shape) => Rc::clone(&shape.variant),
+                None => Rc::from(variant),
+            },
             fields,
         }))
-    }
-
-    fn field(&self, rt: &mut Runtime, env: &mut Env, target: &Expr, name: &str) -> Outcome {
-        if let ExprKind::Name(n) = &target.kind {
-            if env.get(n).is_none() {
-                if let Some(m) = self.program.module_alias(env.module, n) {
-                    return match self.program.lookup(m, name) {
-                        Some((_, Symbol::Const(c))) => self.constant(rt, c),
-                        Some((_, Symbol::Func(f))) => Ok(Value::Function(Rc::new(FnRef {
-                            interp: self.rc(),
-                            f,
-                        }))),
-                        _ => Err(internal(rt, format!("unknown {n}.{name}"))),
-                    };
-                }
-                if let Some((_, Symbol::Def(d))) = self.program.lookup(env.module, n) {
-                    return Ok(self.make_variant(d, name, Vec::new()));
-                }
-            }
-        }
-        let value = self.eval(rt, env, target)?;
-        field_of(rt, &value, name)
-    }
-
-    fn call(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        callee: &Expr,
-        types: &[Type],
-        arguments: &[Argument],
-    ) -> Outcome {
-        match &callee.kind {
-            ExprKind::Name(n)
-                if env.get(n).is_none() && self.local_variant(env.module, n).is_some() =>
-            {
-                let d = self.local_variant(env.module, n).unwrap_or(0);
-                self.construct(rt, env, d, Some(n), arguments)
-            }
-            ExprKind::Name(n) if env.get(n).is_none() => match self.program.lookup(env.module, n) {
-                Some((_, Symbol::Func(f))) => {
-                    let t = self.generic_types(env, f, types)?;
-                    self.call_bound(rt, env, f, None, arguments, t)
-                }
-                Some((_, Symbol::Def(d))) => self.construct(rt, env, d, None, arguments),
-                Some((_, Symbol::Const(c))) => {
-                    let function = self.constant(rt, c)?;
-                    let args = self.positional(rt, env, arguments)?;
-                    self.call_value(rt, &function, args)
-                }
-                None => match self.variant(env.module, n) {
-                    Some(d) => self.construct(rt, env, d, Some(n), arguments),
-                    None => Err(internal(rt, format!("unknown function {n}"))),
-                },
-            },
-            ExprKind::Field { target, name } => {
-                if let ExprKind::Name(n) = &target.kind {
-                    if env.get(n).is_none() {
-                        if let Some(m) = self.program.module_alias(env.module, n) {
-                            return match self.program.lookup(m, &name.text) {
-                                Some((_, Symbol::Func(f))) => {
-                                    let t = self.generic_types(env, f, types)?;
-                                    self.call_bound(rt, env, f, None, arguments, t)
-                                }
-                                Some((_, Symbol::Def(d))) => {
-                                    self.construct(rt, env, d, None, arguments)
-                                }
-                                _ => Err(internal(rt, format!("unknown {n}.{}", name.text))),
-                            };
-                        }
-                        if let Some((_, Symbol::Def(d))) = self.program.lookup(env.module, n) {
-                            if matches!(self.program.defs[d].kind, DefKind::Enum(_)) {
-                                return self.construct(rt, env, d, Some(&name.text), arguments);
-                            }
-                            let key = self.program.defs[d].name.clone();
-                            return match self.method(&key, &name.text) {
-                                Some(f) => self.call_bound(
-                                    rt,
-                                    env,
-                                    f,
-                                    None,
-                                    arguments,
-                                    Rc::new(HashMap::new()),
-                                ),
-                                None => Err(internal(rt, format!("no function {n}.{}", name.text))),
-                            };
-                        }
-                    }
-                }
-                self.method_call(rt, env, target, &name.text, arguments)
-            }
-            _ => {
-                let function = self.eval(rt, env, callee)?;
-                let args = self.positional(rt, env, arguments)?;
-                self.call_value(rt, &function, args)
-            }
-        }
-    }
-
-    fn positional(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        arguments: &[Argument],
-    ) -> Result<Vec<Value>, Unwind> {
-        arguments
-            .iter()
-            .map(|a| self.eval(rt, env, &a.value))
-            .collect()
-    }
-
-    fn method_call(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        target: &Expr,
-        name: &str,
-        arguments: &[Argument],
-    ) -> Outcome {
-        // A field that holds a function value: `self.steps.write_data(...)` is not a method.
-        let receiver = self.eval(rt, env, target)?;
-        let key = value_key(&receiver);
-        let Some(f) = self.method(&key, name) else {
-            if let Ok(Value::Function(_)) = field_of(rt, &receiver, name) {
-                let function = field_of(rt, &receiver, name)?;
-                let args = self.positional(rt, env, arguments)?;
-                return self.call_value(rt, &function, args);
-            }
-            let args = self.positional(rt, env, arguments)?;
-            return self.call_method_value(rt, receiver, name, args);
-        };
-        let var_self = self.program.funcs[f].self_param == Some(true);
-        if var_self && is_place(target) && !matches!(receiver, Value::Resource(_)) {
-            drop(receiver);
-            let (mut args, places) = self.bind_args(rt, env, f, None, arguments)?;
-            let result = self.with_place(rt, env, target, |interp, rt, slot| {
-                args[0] = take(slot);
-                let r = interp.call_fn(rt, f, &mut args, Rc::new(HashMap::new()));
-                *slot = take(&mut args[0]);
-                Ok(r)
-            })?;
-            for (i, place) in places {
-                self.put_place(rt, env, &place, take(&mut args[i]))?;
-            }
-            return result;
-        }
-        if let Value::Resource(cell) = &receiver {
-            let (mut args, places) = self.bind_args(rt, env, f, None, arguments)?;
-            if !var_self {
-                args[0] = cell.value.borrow().clone();
-                let result = self.call_fn(rt, f, &mut args, Rc::new(HashMap::new()));
-                for (i, place) in places {
-                    self.put_place(rt, env, &place, take(&mut args[i]))?;
-                }
-                return result;
-            }
-            args[0] = take(&mut cell.value.borrow_mut());
-            let result = self.call_fn(rt, f, &mut args, Rc::new(HashMap::new()));
-            *cell.value.borrow_mut() = take(&mut args[0]);
-            for (i, place) in places {
-                self.put_place(rt, env, &place, take(&mut args[i]))?;
-            }
-            return result;
-        }
-        self.call_bound(
-            rt,
-            env,
-            f,
-            Some(receiver),
-            arguments,
-            Rc::new(HashMap::new()),
-        )
-    }
-
-    fn construct(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        d: DefId,
-        variant: Option<&str>,
-        arguments: &[Argument],
-    ) -> Outcome {
-        let def = &self.program.defs[d];
-        match (&def.kind, variant) {
-            (DefKind::Enum(vs), Some(v)) => {
-                let Some(vd) = vs.iter().find(|x| x.name == v) else {
-                    return Err(internal(rt, format!("no variant {v}")));
-                };
-                let mut values = vec![Value::Unit; vd.fields.len()];
-                let mut position = 0;
-                for a in arguments {
-                    let i = match &a.name {
-                        Some(n) => vd
-                            .fields
-                            .iter()
-                            .position(|(f, _)| *f == n.text)
-                            .unwrap_or(0),
-                        None => {
-                            position += 1;
-                            position - 1
-                        }
-                    };
-                    let value = self.eval(rt, env, &a.value)?;
-                    if i < values.len() {
-                        values[i] = value;
-                    }
-                }
-                Ok(self.make_variant(d, v, values))
-            }
-            (DefKind::Struct(fields) | DefKind::Error(fields), _) => {
-                let mut values: Vec<Option<Value>> = vec![None; fields.len()];
-                let mut position = 0;
-                for a in arguments {
-                    let i = match &a.name {
-                        Some(n) => fields.iter().position(|f| f.name == n.text).unwrap_or(0),
-                        None => {
-                            position += 1;
-                            position - 1
-                        }
-                    };
-                    let value = self.eval(rt, env, &a.value)?;
-                    if i < values.len() {
-                        values[i] = Some(value);
-                    }
-                }
-                self.finish_struct(rt, d, values)
-            }
-            _ => Err(internal(rt, format!("{} cannot be constructed", def.name))),
-        }
     }
 
     /// Fills defaults (evaluated freshly in the declaring module) and builds the value.
@@ -1505,115 +2177,251 @@ impl Interp {
                         .and_then(|f| f.default.as_ref());
                     match default {
                         Some(e) => {
-                            let mut env = self.env(def.module);
-                            self.eval(rt, &mut env, e)?
+                            let code = self.expr_code(&self.field_codes, (d, i), def.module, e);
+                            self.eval_code(rt, def.module, &code)?
                         }
                         None => Value::Unit,
                     }
                 }
             };
-            out.push((Rc::from(field.name.as_str()), value));
+            out.push((Rc::clone(&self.field_names[d][i]), value));
         }
         Ok(Value::Struct(Rc::new(StructValue {
-            type_name: Rc::from(def.name.as_str()),
+            type_name: Rc::clone(&self.def_names[d]),
             fields: out,
         })))
     }
 
     // ---------------------------------------------------------------- operators
 
-    fn binary(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        op: &str,
-        left: &Expr,
-        right: &Expr,
-    ) -> Outcome {
-        match op {
-            "and" => {
-                return Ok(Value::Bool(
-                    self.truth(rt, env, left)? && self.truth(rt, env, right)?,
-                ));
-            }
-            "or" => {
-                let l = self.eval(rt, env, left)?;
-                return match l {
-                    Value::Bool(true) => Ok(Value::Bool(true)),
-                    Value::Bool(false) => self.eval(rt, env, right),
-                    Value::Enum(e) if &*e.type_name == "Option" => {
-                        if &*e.variant == "none" {
-                            self.eval(rt, env, right)
-                        } else if yields_option(right) {
-                            Ok(Value::Enum(e))
-                        } else {
-                            Ok(e.fields
-                                .first()
-                                .map(|(_, v)| v.clone())
-                                .unwrap_or(Value::Unit))
-                        }
-                    }
-                    other => Err(internal(rt, format!("or on {}", other.kind()))),
-                };
-            }
-            _ => {}
-        }
-        let l = self.eval(rt, env, left)?;
-        let r = self.eval(rt, env, right)?;
-        self.apply(rt, op, l, r)
-    }
-
-    fn apply(&self, rt: &mut Runtime, op: &str, l: Value, r: Value) -> Outcome {
+    fn apply(&self, rt: &mut Runtime, op: Op, l: Value, r: Value) -> Outcome {
         use Value::*;
         let t = |rt: &Runtime, x: Result<i64, Fault>| x.map(Int).map_err(|f| traced(rt, f));
         Ok(match (op, &l, &r) {
-            ("+", Int(a), Int(b)) => return t(rt, rf::int_add(*a, *b)),
-            ("-", Int(a), Int(b)) => return t(rt, rf::int_subtract(*a, *b)),
-            ("*", Int(a), Int(b)) => return t(rt, rf::int_multiply(*a, *b)),
-            ("/", Int(a), Int(b)) => return t(rt, rf::int_divide(*a, *b)),
-            ("%", Int(a), Int(b)) => return t(rt, rf::int_remainder(*a, *b)),
-            ("**", Int(a), Int(b)) => return t(rt, rf::int_power(*a, *b)),
-            ("+", Float(a), Float(b)) => Float(a + b),
-            ("-", Float(a), Float(b)) => Float(a - b),
-            ("*", Float(a), Float(b)) => Float(a * b),
-            ("/", Float(a), Float(b)) => Float(a / b),
-            ("%", Float(a), Float(b)) => Float(a % b),
-            ("**", Float(a), Float(b)) => Float(a.powf(*b)),
-            ("+", Text(a), Text(b)) => Value::text(format!("{}{}", a.as_str(), b.as_str())),
-            ("==", _, _) => Bool(self.equal(rt, &l, &r)?),
-            ("!=", _, _) => Bool(!self.equal(rt, &l, &r)?),
-            ("<" | "<=" | ">" | ">=", _, _) => {
+            (Op::Add, Int(a), Int(b)) => return t(rt, rf::int_add(*a, *b)),
+            (Op::Subtract, Int(a), Int(b)) => return t(rt, rf::int_subtract(*a, *b)),
+            (Op::Multiply, Int(a), Int(b)) => return t(rt, rf::int_multiply(*a, *b)),
+            (Op::Divide, Int(a), Int(b)) => return t(rt, rf::int_divide(*a, *b)),
+            (Op::Remainder, Int(a), Int(b)) => return t(rt, rf::int_remainder(*a, *b)),
+            (Op::Power, Int(a), Int(b)) => return t(rt, rf::int_power(*a, *b)),
+            (Op::Less, Int(a), Int(b)) => Bool(a < b),
+            (Op::LessEqual, Int(a), Int(b)) => Bool(a <= b),
+            (Op::Greater, Int(a), Int(b)) => Bool(a > b),
+            (Op::GreaterEqual, Int(a), Int(b)) => Bool(a >= b),
+            (Op::Equal, Int(a), Int(b)) => Bool(a == b),
+            (Op::NotEqual, Int(a), Int(b)) => Bool(a != b),
+            (Op::Equal, Text(a), Text(b)) => Bool(a == b),
+            (Op::NotEqual, Text(a), Text(b)) => Bool(a != b),
+            (Op::Add, Float(a), Float(b)) => Float(a + b),
+            (Op::Subtract, Float(a), Float(b)) => Float(a - b),
+            (Op::Multiply, Float(a), Float(b)) => Float(a * b),
+            (Op::Divide, Float(a), Float(b)) => Float(a / b),
+            (Op::Remainder, Float(a), Float(b)) => Float(a % b),
+            (Op::Power, Float(a), Float(b)) => Float(a.powf(*b)),
+            (Op::Add, Text(_), Text(_)) => {
+                let (Text(a), Text(b)) = (l, r) else {
+                    return Err(internal(rt, "text + text"));
+                };
+                // A text that nothing else holds grows in place.
+                Text(a.append(b.as_str()))
+            }
+            (Op::Equal, _, _) => Bool(self.equal(rt, &l, &r)?),
+            (Op::NotEqual, _, _) => Bool(!self.equal(rt, &l, &r)?),
+            (Op::Less | Op::LessEqual | Op::Greater | Op::GreaterEqual, _, _) => {
                 let ord = self.compare(rt, &l, &r)?;
                 Bool(match (op, ord) {
                     (_, None) => false,
-                    ("<", Some(o)) => o.is_lt(),
-                    ("<=", Some(o)) => o.is_le(),
-                    (">", Some(o)) => o.is_gt(),
+                    (Op::Less, Some(o)) => o.is_lt(),
+                    (Op::LessEqual, Some(o)) => o.is_le(),
+                    (Op::Greater, Some(o)) => o.is_gt(),
                     (_, Some(o)) => o.is_ge(),
                 })
             }
-            ("in", _, _) => return self.call_method_value(rt, r, "contains", vec![l]),
-            ("not in", _, _) => {
+            (Op::In | Op::NotIn, Text(_) | Int(_), List(items))
+                if items.iter().all(|x| matches!(x, Text(_) | Int(_))) =>
+            {
+                // List.contains compares with ==, which for texts and integers is equality
+                // of the values themselves.
+                let found = items.iter().any(|x| values_equal(x, &l));
+                Bool(found == (op == Op::In))
+            }
+            (Op::In, _, _) => return self.call_method_value(rt, r, "contains", vec![l]),
+            (Op::NotIn, _, _) => {
                 let v = self.call_method_value(rt, r, "contains", vec![l])?;
                 Bool(!matches!(v, Bool(true)))
             }
             _ => {
                 let method = match op {
-                    "+" => "add",
-                    "-" => "subtract",
-                    "*" => "multiply",
-                    "/" => "divide",
-                    _ => return Err(internal(rt, format!("operator {op} on {}", l.kind()))),
+                    Op::Add => "add",
+                    Op::Subtract => "subtract",
+                    Op::Multiply => "multiply",
+                    Op::Divide => "divide",
+                    _ => {
+                        return Err(internal(
+                            rt,
+                            format!("operator {} on {}", op.text(), l.kind()),
+                        ))
+                    }
                 };
                 return self.call_method_value(rt, l, method, vec![r]);
             }
         })
     }
 
+    // ---------------------------------------------------------------- patterns
+
+    fn matches(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        pattern: &Pat,
+        v: &Value,
+    ) -> Result<bool, Unwind> {
+        let inner;
+        let v = match v {
+            Value::Resource(cell) => {
+                inner = cell.value.borrow().clone();
+                &inner
+            }
+            other => other,
+        };
+        match pattern {
+            Pat::Wildcard => Ok(true),
+            Pat::Int(i) => Ok(matches!(v, Value::Int(x) if Some(*x) == *i)),
+            Pat::Bool(b) => Ok(matches!(v, Value::Bool(c) if c == b)),
+            Pat::Text(s) => Ok(matches!(v, Value::Text(t) if t.as_str() == s)),
+            Pat::Name {
+                last,
+                fallback,
+                known,
+            } => {
+                match v {
+                    Value::Enum(e) => {
+                        // Names are shared, so the same address is the same variant.
+                        if Rc::ptr_eq(&e.variant, last) {
+                            return Ok(true);
+                        }
+                        let ty = Rc::as_ptr(&e.type_name) as *const u8 as usize;
+                        if known.get() == ty {
+                            return Ok(*e.variant == **last);
+                        }
+                        if self.enum_has_variant(&e.type_name, last) {
+                            known.set(ty);
+                            return Ok(*e.variant == **last);
+                        }
+                    }
+                    Value::Struct(s)
+                        if Rc::ptr_eq(&s.type_name, last) || *s.type_name == **last =>
+                    {
+                        return Ok(true)
+                    }
+                    _ => {}
+                }
+                match fallback {
+                    NameFallback::Bind(slot) => {
+                        env.vars[*slot as usize] = v.clone();
+                        Ok(true)
+                    }
+                    NameFallback::Const(c) => {
+                        let k = self.constant(rt, *c)?;
+                        Ok(values_equal(&k, v))
+                    }
+                    NameFallback::No => Ok(false),
+                }
+            }
+            Pat::Constructor { last, args } => {
+                let fields: &[(Rc<str>, Value)] = match v {
+                    Value::Enum(e) if Rc::ptr_eq(&e.variant, last) || *e.variant == **last => {
+                        &e.fields
+                    }
+                    Value::Struct(s)
+                        if Rc::ptr_eq(&s.type_name, last) || *s.type_name == **last =>
+                    {
+                        &s.fields
+                    }
+                    _ => return Ok(false),
+                };
+                let mut position = 0;
+                for (n, p) in args {
+                    let value = match n {
+                        Some(n) => fields.iter().find(|(f, _)| **f == **n).map(|(_, x)| x),
+                        None => {
+                            position += 1;
+                            fields.get(position - 1).map(|(_, x)| x)
+                        }
+                    };
+                    let Some(value) = value else { return Ok(false) };
+                    if !self.matches(rt, env, p, value)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Pat::List {
+                elements,
+                fixed,
+                rest,
+            } => {
+                let Value::List(items) = v else {
+                    return Ok(false);
+                };
+                let fixed = *fixed;
+                if !rest && items.len() != fixed || items.len() < fixed {
+                    return Ok(false);
+                }
+                let mut i = 0;
+                for element in elements {
+                    match element {
+                        ListPat::Pattern(p) => {
+                            if !self.matches(rt, env, p, &items[i])? {
+                                return Ok(false);
+                            }
+                            i += 1;
+                        }
+                        ListPat::Rest(slot) => {
+                            let count = items.len() - fixed;
+                            env.vars[*slot as usize] = Value::list(items[i..i + count].to_vec());
+                            i += count;
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            Pat::Tuple(ps) => {
+                let Value::Tuple(items) = v else {
+                    return Ok(false);
+                };
+                if items.len() != ps.len() {
+                    return Ok(false);
+                }
+                for (p, x) in ps.iter().zip(items.iter()) {
+                    if !self.matches(rt, env, p, x)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Pat::Bind(pattern, slot) => {
+                if self.matches(rt, env, pattern, v)? {
+                    env.vars[*slot as usize] = v.clone();
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Pat::Or(ps) => {
+                for p in ps {
+                    if self.matches(rt, env, p, v)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
     fn equal(&self, rt: &mut Runtime, l: &Value, r: &Value) -> Result<bool, Unwind> {
         if let (Value::Struct(_) | Value::Enum(_), true) = (l, true) {
-            let key = value_key(l);
-            if let Some(&f) = self.method(&key, "equals").as_ref() {
+            if let Some(&f) = self.method_of(l, "equals").as_ref() {
                 if self.program.funcs[f].body.is_some() {
                     let v = self.call_method_value(rt, l.clone(), "equals", vec![r.clone()])?;
                     return Ok(matches!(v, Value::Bool(true)));
@@ -1649,18 +2457,9 @@ impl Interp {
             Value::Text(t) => t.as_str().to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Path(p) => p.as_str().to_string(),
-            Value::Int(_) | Value::Float(_) => {
-                let name = if matches!(v, Value::Int(_)) {
-                    "Int.to_text"
-                } else {
-                    "Float.to_text"
-                };
-                let mut args = vec![v.clone()];
-                match unio_runtime::externs::call(rt, name, &mut args)? {
-                    Value::Text(t) => t.as_str().to_string(),
-                    _ => String::new(),
-                }
-            }
+            // The same text as the externals Int.to_text and Float.to_text.
+            Value::Int(i) => i.to_string(),
+            Value::Float(x) => unio_runtime::externs::float_text::float_to_text(*x),
             Value::Resource(cell) => {
                 let inner = cell.value.borrow().clone();
                 self.display(rt, &inner)?
@@ -1697,153 +2496,6 @@ impl Interp {
             }
             other => format!("{other:?}"),
         })
-    }
-
-    // ---------------------------------------------------------------- patterns
-
-    fn matches(
-        &self,
-        rt: &mut Runtime,
-        env: &mut Env,
-        pattern: &Pattern,
-        v: &Value,
-    ) -> Result<bool, Unwind> {
-        let v = match v {
-            Value::Resource(cell) => cell.value.borrow().clone(),
-            other => other.clone(),
-        };
-        match &pattern.kind {
-            PatternKind::Wildcard => Ok(true),
-            PatternKind::Literal(lit) => Ok(match (lit, &v) {
-                (Literal::Int(t), Value::Int(i)) => parse_int(t) == Some(*i),
-                (Literal::Bool(b), Value::Bool(c)) => b == c,
-                (Literal::Text(parts), Value::Text(t)) => {
-                    let mut s = String::new();
-                    for p in parts {
-                        if let TextPart::Literal(l) = p {
-                            s.push_str(l);
-                        }
-                    }
-                    s == t.as_str()
-                }
-                _ => false,
-            }),
-            PatternKind::Name(names) => {
-                let last = &names.last().map(|n| n.text.as_str()).unwrap_or("");
-                match &v {
-                    Value::Enum(e) if self.enum_has_variant(&e.type_name, last) => {
-                        return Ok(&*e.variant == *last)
-                    }
-                    Value::Struct(s) if &*s.type_name == *last => return Ok(true),
-                    _ => {}
-                }
-                if names.len() == 1
-                    && !starts_upper(last)
-                    && self.variant(env.module, last).is_none()
-                {
-                    if let Some((_, Symbol::Const(c))) = self.program.lookup(env.module, last) {
-                        let k = self.constant(rt, c)?;
-                        return Ok(values_equal(&k, &v));
-                    }
-                    env.bind(last, v);
-                    return Ok(true);
-                }
-                if let Some((_, Symbol::Const(c))) = self.program.lookup(env.module, last) {
-                    let k = self.constant(rt, c)?;
-                    return Ok(values_equal(&k, &v));
-                }
-                Ok(false)
-            }
-            PatternKind::Constructor { name, arguments } => {
-                let last = name.last().map(|n| n.text.as_str()).unwrap_or("");
-                let fields: Vec<(Rc<str>, Value)> = match &v {
-                    Value::Enum(e) if &*e.variant == last => e.fields.clone(),
-                    Value::Struct(s) if &*s.type_name == last => s.fields.clone(),
-                    _ => return Ok(false),
-                };
-                let mut position = 0;
-                for (n, p) in arguments {
-                    let value = match n {
-                        Some(n) => fields
-                            .iter()
-                            .find(|(f, _)| **f == *n.text)
-                            .map(|(_, x)| x.clone()),
-                        None => {
-                            position += 1;
-                            fields.get(position - 1).map(|(_, x)| x.clone())
-                        }
-                    };
-                    let Some(value) = value else { return Ok(false) };
-                    if !self.matches(rt, env, p, &value)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            PatternKind::List(elements) => {
-                let items: Vec<Value> = match &v {
-                    Value::List(l) => l.iter().cloned().collect(),
-                    _ => return Ok(false),
-                };
-                let rest = elements
-                    .iter()
-                    .position(|e| matches!(e, ListElement::Rest(_)));
-                let fixed = elements.len() - usize::from(rest.is_some());
-                if rest.is_none() && items.len() != fixed || items.len() < fixed {
-                    return Ok(false);
-                }
-                let mut i = 0;
-                for element in elements {
-                    match element {
-                        ListElement::Pattern(p) => {
-                            if !self.matches(rt, env, p, &items[i])? {
-                                return Ok(false);
-                            }
-                            i += 1;
-                        }
-                        ListElement::Rest(n) => {
-                            let count = items.len() - fixed;
-                            env.bind(&n.text, Value::list(items[i..i + count].to_vec()));
-                            i += count;
-                        }
-                    }
-                }
-                Ok(true)
-            }
-            PatternKind::Tuple(ps) => {
-                let items: Vec<Value> = match &v {
-                    Value::Tuple(l) => l.iter().cloned().collect(),
-                    _ => return Ok(false),
-                };
-                if items.len() != ps.len() {
-                    return Ok(false);
-                }
-                for (p, x) in ps.iter().zip(items) {
-                    if !self.matches(rt, env, p, &x)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            PatternKind::Bind { pattern, name } => {
-                if self.matches(rt, env, pattern, &v)? {
-                    env.bind(&name.text, v);
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            PatternKind::Or(ps) => {
-                for p in ps {
-                    let mark = env.vars.len();
-                    if self.matches(rt, env, p, &v)? {
-                        return Ok(true);
-                    }
-                    env.vars.truncate(mark);
-                }
-                Ok(false)
-            }
-        }
     }
 
     fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
@@ -1925,9 +2577,10 @@ impl Interp {
         Value::Enum(Rc::new(EnumValue {
             type_name: Rc::from("Value"),
             variant: Rc::from(variant),
-            fields: field
-                .map(|(n, v)| vec![(Rc::from(n), v)])
-                .unwrap_or_default(),
+            fields: match field {
+                Some((n, v)) => unio_runtime::value::Fields::One([(Rc::from(n), v)]),
+                None => unio_runtime::value::Fields::Zero,
+            },
         }))
     }
 
@@ -2007,13 +2660,13 @@ impl Interp {
     }
 
     fn decode_error(&self, path: &str, message: impl Into<String>) -> Unwind {
-        Unwind::Error(Value::record(
+        Unwind::Error(Box::new(Value::record(
             "DecodeError",
             vec![
                 ("path", Value::text(path.to_string())),
                 ("message", Value::text(message.into())),
             ],
-        ))
+        )))
     }
 
     fn decode_json(&self, rt: &mut Runtime, ty: &RtTy, v: &Value, path: &str) -> Outcome {
@@ -2204,6 +2857,8 @@ impl Interp {
 }
 
 enum Cursor {
+    List(Rc<unio_runtime::heap::Counted<Vec<Value>>>, usize),
+    Text(unio_runtime::value::Text, usize),
     Items(std::vec::IntoIter<Value>),
     Range(i64, i64),
     Iterator(Value),
@@ -2223,9 +2878,12 @@ impl Callable for FnRef {
         while args.len() < total {
             args.push(Value::Unit);
         }
-        let result = self
-            .interp
-            .call_fn(runtime, self.f, &mut args, Rc::new(HashMap::new()));
+        let result = self.interp.call_fn(
+            runtime,
+            self.f,
+            &mut args,
+            Rc::clone(&self.interp.empty_types),
+        );
         for (slot, v) in arguments.iter_mut().zip(args) {
             *slot = v;
         }
@@ -2239,18 +2897,27 @@ impl Callable for FnRef {
 /// An anonymous function with the values it captured (L-11a).
 struct Closure {
     interp: Rc<Interp>,
-    params: Vec<Rc<str>>,
-    body: Rc<Expr>,
-    env: Env,
+    code: Rc<LambdaCode>,
+    captured: Vec<Value>,
+    module: ModId,
+    types: Types,
 }
 
 impl Callable for Closure {
     fn call(&self, runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
-        let mut env = self.env.clone();
-        for (name, value) in self.params.iter().zip(arguments.iter()) {
-            env.vars.push((Rc::clone(name), value.clone()));
+        let mut vars = vec![Value::Unit; self.code.slots];
+        for (slot, value) in vars.iter_mut().zip(arguments.iter().take(self.code.params)) {
+            *slot = value.clone();
         }
-        self.interp.eval(runtime, &mut env, &self.body)
+        for ((_, inner), value) in self.code.captures.iter().zip(&self.captured) {
+            vars[*inner as usize] = value.clone();
+        }
+        let mut env = Env {
+            vars: Slots::new(vars),
+            module: self.module,
+            types: Rc::clone(&self.types),
+        };
+        self.interp.eval(runtime, &mut env, &self.code.body)
     }
     fn name(&self) -> &str {
         "function"
@@ -2269,6 +2936,25 @@ fn ty_key(program: &Program, ty: &Ty) -> Option<String> {
         Ty::Named(d, _) => program.defs[*d].name.clone(),
         _ => return None,
     })
+}
+
+/// The type name of a value that is not a struct, an enum, or a resource.
+fn static_key(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "Int",
+        Value::Float(_) => "Float",
+        Value::Bool(_) => "Bool",
+        Value::Text(_) => "Text",
+        Value::Bytes(_) => "Bytes",
+        Value::Path(_) => "Path",
+        Value::List(_) => "List",
+        Value::Tuple(_) => "Tuple",
+        Value::Map(_) => "Map",
+        Value::Set(_) => "Set",
+        Value::Function(_) => "Function",
+        Value::Unit => "Unit",
+        Value::Struct(_) | Value::Enum(_) | Value::Resource(_) => "",
+    }
 }
 
 fn value_key(v: &Value) -> String {
@@ -2291,38 +2977,7 @@ fn value_key(v: &Value) -> String {
     }
 }
 
-fn is_place(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Name(_) | ExprKind::SelfValue => true,
-        ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => is_place(target),
-        ExprKind::Paren(e) => is_place(e),
-        _ => false,
-    }
-}
-
-/// Whether `try` applies to a stored `Result` value rather than to a call that fails.
-fn operand_is_value(e: &Expr) -> bool {
-    !matches!(
-        &e.kind,
-        ExprKind::Call { .. } | ExprKind::GenericCall { .. }
-    )
-}
-
-/// Whether the right operand of `or` is itself an `Option` (`Option or Option`).
-fn yields_option(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Name(n) => n == "none",
-        ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Name(n) if n == "some"),
-        ExprKind::Paren(e) => yields_option(e),
-        _ => false,
-    }
-}
-
-fn starts_upper(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_uppercase())
-}
-
-fn parse_int(text: &str) -> Option<i64> {
+pub(crate) fn parse_int(text: &str) -> Option<i64> {
     let t = text.replace('_', "");
     if let Some(h) = t.strip_prefix("0x") {
         i64::from_str_radix(h, 16).ok()
@@ -2337,33 +2992,155 @@ fn pointer(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
-fn find_handler(simple: &Simple) -> Option<(&Type, &Option<Name>)> {
-    fn search(e: &Expr) -> Option<(&Type, &Option<Name>)> {
-        match &e.kind {
-            ExprKind::Try {
-                handler: Some((t, n)),
-                ..
-            } => Some((t, n)),
-            ExprKind::Try { operand, .. } | ExprKind::Paren(operand) => search(operand),
-            _ => None,
-        }
-    }
-    match simple {
-        Simple::Let { value, .. } | Simple::Assign { value, .. } => search(value),
-        Simple::Return(Some(e)) | Simple::Expr(e) => search(e),
+/// A local or a literal, read without copying it.
+#[inline]
+fn peek<'e>(env: &'e Env, node: &'e Node) -> Option<&'e Value> {
+    match node {
+        Node::Local(slot) => Some(&env.vars[*slot as usize]),
+        Node::Value(v) => Some(v),
         _ => None,
     }
 }
 
-fn bind_names(rt: &Runtime, env: &mut Env, names: &[Name], item: Value) -> Result<(), Unwind> {
-    if names.len() == 1 {
-        env.bind(&names[0].text, item);
+/// Whether a node always gives a `Bool`, so that `or` with it on the left is boolean.
+fn gives_bool(node: &Node) -> bool {
+    match node {
+        Node::Binary(op, _, _) => !matches!(
+            op,
+            Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Remainder | Op::Power
+        ),
+        Node::And(..) | Node::Not(_) | Node::Is(..) | Node::Value(Value::Bool(_)) => true,
+        Node::Or(left, _, _) => gives_bool(left),
+        _ => false,
+    }
+}
+
+/// An integer expression made only of locals, literals, and operators, when every step
+/// succeeds; `None` sends it to the general path, which evaluates it again and reports the
+/// fault. Evaluating such an expression has no effects, so evaluating it twice is not observable.
+#[inline]
+fn fast_int(env: &Env, node: &Node) -> Option<i64> {
+    match node {
+        Node::Local(slot) => match env.vars[*slot as usize] {
+            Value::Int(i) => Some(i),
+            _ => None,
+        },
+        Node::Value(Value::Int(i)) => Some(*i),
+        Node::Field(target, name, at) => {
+            let Node::Local(slot) = **target else {
+                return None;
+            };
+            let Value::Struct(s) = &env.vars[slot as usize] else {
+                return None;
+            };
+            match s.fields.get(at.get() as usize) {
+                Some((n, Value::Int(i))) if Rc::ptr_eq(n, name) => Some(*i),
+                _ => None,
+            }
+        }
+        Node::Binary(op, l, r) => {
+            let a = fast_int(env, l)?;
+            let b = fast_int(env, r)?;
+            match op {
+                Op::Add => a.checked_add(b),
+                Op::Subtract => a.checked_sub(b),
+                Op::Multiply => a.checked_mul(b),
+                Op::Divide if b != 0 => a.checked_div(b),
+                Op::Remainder if b != 0 => Some(a.checked_rem(b).unwrap_or(0)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The value of `left op right` when both sides are integer expressions of [`fast_int`].
+#[inline]
+fn fast_binary(env: &Env, op: Op, left: &Node, right: &Node) -> Option<Value> {
+    let a = fast_int(env, left)?;
+    let b = fast_int(env, right)?;
+    Some(match op {
+        Op::Add => Value::Int(a.checked_add(b)?),
+        Op::Subtract => Value::Int(a.checked_sub(b)?),
+        Op::Multiply => Value::Int(a.checked_mul(b)?),
+        Op::Divide if b != 0 => Value::Int(a.checked_div(b)?),
+        Op::Remainder if b != 0 => Value::Int(a.checked_rem(b).unwrap_or(0)),
+        Op::Equal => Value::Bool(a == b),
+        Op::NotEqual => Value::Bool(a != b),
+        Op::Less => Value::Bool(a < b),
+        Op::LessEqual => Value::Bool(a <= b),
+        Op::Greater => Value::Bool(a > b),
+        Op::GreaterEqual => Value::Bool(a >= b),
+        _ => return None,
+    })
+}
+
+/// An operator on two integers.
+#[inline]
+fn int_op(rt: &Runtime, op: Op, a: i64, b: i64) -> Outcome {
+    let t = |x: Result<i64, Fault>| x.map(Value::Int).map_err(|f| traced(rt, f));
+    Ok(Value::Bool(match op {
+        Op::Add => return t(rf::int_add(a, b)),
+        Op::Subtract => return t(rf::int_subtract(a, b)),
+        Op::Multiply => return t(rf::int_multiply(a, b)),
+        Op::Divide => return t(rf::int_divide(a, b)),
+        Op::Remainder => return t(rf::int_remainder(a, b)),
+        Op::Power => return t(rf::int_power(a, b)),
+        Op::Equal => a == b,
+        Op::NotEqual => a != b,
+        Op::Less => a < b,
+        Op::LessEqual => a <= b,
+        Op::Greater => a > b,
+        Op::GreaterEqual => a >= b,
+        Op::In | Op::NotIn => return Err(internal(rt, "in on Int")),
+    }))
+}
+
+/// A comparison of integers, texts, or booleans, which have no methods that change it.
+#[inline]
+fn compare_simple(op: Op, a: &Value, b: &Value) -> Option<bool> {
+    use std::cmp::Ordering;
+    let ord: Ordering = match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Text(x), Value::Text(y)) => match op {
+            Op::Equal => return Some(x == y),
+            Op::NotEqual => return Some(x != y),
+            _ => x.as_str().cmp(y.as_str()),
+        },
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => return None,
+    };
+    Some(match op {
+        Op::Equal => ord.is_eq(),
+        Op::NotEqual => ord.is_ne(),
+        Op::Less => ord.is_lt(),
+        Op::LessEqual => ord.is_le(),
+        Op::Greater => ord.is_gt(),
+        Op::GreaterEqual => ord.is_ge(),
+        _ => return None,
+    })
+}
+
+/// Clears the slots a block bound, so that their values are freed and unshared as early as the
+/// scopes of the language allow.
+#[inline]
+fn clear_block(env: &mut Env, block: &Block) {
+    let (start, end) = block.clear;
+    for v in &mut env.vars[start as usize..end as usize] {
+        *v = Value::Unit;
+    }
+}
+
+/// Binds the item of an iteration to one name, or a tuple to several.
+fn bind_names(rt: &Runtime, env: &mut Env, names: &[Slot], item: Value) -> Result<(), Unwind> {
+    if let [slot] = names {
+        env.vars[*slot as usize] = item;
         return Ok(());
     }
     match item {
         Value::Tuple(t) => {
-            for (n, v) in names.iter().zip(t.iter()) {
-                env.bind(&n.text, v.clone());
+            for (slot, v) in names.iter().zip(t.iter()) {
+                env.vars[*slot as usize] = v.clone();
             }
             Ok(())
         }
@@ -2374,6 +3151,54 @@ fn bind_names(rt: &Runtime, env: &mut Env, names: &[Name], item: Value) -> Resul
     }
 }
 
+/// Whether a handler for the error type named `ty` receives the error.
+fn handles(ty: &str, error: &Value) -> bool {
+    if ty == "Error" {
+        return true;
+    }
+    match error {
+        Value::Struct(s) => &*s.type_name == ty,
+        Value::Enum(e) => &*e.type_name == ty,
+        _ => false,
+    }
+}
+
+/// The field at the end of a path of field names, copying shared levels on the way.
+fn navigate_fields<'a>(
+    rt: &Runtime,
+    v: &'a mut Value,
+    steps: &[PStep],
+) -> Result<&'a mut Value, Unwind> {
+    let Some((PStep::Field(n), rest)) = steps.split_first() else {
+        return Ok(v);
+    };
+    let next: &'a mut Value = match v {
+        Value::Struct(s) => {
+            let s = Rc::make_mut(s);
+            match field_index(&s.fields, n).map(|i| &mut s.fields[i]) {
+                Some((_, x)) => x,
+                None => return Err(internal(rt, format!("no field {n}"))),
+            }
+        }
+        other => {
+            return Err(internal(
+                rt,
+                format!("cannot change a part of a {}", other.kind()),
+            ))
+        }
+    };
+    navigate_fields(rt, next, rest)
+}
+
+/// The position of a field: by the shared name first, then by its text.
+#[inline]
+fn field_index(fields: &[(Rc<str>, Value)], name: &Rc<str>) -> Option<usize> {
+    fields
+        .iter()
+        .position(|(k, _)| Rc::ptr_eq(k, name))
+        .or_else(|| fields.iter().position(|(k, _)| **k == **name))
+}
+
 fn navigate<'a>(rt: &Runtime, v: &'a mut Value, steps: &[Step]) -> Result<&'a mut Value, Unwind> {
     let Some((first, rest)) = steps.split_first() else {
         return Ok(v);
@@ -2381,7 +3206,7 @@ fn navigate<'a>(rt: &Runtime, v: &'a mut Value, steps: &[Step]) -> Result<&'a mu
     let next: &'a mut Value = match (v, first) {
         (Value::Struct(s), Step::Field(n)) => {
             let s = Rc::make_mut(s);
-            match s.fields.iter_mut().find(|(k, _)| **k == **n) {
+            match field_index(&s.fields, n).map(|i| &mut s.fields[i]) {
                 Some((_, x)) => x,
                 None => return Err(internal(rt, format!("no field {n}"))),
             }
@@ -2412,6 +3237,30 @@ fn navigate<'a>(rt: &Runtime, v: &'a mut Value, steps: &[Step]) -> Result<&'a mu
         }
     };
     navigate(rt, next, rest)
+}
+
+/// A field read at a place in the code that remembers the position the field had last time:
+/// values of one type keep their fields in declaration order, and field names are shared, so a
+/// pointer comparison confirms the position.
+#[inline]
+fn field_cached(rt: &Runtime, v: &Value, name: &Rc<str>, at: &Cell<u32>) -> Outcome {
+    let fields = match v {
+        Value::Struct(s) => &s.fields[..],
+        Value::Enum(e) => &e.fields[..],
+        _ => return field_of(rt, v, name),
+    };
+    if let Some((n, x)) = fields.get(at.get() as usize) {
+        if Rc::ptr_eq(n, name) {
+            return Ok(x.clone());
+        }
+    }
+    match field_index(fields, name) {
+        Some(i) => {
+            at.set(i as u32);
+            Ok(fields[i].1.clone())
+        }
+        None => field_of(rt, v, name),
+    }
 }
 
 fn field_of(rt: &Runtime, v: &Value, name: &str) -> Outcome {
@@ -2480,7 +3329,7 @@ pub fn run_main(interp: &Rc<Interp>, rt: &mut Runtime, module: ModId) -> i32 {
         return 2;
     };
     let mut args = Vec::new();
-    match interp.call_fn(rt, main, &mut args, Rc::new(HashMap::new())) {
+    match interp.call_fn(rt, main, &mut args, Rc::clone(&interp.empty_types)) {
         Ok(v) => match rf::main_exit_code(&v) {
             Ok(code) => code,
             Err(fault) => {
@@ -2527,14 +3376,20 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
     let (mut rt, out, err) = Runtime::captured(Vec::new());
     let started = std::time::Instant::now();
     let label = format!("test \"{name}\"");
-    let mut env = interp.env(module);
+    let mut lower = Lowering::new(interp, module);
+    let body = lower.block(&test.body);
+    let mut env = Env {
+        vars: Slots::new(vec![Value::Unit; lower.slots()]),
+        module,
+        types: Rc::clone(&interp.empty_types),
+    };
     let result = rt
         .enter(
             label.as_str(),
             Rc::clone(&interp.files[module]),
             test.span.start.line as u32,
         )
-        .and_then(|_| interp.exec_block(&mut rt, &mut env, &test.body));
+        .and_then(|_| interp.run_block(&mut rt, &mut env, &body));
     let millis = started.elapsed().as_millis();
     let (passed, message) = match result {
         Ok(_) => (true, String::new()),
@@ -2553,5 +3408,42 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
         message,
         output,
         millis,
+    }
+}
+
+/// A library function of the prelude that the interpreter runs natively. Each gives the result
+/// of its Unio definition in `stdlib/`, which stays the specification and runs where an
+/// intrinsic declines (for example `contains` on structs with their own equality).
+#[derive(Clone, Copy)]
+enum Intrinsic {
+    IsEmpty,
+    ToInt,
+    First,
+    Last,
+    Enumerate,
+    Contains,
+    Keys,
+    Values,
+    AppendAll,
+    Range(DefId),
+}
+
+impl Intrinsic {
+    fn of(label: &str, range: Option<DefId>) -> Option<Intrinsic> {
+        let (module, name) = label.rsplit_once('.')?;
+        let kind = module.strip_prefix("prelude:alloc/builtin/");
+        Some(match (kind, name) {
+            (Some("text" | "list" | "map" | "set" | "bytes"), "is_empty") => Intrinsic::IsEmpty,
+            (Some("text"), "to_int") => Intrinsic::ToInt,
+            (Some("list"), "first") => Intrinsic::First,
+            (Some("list"), "last") => Intrinsic::Last,
+            (Some("list"), "enumerate") => Intrinsic::Enumerate,
+            (Some("list" | "map"), "contains") => Intrinsic::Contains,
+            (Some("map"), "keys") => Intrinsic::Keys,
+            (Some("map"), "values") => Intrinsic::Values,
+            (Some("list"), "append_all") => Intrinsic::AppendAll,
+            (None, "range") if module == "prelude:core/prelude" => Intrinsic::Range(range?),
+            _ => return None,
+        })
     }
 }

@@ -2,27 +2,11 @@
 unsafe module
 
 ## The parts with the separator between each two of them.
-public function join(parts as List[Text], separator as Text) returns Text:
-    var result = ""
-    for index, part in parts.enumerate():
-        if index > 0: result = result + separator
-        result = result + part
-    return result
+public external function join(parts as List[Text], separator as Text) returns Text
 
 ## The text cut at every occurrence of the separator; an empty separator is a fault.
 ## split("a.b", ".") is ["a", "b"] and split("", ".") is [""].
-public function split(text as Text, separator as Text) returns List[Text]:
-    assert not separator.is_empty()
-    var parts as List[Text] = []
-    var start = 0
-    while true:
-        match text.index_of(separator, start = start):
-            case some(position):
-                parts.append(text.slice(start, position))
-                start = position + separator.length()
-            case none:
-                parts.append(text.slice(start, text.length()))
-                return parts
+public external function split(text as Text, separator as Text) returns List[Text]
 
 ## The character with the code point; none for a surrogate or a value above 0x10FFFF.
 public external function from_code_point(code as Int) returns Option[Text]
@@ -32,3 +16,10 @@ test "join and split are inverse":
 
 test "split keeps empty parts":
     assert split("a..b", ".") == ["a", "", "b"]
+    assert split("", ".") == [""]
+    assert split("мир, мир", ", ") == ["мир", "мир"]
+    assert join([], ", ") == ""
+    expect_fault(split_at_empty)
+
+function split_at_empty():
+    let _ = split("a", "")

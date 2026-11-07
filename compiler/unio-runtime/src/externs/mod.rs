@@ -225,7 +225,7 @@ pub(crate) fn io_error_value(path: &str, kind: &str, reason: impl Into<String>) 
 
 /// An `IoError` that ends the external with an error.
 pub(crate) fn io_error(path: &str, kind: &str, reason: impl Into<String>) -> Unwind {
-    Unwind::Error(io_error_value(path, kind, reason))
+    Unwind::Error(Box::new(io_error_value(path, kind, reason)))
 }
 
 /// An `IoError` for an operating-system error.

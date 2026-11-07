@@ -4,7 +4,31 @@
 ## Equality, order, hashing and + are built into the compiler; "part in text" calls text.contains(part).
 unsafe module
 
-from std.text import split
+test "the native text methods keep the definitions of their documentation":
+    assert "a\r\nb\n\nc\n".lines() == ["a", "b", "", "c"]
+    assert "".lines() == []
+    assert "\n".lines() == [""]
+    assert " ab\tc\u{B}d\u{C} ".split_whitespace() == ["ab", "c", "d"]
+    assert "\u{A0}x\u{A0}".split_whitespace() == ["\u{A0}x\u{A0}"]
+    assert " \t мир \n".trim() == "мир"
+    assert " a ".trim_start() == "a " and " a ".trim_end() == " a"
+    assert "aaaa".count("aa") == 2 and "мир мир".count("ир") == 2
+    assert "aaa".replace("aa", "b") == "ba" and "abc".replace("x", "y") == "abc"
+    assert "ёж".repeat(3) == "ёжёжёж" and "x".repeat(0) == ""
+    assert "привет".starts_with("при") and "привет".ends_with("вет")
+    assert "abc".contains("") and not "abc".contains("d")
+    expect_fault(count_empty_part)
+    expect_fault(replace_empty_part)
+    expect_fault(repeat_negative)
+
+function count_empty_part():
+    let _ = "abc".count("")
+
+function replace_empty_part():
+    let _ = "abc".replace("", "x")
+
+function repeat_negative():
+    let _ = "abc".repeat(-1)
 
 test "text positions are scalars without implicit normalization":
     let composed = "\u{E9}"
@@ -57,90 +81,35 @@ extend Text:
     public function is_empty(self) returns Bool:
         return self.length() == 0
 
-    public function contains(self, part as Text) returns Bool:
-        match self.index_of(part):
-            case some(_): return true
-            case none: return false
+    ## Whether part occurs in the text; an empty part occurs in every text.
+    public external function contains(self, part as Text) returns Bool
 
-    public function starts_with(self, prefix as Text) returns Bool:
-        if prefix.length() > self.length(): return false
-        return self.slice(0, prefix.length()) == prefix
+    public external function starts_with(self, prefix as Text) returns Bool
 
-    public function ends_with(self, suffix as Text) returns Bool:
-        if suffix.length() > self.length(): return false
-        return self.slice(self.length() - suffix.length(), self.length()) == suffix
+    public external function ends_with(self, suffix as Text) returns Bool
 
-    ## Number of non-overlapping occurrences of part; part must not be empty.
-    public function count(self, part as Text) returns Int:
-        assert not part.is_empty()
-        var total = 0
-        var start = 0
-        while true:
-            match self.index_of(part, start = start):
-                case some(position):
-                    total = total + 1
-                    start = position + part.length()
-                case none: return total
+    ## Number of non-overlapping occurrences of part, from the start; part must not be empty.
+    public external function count(self, part as Text) returns Int
 
-    ## Every occurrence of old replaced with new; old must not be empty.
-    public function replace(self, old as Text, new as Text) returns Text:
-        assert not old.is_empty()
-        var result = ""
-        var start = 0
-        while true:
-            match self.index_of(old, start = start):
-                case some(position):
-                    result = result + self.slice(start, position) + new
-                    start = position + old.length()
-                case none: return result + self.slice(start, self.length())
+    ## Every non-overlapping occurrence of old, from the start, replaced with new; old must not
+    ## be empty.
+    public external function replace(self, old as Text, new as Text) returns Text
 
     ## Lines split on "\n" and "\r\n"; one final empty line is dropped, so "a\n" has one line.
-    public function lines(self) returns List[Text]:
-        var result as List[Text] = []
-        for line in split(self, "\n"):
-            if line.ends_with("\r"): result.append(line.slice(0, line.length() - 1))
-            else: result.append(line)
-        if not result.is_empty() and result[result.length() - 1].is_empty(): result.remove_last()
-        return result
+    public external function lines(self) returns List[Text]
 
     ## Words separated by white space (space, tab, line ends, vertical tab, form feed).
-    public function split_whitespace(self) returns List[Text]:
-        var words as List[Text] = []
-        var current = ""
-        for character in self.chars():
-            if is_whitespace(character):
-                if not current.is_empty():
-                    words.append(current)
-                    current = ""
-            else: current = current + character
-        if not current.is_empty(): words.append(current)
-        return words
+    public external function split_whitespace(self) returns List[Text]
 
     ## The text without white space at the start and at the end.
-    public function trim(self) returns Text:
-        return self.trim_start().trim_end()
+    public external function trim(self) returns Text
 
-    public function trim_start(self) returns Text:
-        var start = 0
-        let characters = self.chars()
-        while start < characters.length() and is_whitespace(characters[start]):
-            start = start + 1
-        return self.slice(start, self.length())
+    public external function trim_start(self) returns Text
 
-    public function trim_end(self) returns Text:
-        let characters = self.chars()
-        var end = characters.length()
-        while end > 0 and is_whitespace(characters[end - 1]):
-            end = end - 1
-        return self.slice(0, end)
+    public external function trim_end(self) returns Text
 
     ## The text repeated the given number of times; a negative count is a fault.
-    public function repeat(self, times as Int) returns Text:
-        assert times >= 0
-        var result = ""
-        for _ in range(0, times):
-            result = result + self
-        return result
+    public external function repeat(self, times as Int) returns Text
 
     ## A decimal integer with an optional sign; none for anything else, including overflow.
     public function to_int(self) returns Option[Int]:
@@ -160,9 +129,6 @@ extend Text:
                         case none: return none
                 case none: return none
         return some(value)
-
-function is_whitespace(character as Text) returns Bool:
-    return character in [" ", "\t", "\n", "\r", "\u{B}", "\u{C}"]
 
 function digit_value(character as Text) returns Option[Int]:
     if character.length() != 1: return none

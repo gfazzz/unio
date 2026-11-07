@@ -1,2 +1,5 @@
 __pycache__/
 /compiler/target/
+/bench/data/
+/bench/build/
+/bench/results*.json

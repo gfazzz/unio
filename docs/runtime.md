@@ -71,9 +71,9 @@ A program that reaches the runtime has passed `unio check`: names resolve, types
 
 ## 8. The interpreter of sprint S5
 
-1. The interpreter of S5 walks the checked syntax tree with the tables of the checker. The intermediate representation with resolved names, slots for local values, explicit error edges after every call that can fail, explicit release points of `using`, and the source position of every operation that can fault is built in S6, where code generation needs it and where it also makes the interpreter faster.
+1. The interpreter of S5 walked the checked syntax tree with the tables of the checker. Sprint S6 lowers that tree first (`compiler/unio/src/lower.rs`): names are resolved to slots of local values and indexes of constants, field positions and enum variants are found once at each place, literal lists and tuples are built once, and calls share one value stack. Several prelude functions (`is_empty`, `first`, `last`, `enumerate`, `contains`, `keys`, `values`, `append_all`, `range`, `Text.to_int`) run as intrinsics of the runtime with the results of their Unio definitions. The explicit error edges and release points that code generation needs are added to this form with the native back end. Measurements are in [bench/README.md](../bench/README.md); the JSON part of requirement 7.1 is not met by the interpreter yet.
 2. The interpreter is the reference for the meaning of programs: the native code of S6 must give the same output, exit code, and diagnostics for every test of the repository.
-3. Exit criterion of S5: every `test` block of `stdlib/`, `examples/`, `docs/examples/`, and `tools/` runs and passes; the tools in `tools/` run in the interpreter and give the same results as the Python checkers, which CI then stops using and the repository deletes (plan section 12).
+3. Exit criterion of S5: every `test` block of `stdlib/`, `examples/`, `docs/examples/`, and `tools/` runs and passes; the tools in `tools/` run in the interpreter and give the same results as the Python checkers, which stay in the repository as the reference for parity and for comparisons of performance.
 
 ## 9. The sandbox in practice
 

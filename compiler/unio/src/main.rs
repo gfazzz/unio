@@ -271,18 +271,6 @@ fn on_run_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
         .expect("the interpreter thread")
 }
 
-/// Prints the diagnostics of files and tells whether any of them is an error.
-fn report_errors(files: &[std::path::PathBuf], lang: Lang) -> bool {
-    let mut failed = false;
-    for analysis in unio::check_files(files) {
-        if analysis.has_errors() {
-            failed = true;
-            eprint!("{}", analysis.render_text(lang));
-        }
-    }
-    failed
-}
-
 fn run(arguments: &[String]) -> ExitCode {
     let (sandbox, arguments) = match sandbox_cli::take_run(arguments) {
         Ok(taken) => taken,
@@ -301,11 +289,17 @@ fn run(arguments: &[String]) -> ExitCode {
         Ok(plan) => plan,
         Err(code) => return ExitCode::from(code as u8),
     };
-    if report_errors(std::slice::from_ref(&file), Lang::En) {
-        return ExitCode::from(1);
-    }
+    // The program is loaded and checked once: a file with errors is reported and not run.
     let code = on_run_stack(move || {
-        let program = unio::load_checked(&[file], unio::effects::Profile::Application);
+        let program = match unio::load_for_run(&[file], unio::effects::Profile::Application) {
+            Ok(program) => program,
+            Err(analyses) => {
+                for analysis in analyses.iter().filter(|a| a.has_errors()) {
+                    eprint!("{}", analysis.render_text(Lang::En));
+                }
+                return 1;
+            }
+        };
         let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
         let interp = unio::interp::Interp::new(program);
         // SB-1: the sandbox applies after the sources are loaded and before main runs.

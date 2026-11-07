@@ -18,6 +18,51 @@ use std::fmt;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::rc::Rc;
 
+/// Names shared by every value of `Option` and `Result`, so that building one allocates only
+/// the value itself.
+pub mod names {
+    use std::rc::Rc;
+
+    pub const OPTION: usize = 0;
+    pub const SOME: usize = 1;
+    pub const NONE: usize = 2;
+    pub const VALUE: usize = 3;
+    pub const RESULT: usize = 4;
+    pub const OK: usize = 5;
+    pub const ERROR: usize = 6;
+
+    thread_local! {
+        static NAMES: [Rc<str>; 7] = [
+            Rc::from("Option"),
+            Rc::from("some"),
+            Rc::from("none"),
+            Rc::from("value"),
+            Rc::from("Result"),
+            Rc::from("ok"),
+            Rc::from("error"),
+        ];
+    }
+
+    pub fn with<R>(f: impl FnOnce(&[Rc<str>; 7]) -> R) -> R {
+        NAMES.with(f)
+    }
+
+    /// The shared name for `text` if it is one of them.
+    pub fn get(text: &str) -> Option<Rc<str>> {
+        let i = match text {
+            "Option" => OPTION,
+            "some" => SOME,
+            "none" => NONE,
+            "value" => VALUE,
+            "Result" => RESULT,
+            "ok" => OK,
+            "error" => ERROR,
+            _ => return None,
+        };
+        Some(with(|n| Rc::clone(&n[i])))
+    }
+}
+
 /// A value of a Unio program.
 #[derive(Clone)]
 pub enum Value {
@@ -60,7 +105,64 @@ pub struct StructValue {
 pub struct EnumValue {
     pub type_name: Rc<str>,
     pub variant: Rc<str>,
-    pub fields: Vec<(Rc<str>, Value)>,
+    pub fields: Fields,
+}
+
+/// The fields of a variant. Most variants, like `some` and `ok`, have at most one field, which
+/// is kept inline, so that making such a value allocates once.
+#[derive(Clone, Debug, Default)]
+pub enum Fields {
+    #[default]
+    Zero,
+    One([(Rc<str>, Value); 1]),
+    Many(Vec<(Rc<str>, Value)>),
+}
+
+impl std::ops::Deref for Fields {
+    type Target = [(Rc<str>, Value)];
+    #[inline]
+    fn deref(&self) -> &[(Rc<str>, Value)] {
+        match self {
+            Fields::Zero => &[],
+            Fields::One(one) => one,
+            Fields::Many(many) => many,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Fields {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [(Rc<str>, Value)] {
+        match self {
+            Fields::Zero => &mut [],
+            Fields::One(one) => one,
+            Fields::Many(many) => many,
+        }
+    }
+}
+
+impl From<Vec<(Rc<str>, Value)>> for Fields {
+    fn from(mut fields: Vec<(Rc<str>, Value)>) -> Fields {
+        match fields.len() {
+            0 => Fields::Zero,
+            1 => Fields::One([fields.pop().expect("one field")]),
+            _ => Fields::Many(fields),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Fields {
+    type Item = &'a (Rc<str>, Value);
+    type IntoIter = std::slice::Iter<'a, (Rc<str>, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl FromIterator<(Rc<str>, Value)> for Fields {
+    fn from_iter<I: IntoIterator<Item = (Rc<str>, Value)>>(items: I) -> Fields {
+        Fields::from(items.into_iter().collect::<Vec<_>>())
+    }
 }
 
 /// A resource: an object with identity, released exactly once.
@@ -117,11 +219,29 @@ impl Value {
     }
 
     pub fn some(value: Value) -> Value {
-        Value::variant("Option", "some", vec![("value", value)])
+        Value::interned_variant(names::OPTION, names::SOME, Some(value))
     }
 
+    /// `none`, shared by every use: it has no fields, so one value serves all.
     pub fn none() -> Value {
-        Value::variant("Option", "none", vec![])
+        thread_local! {
+            static NONE: Value = Value::interned_variant(names::OPTION, names::NONE, None);
+        }
+        NONE.with(Value::clone)
+    }
+
+    /// A variant of `Option` or `Result`, whose names are shared instead of allocated.
+    fn interned_variant(type_name: usize, variant: usize, value: Option<Value>) -> Value {
+        names::with(|n| {
+            Value::Enum(Rc::new(EnumValue {
+                type_name: Rc::clone(&n[type_name]),
+                variant: Rc::clone(&n[variant]),
+                fields: match value {
+                    Some(v) => Fields::One([(Rc::clone(&n[names::VALUE]), v)]),
+                    None => Fields::Zero,
+                },
+            }))
+        })
     }
 
     pub fn option(value: Option<Value>) -> Value {
@@ -132,11 +252,11 @@ impl Value {
     }
 
     pub fn ok(value: Value) -> Value {
-        Value::variant("Result", "ok", vec![("value", value)])
+        Value::interned_variant(names::RESULT, names::OK, Some(value))
     }
 
     pub fn error(value: Value) -> Value {
-        Value::variant("Result", "error", vec![("value", value)])
+        Value::interned_variant(names::RESULT, names::ERROR, Some(value))
     }
 
     /// The name of the kind of value, for internal error messages.
@@ -163,8 +283,8 @@ impl Value {
     /// The field of a struct or enum value with this name.
     pub fn field(&self, name: &str) -> Option<&Value> {
         let fields = match self {
-            Value::Struct(s) => &s.fields,
-            Value::Enum(e) => &e.fields,
+            Value::Struct(s) => &s.fields[..],
+            Value::Enum(e) => &e.fields[..],
             _ => return None,
         };
         fields.iter().find(|(n, _)| &**n == name).map(|(_, v)| v)
@@ -272,6 +392,10 @@ impl PartialEq for Value {
 
 /// Immutable text: UTF-8 with an index of character positions, so that length, slicing, and
 /// character access take constant time. A slice shares the storage of the text it comes from.
+///
+/// A text of ASCII characters needs no index: a character position is a byte offset. Any other
+/// text builds its index once, the first time a position inside it is needed: the byte offset
+/// of every 16th character, from which a position is found in at most 15 steps.
 #[derive(Clone)]
 pub struct Text {
     data: Rc<Counted<TextData>>,
@@ -279,32 +403,116 @@ pub struct Text {
     end: usize,
 }
 
-/// The storage of a text: the string and the byte offset of every character, plus the length.
+/// The storage of a text: the string, the number of characters, and the index of positions,
+/// which only a text with non-ASCII characters builds.
 #[derive(Clone)]
 pub struct TextData {
     string: String,
-    offsets: Vec<usize>,
+    chars: usize,
+    index: std::cell::OnceCell<Vec<usize>>,
 }
 
 impl TextData {
     fn new(string: String) -> TextData {
-        let mut offsets: Vec<usize> = string.char_indices().map(|(i, _)| i).collect();
-        offsets.push(string.len());
-        TextData { string, offsets }
+        let chars = if string.is_ascii() {
+            string.len()
+        } else {
+            string.chars().count()
+        };
+        TextData {
+            string,
+            chars,
+            index: std::cell::OnceCell::new(),
+        }
+    }
+
+    #[inline]
+    fn is_ascii(&self) -> bool {
+        self.chars == self.string.len()
+    }
+
+    /// The byte offset of a character position, from 0 to the number of characters.
+    #[inline]
+    fn byte(&self, char_index: usize) -> usize {
+        if self.is_ascii() || char_index == 0 {
+            return char_index;
+        }
+        if char_index == self.chars {
+            return self.string.len();
+        }
+        let bytes = self.string.as_bytes();
+        let mut at = self.index()[char_index / STRIDE];
+        for _ in 0..char_index % STRIDE {
+            at += utf8_width(bytes[at]);
+        }
+        at
+    }
+
+    /// The character position of a byte offset, if it is the start of a character or the end.
+    fn char_of_byte(&self, byte: usize) -> Option<usize> {
+        if self.is_ascii() {
+            return (byte <= self.string.len()).then_some(byte);
+        }
+        if byte == self.string.len() {
+            return Some(self.chars);
+        }
+        if !self.string.is_char_boundary(byte) {
+            return None;
+        }
+        let index = self.index();
+        let block = index.partition_point(|&b| b <= byte) - 1;
+        let bytes = self.string.as_bytes();
+        let mut at = index[block];
+        let mut position = block * STRIDE;
+        while at < byte {
+            at += utf8_width(bytes[at]);
+            position += 1;
+        }
+        Some(position)
+    }
+
+    fn index(&self) -> &Vec<usize> {
+        self.index.get_or_init(|| {
+            self.string
+                .char_indices()
+                .step_by(STRIDE)
+                .map(|(i, _)| i)
+                .collect()
+        })
+    }
+}
+
+/// The distance between two entries of the index of a text, in characters.
+const STRIDE: usize = 16;
+
+/// The length in bytes of the UTF-8 character that starts with `lead`.
+fn utf8_width(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        _ => 4,
     }
 }
 
 impl crate::heap::Measure for TextData {
+    /// The index is counted as if it were built, so that the count does not depend on
+    /// which positions a program happened to use.
     fn measure(&self) -> usize {
-        self.string.capacity() + self.offsets.capacity() * std::mem::size_of::<usize>()
+        let index = if self.is_ascii() {
+            0
+        } else {
+            (self.chars / STRIDE + 1) * std::mem::size_of::<usize>()
+        };
+        self.string.capacity() + index
     }
 }
 
 impl Text {
-    /// A text; the index of characters is built once, in time proportional to its length.
+    /// A text; its length is counted once, in time proportional to its size.
     pub fn new(text: impl Into<String>) -> Text {
         let data = TextData::new(text.into());
-        let end = data.offsets.len() - 1;
+        let end = data.chars;
         Text {
             data: Rc::new(Counted::new(data)),
             start: 0,
@@ -313,18 +521,32 @@ impl Text {
     }
 
     /// The text as a string slice.
+    #[inline]
     pub fn as_str(&self) -> &str {
-        let offsets = &self.data.offsets;
-        &self.data.string[offsets[self.start]..offsets[self.end]]
+        let data = &self.data;
+        let start = data.byte(self.start);
+        if self.end == self.start + 1 {
+            // One character, as `chars` and `char_at` make: its end follows from its start.
+            let end = start + utf8_width(data.string.as_bytes()[start]);
+            return &data.string[start..end];
+        }
+        &data.string[start..data.byte(self.end)]
     }
 
     /// The number of characters.
+    #[inline]
     pub fn len(&self) -> usize {
         self.end - self.start
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.start == self.end
+    }
+
+    /// Whether every character is ASCII, so that positions are byte offsets.
+    pub fn is_ascii(&self) -> bool {
+        self.data.is_ascii()
     }
 
     /// Characters from `start` up to, but not including, `end`; none outside `0..=len()` or
@@ -340,6 +562,30 @@ impl Text {
         })
     }
 
+    /// The characters as texts of length 1. For a text with non-ASCII characters, each
+    /// distinct character gets storage of its own, shared by its occurrences, so that reading
+    /// one needs no search for its position in the whole text.
+    pub fn chars(&self) -> Vec<Text> {
+        if self.is_ascii() {
+            return (0..self.len())
+                .map(|i| Text {
+                    data: Rc::clone(&self.data),
+                    start: self.start + i,
+                    end: self.start + i + 1,
+                })
+                .collect();
+        }
+        let mut seen: HashMap<char, Text, BuildHasherDefault<Fnv>> = HashMap::default();
+        self.as_str()
+            .chars()
+            .map(|c| {
+                seen.entry(c)
+                    .or_insert_with(|| Text::new(c.to_string()))
+                    .clone()
+            })
+            .collect()
+    }
+
     /// The character at the position as a text of length 1.
     pub fn char_at(&self, index: usize) -> Option<Text> {
         self.slice(index, index + 1)
@@ -347,19 +593,55 @@ impl Text {
 
     /// The character index of a byte offset inside this text, if it is a character boundary.
     pub fn char_index_of_byte(&self, byte: usize) -> Option<usize> {
-        let base = self.data.offsets[self.start];
-        let offsets = &self.data.offsets[self.start..=self.end];
-        offsets.binary_search(&(base + byte)).ok()
+        let data = &self.data;
+        if byte == 0 {
+            return Some(0);
+        }
+        let base = data.byte(self.start);
+        let position = data.char_of_byte(base + byte)?;
+        (position <= self.end).then(|| position - self.start)
     }
 
     /// The byte offset of a character index inside this text.
     pub fn byte_of_char(&self, index: usize) -> usize {
-        self.data.offsets[self.start + index] - self.data.offsets[self.start]
+        self.data.byte(self.start + index) - self.data.byte(self.start)
+    }
+
+    /// This text followed by `tail`. When this value is the only holder of its whole
+    /// storage, the storage grows in place, so that a loop of `t = t + part` takes linear
+    /// time; otherwise the result is a new text. The value is the same either way.
+    pub fn append(mut self, tail: &str) -> Text {
+        let whole = self.start == 0 && self.end == self.data.chars;
+        if whole {
+            if let Some(data) = Rc::get_mut(&mut self.data) {
+                data.string.push_str(tail);
+                data.chars += if tail.is_ascii() {
+                    tail.len()
+                } else {
+                    tail.chars().count()
+                };
+                data.index = std::cell::OnceCell::new();
+                data.recount();
+                self.end = data.chars;
+                return self;
+            }
+        }
+        let mut string = String::with_capacity(self.as_str().len() + tail.len());
+        string.push_str(self.as_str());
+        string.push_str(tail);
+        Text::new(string)
     }
 }
 
 impl PartialEq for Text {
+    #[inline]
     fn eq(&self, other: &Text) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        if Rc::ptr_eq(&self.data, &other.data) && self.start == other.start {
+            return true;
+        }
         self.as_str() == other.as_str()
     }
 }

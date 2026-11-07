@@ -12,6 +12,7 @@ pub mod effects;
 pub mod format;
 pub mod interp;
 pub mod lexer;
+mod lower;
 pub mod outline;
 pub mod parser;
 pub mod program;
@@ -91,32 +92,57 @@ pub fn symbol(query: &str, start: &std::path::Path) -> Vec<symbol::Report> {
     })
 }
 
+/// Loads and checks a program once for `unio run` and `unio test`: the program when no given
+/// file has an error, otherwise the analyses of the given files, as `check_files` reports them.
+/// Call it on a thread with a large stack, as the front end needs.
+pub fn load_for_run(
+    files: &[std::path::PathBuf],
+    profile: effects::Profile,
+) -> Result<program::Program, Vec<Analysis>> {
+    let program = load_checked(files, profile);
+    let failed = program.modules.iter().enumerate().any(|(i, m)| {
+        m.report
+            && (m.analysis.has_errors()
+                || program
+                    .diagnostics
+                    .iter()
+                    .any(|(module, d)| *module == i && d.severity == Severity::Error))
+    });
+    if failed {
+        Err(analyses(program))
+    } else {
+        Ok(program)
+    }
+}
+
 /// Like check_files, with the build profile of `unio check --profile` (C-21).
 pub fn check_files_with(files: &[std::path::PathBuf], profile: effects::Profile) -> Vec<Analysis> {
     let files = files.to_vec();
-    on_front_end_stack(move || {
-        let mut program = load_checked(&files, profile);
-        let semantic = std::mem::take(&mut program.diagnostics);
-        let mut modules = std::mem::take(&mut program.modules);
-        for (module, diagnostic) in semantic {
-            let list = &mut modules[module].analysis.diagnostics;
-            if !list.contains(&diagnostic) {
-                list.push(diagnostic);
-            }
+    on_front_end_stack(move || analyses(load_checked(&files, profile)))
+}
+
+/// The analyses of the given files, with the semantic diagnostics merged in.
+fn analyses(mut program: program::Program) -> Vec<Analysis> {
+    let semantic = std::mem::take(&mut program.diagnostics);
+    let mut modules = std::mem::take(&mut program.modules);
+    for (module, diagnostic) in semantic {
+        let list = &mut modules[module].analysis.diagnostics;
+        if !list.contains(&diagnostic) {
+            list.push(diagnostic);
         }
-        modules
-            .into_iter()
-            .filter(|m| m.report)
-            .map(|mut m| {
-                let lexical_or_syntax = m.analysis.has_errors();
-                let _ = lexical_or_syntax;
-                m.analysis
-                    .diagnostics
-                    .sort_by_key(|d| (d.span.start.line, d.span.start.column));
-                m.analysis
-            })
-            .collect()
-    })
+    }
+    modules
+        .into_iter()
+        .filter(|m| m.report)
+        .map(|mut m| {
+            let lexical_or_syntax = m.analysis.has_errors();
+            let _ = lexical_or_syntax;
+            m.analysis
+                .diagnostics
+                .sort_by_key(|d| (d.span.start.line, d.span.start.column));
+            m.analysis
+        })
+        .collect()
 }
 
 /// The stack of the thread that runs the front end. Parsing recurses once per nesting

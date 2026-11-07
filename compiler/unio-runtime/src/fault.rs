@@ -19,9 +19,10 @@ pub type Outcome = Result<Value, Unwind>;
 #[derive(Debug)]
 pub enum Unwind {
     /// An error of a `fails with` function; `try` passes it on and `on` receives it.
-    Error(Value),
-    /// A fault: the program ends with code 101 after releasing its resources.
-    Fault(Fault),
+    Error(Box<Value>),
+    /// A fault: the program ends with code 101 after releasing its resources. Boxed, so that
+    /// a result that carries a value stays small.
+    Fault(Box<Fault>),
     /// Memory or stack exhausted: the program ends with code 102 without running user code.
     Exhausted(Exhaustion),
 }
@@ -40,7 +41,7 @@ impl Unwind {
 
 impl From<Fault> for Unwind {
     fn from(fault: Fault) -> Unwind {
-        Unwind::Fault(fault)
+        Unwind::Fault(Box::new(fault))
     }
 }
 
@@ -294,7 +295,7 @@ mod tests {
         );
         assert!(main_exit_code(&Value::Int(-1)).is_err());
         assert_eq!(
-            Unwind::Fault(Fault::new(FaultKind::AssertFail, "x")).exit_code(),
+            Unwind::Fault(Box::new(Fault::new(FaultKind::AssertFail, "x"))).exit_code(),
             Some(101)
         );
         assert_eq!(Unwind::Exhausted(Exhaustion::Heap).exit_code(), Some(102));

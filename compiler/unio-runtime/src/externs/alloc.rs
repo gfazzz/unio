@@ -1,11 +1,11 @@
 //! External functions of the `alloc` layer: text, bytes, lists, maps, sets, numbers as text,
 //! code points, and the JSON conversions that the compiler provides.
 
-use super::{any, bytes, float, int, self_list, self_map, self_set, text, ExternFn};
+use super::{any, argument, bytes, float, int, self_list, self_map, self_set, text, ExternFn};
 use crate::externs::float_text::{float_to_text, text_to_float};
 use crate::fault::{FaultKind, Outcome};
 use crate::runtime::Runtime;
-use crate::value::{OrderedSet, Value};
+use crate::value::{OrderedSet, Text, Value};
 
 pub const BINDINGS: &[(&str, ExternFn)] = &[
     ("Int.to_text", int_to_text),
@@ -19,7 +19,20 @@ pub const BINDINGS: &[(&str, ExternFn)] = &[
     ("Text.to_lower", text_to_lower),
     ("Text.to_upper", text_to_upper),
     ("Text.to_float", text_to_float_extern),
+    ("Text.contains", text_contains),
+    ("Text.starts_with", text_starts_with),
+    ("Text.ends_with", text_ends_with),
+    ("Text.count", text_count),
+    ("Text.replace", text_replace),
+    ("Text.lines", text_lines),
+    ("Text.split_whitespace", text_split_whitespace),
+    ("Text.trim", text_trim),
+    ("Text.trim_start", text_trim_start),
+    ("Text.trim_end", text_trim_end),
+    ("Text.repeat", text_repeat),
     ("std.text.from_code_point", from_code_point),
+    ("std.text.split", text_split),
+    ("std.text.join", text_join),
     ("Bytes", bytes_new),
     ("Bytes.length", bytes_length),
     ("Bytes.to_text", bytes_to_text),
@@ -68,9 +81,7 @@ fn text_byte_length(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// The characters, each as a Text of length 1; each shares the storage of the text.
 fn text_chars(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let t = text(runtime, arguments, 0)?;
-    let chars = (0..t.len())
-        .map(|i| Value::Text(t.char_at(i).expect("an index inside the text")))
-        .collect();
+    let chars = t.chars().into_iter().map(Value::Text).collect();
     let list = Value::list(chars);
     runtime.check_heap()?;
     Ok(list)
@@ -161,6 +172,253 @@ fn text_to_float_extern(runtime: &mut Runtime, arguments: &mut [Value]) -> Outco
     Ok(Value::option(
         text_to_float(text(runtime, arguments, 0)?.as_str()).map(Value::Float),
     ))
+}
+
+/// White space as the text methods define it: space, tab, line ends, vertical tab, form feed.
+fn is_white(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{B}' | '\u{C}')
+}
+
+/// A fault with the message of the assertion that the Unio definition of the method made.
+fn assertion(runtime: &Runtime, condition: &str) -> crate::fault::Unwind {
+    runtime.fault(
+        FaultKind::AssertionFailed,
+        format!("assertion failed: {condition}"),
+    )
+}
+
+/// A part of `t` by byte offsets, as a slice that shares the storage of `t`.
+fn part(t: &Text, start: usize, end: usize) -> Value {
+    let (Some(from), Some(to)) = (t.char_index_of_byte(start), t.char_index_of_byte(end)) else {
+        return Value::text(&t.as_str()[start..end]);
+    };
+    Value::Text(t.slice(from, to).expect("a part inside the text"))
+}
+
+/// Parts of `t` at byte ranges in increasing order, as slices that share the storage of `t`.
+/// The character positions are counted along the way, so that the index of positions of a
+/// non-ASCII text is not needed.
+fn parts(t: &Text, pieces: impl Iterator<Item = (usize, usize)>) -> Vec<Value> {
+    if t.is_ascii() {
+        return pieces
+            .map(|(start, end)| Value::Text(t.slice(start, end).expect("a part inside the text")))
+            .collect();
+    }
+    let s = t.as_str();
+    let (mut byte, mut position) = (0, 0);
+    let mut at = |target: usize| {
+        position += s[byte..target].chars().count();
+        byte = target;
+        position
+    };
+    pieces
+        .map(|(start, end)| {
+            let from = at(start);
+            let to = at(end);
+            Value::Text(t.slice(from, to).expect("a part inside the text"))
+        })
+        .collect()
+}
+
+/// Byte ranges of the parts of `s` cut at every occurrence of `separator`.
+fn cut<'a>(s: &'a str, separator: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let mut start = 0;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        match s[start..].find(separator) {
+            Some(found) => {
+                let range = (start, start + found);
+                start += found + separator.len();
+                Some(range)
+            }
+            None => {
+                done = true;
+                Some((start, s.len()))
+            }
+        }
+    })
+}
+
+fn text_list(runtime: &Runtime, items: Vec<Value>) -> Outcome {
+    let list = Value::list(items);
+    runtime.check_heap()?;
+    Ok(list)
+}
+
+fn text_contains(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let part = text(runtime, arguments, 1)?;
+    Ok(Value::Bool(t.as_str().contains(part.as_str())))
+}
+
+fn text_starts_with(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let prefix = text(runtime, arguments, 1)?;
+    Ok(Value::Bool(t.as_str().starts_with(prefix.as_str())))
+}
+
+fn text_ends_with(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let suffix = text(runtime, arguments, 1)?;
+    Ok(Value::Bool(t.as_str().ends_with(suffix.as_str())))
+}
+
+/// Number of non-overlapping occurrences of part; part must not be empty.
+fn text_count(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let part = text(runtime, arguments, 1)?;
+    if part.is_empty() {
+        return Err(assertion(runtime, "not part.is_empty()"));
+    }
+    let n = match part.as_str().as_bytes() {
+        [byte] => t.as_str().bytes().filter(|b| b == byte).count(),
+        _ => t.as_str().matches(part.as_str()).count(),
+    };
+    Ok(count(n))
+}
+
+/// Every occurrence of old replaced with new; old must not be empty.
+fn text_replace(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let old = text(runtime, arguments, 1)?;
+    let new = text(runtime, arguments, 2)?;
+    if old.is_empty() {
+        return Err(assertion(runtime, "not old.is_empty()"));
+    }
+    if !t.as_str().contains(old.as_str()) {
+        return Ok(Value::Text(t));
+    }
+    let result = Value::text(t.as_str().replace(old.as_str(), new.as_str()));
+    runtime.check_heap()?;
+    Ok(result)
+}
+
+/// Lines split on "\n" and "\r\n"; one final empty line is dropped, so "a\n" has one line.
+fn text_lines(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let s = t.as_str();
+    let mut lines = parts(
+        &t,
+        cut(s, "\n").map(|(start, end)| {
+            if s[start..end].ends_with('\r') {
+                (start, end - 1)
+            } else {
+                (start, end)
+            }
+        }),
+    );
+    if matches!(lines.last(), Some(Value::Text(last)) if last.is_empty()) {
+        lines.pop();
+    }
+    text_list(runtime, lines)
+}
+
+/// Words separated by white space (space, tab, line ends, vertical tab, form feed).
+fn text_split_whitespace(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let s = t.as_str();
+    let mut ranges = Vec::new();
+    let mut start = None;
+    for (i, c) in s.char_indices() {
+        match (is_white(c), start) {
+            (true, Some(b)) => {
+                ranges.push((b, i));
+                start = None;
+            }
+            (false, None) => start = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(b) = start {
+        ranges.push((b, s.len()));
+    }
+    let words = parts(&t, ranges.into_iter());
+    text_list(runtime, words)
+}
+
+fn trimmed(t: &Text, start: bool, end: bool) -> Value {
+    let s = t.as_str();
+    let mut from = 0;
+    let mut to = s.len();
+    if start {
+        from = s.len() - s.trim_start_matches(is_white).len();
+    }
+    if end {
+        to = from + s[from..].trim_end_matches(is_white).len();
+    }
+    part(t, from, to)
+}
+
+/// The text without white space at the start and at the end.
+fn text_trim(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    Ok(trimmed(&text(runtime, arguments, 0)?, true, true))
+}
+
+fn text_trim_start(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    Ok(trimmed(&text(runtime, arguments, 0)?, true, false))
+}
+
+fn text_trim_end(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    Ok(trimmed(&text(runtime, arguments, 0)?, false, true))
+}
+
+/// The text repeated the given number of times; a negative count is a fault.
+fn text_repeat(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let times = int(runtime, arguments, 1)?;
+    let Ok(times) = usize::try_from(times) else {
+        return Err(assertion(runtime, "times >= 0"));
+    };
+    let size = t.as_str().len().checked_mul(times);
+    if size.is_none_or(|n| n > isize::MAX as usize) {
+        return Err(crate::fault::Unwind::Exhausted(
+            crate::fault::Exhaustion::Heap,
+        ));
+    }
+    let result = Value::text(t.as_str().repeat(times));
+    runtime.check_heap()?;
+    Ok(result)
+}
+
+/// The text cut at every occurrence of the separator; an empty separator is a fault.
+fn text_split(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let separator = text(runtime, arguments, 1)?;
+    if separator.is_empty() {
+        return Err(assertion(runtime, "not separator.is_empty()"));
+    }
+    let items = parts(&t, cut(t.as_str(), separator.as_str()));
+    text_list(runtime, items)
+}
+
+/// The parts with the separator between each two of them.
+fn text_join(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let separator = text(runtime, arguments, 1)?;
+    let joined = match argument(runtime, arguments, 0)? {
+        Value::List(items) => {
+            let mut out = String::new();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(separator.as_str());
+                }
+                match item {
+                    Value::Text(t) => out.push_str(t.as_str()),
+                    other => return Err(super::wrong(runtime, 0, "List[Text]", other)),
+                }
+            }
+            out
+        }
+        other => {
+            let other = other.clone();
+            return Err(super::wrong(runtime, 0, "List[Text]", &other));
+        }
+    };
+    let result = Value::text(joined);
+    runtime.check_heap()?;
+    Ok(result)
 }
 
 /// The character with the code point; none for a surrogate or a value above 0x10FFFF.

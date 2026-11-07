@@ -1,0 +1,10 @@
+## Benchmark (d): naive recursion and an arithmetic loop.
+function fib(n as Int) returns Int:
+    if n < 2: return n
+    return fib(n - 1) + fib(n - 2)
+
+public function main():
+    var total = 0
+    for i in range(0, 10000000):
+        total = total + i * i % 7
+    print("{fib(30)} {total}")

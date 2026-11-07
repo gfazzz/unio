@@ -1,0 +1,18 @@
+## Benchmark (c): split every line on spaces, join with "-", replace a word, interpolate a record.
+import std.args
+import std.files
+from std.text import join, split
+
+public function main() returns Int:
+    let name = args.list().first() or ""
+    let text = try files.read_text(Path(name)) on IoError as e:
+        print_error(e.reason)
+        return 1
+    var total = 0
+    for index, line in text.lines().enumerate():
+        let words = split(line, " ")
+        let joined = join(words, "-")
+        let record = "{index}:{words.length()}:{joined.replace("the", "THE")}"
+        total = total + record.length()
+    print("{total}")
+    return 0
