@@ -51,7 +51,7 @@ impl Places {
     pub fn current(base: &Path) -> Places {
         Places {
             home: crate::externs::system::home_dir().map(PathBuf::from),
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            cwd: working_directory().to_path_buf(),
             temp: std::env::temp_dir(),
             base: base.to_path_buf(),
         }
@@ -138,8 +138,18 @@ impl std::fmt::Display for Scope {
 /// The path as the file system sees it: absolute, without `.` and `..`, and with the links of
 /// its longest existing prefix resolved, so that a link cannot lead out of a scope.
 pub fn resolve(path: &Path) -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    resolve_in(path, &cwd)
+    resolve_in(path, working_directory())
+}
+
+/// The working directory of the process, read once. Unio programs cannot change it, and under
+/// Seatbelt `getcwd` fails when the directory itself is not readable, so it is read before the
+/// sandbox is applied; otherwise relative paths would not resolve into their scopes.
+pub fn working_directory() -> &'static Path {
+    static CWD: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CWD.get_or_init(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        std::fs::canonicalize(&cwd).unwrap_or(cwd)
+    })
 }
 
 fn resolve_in(path: &Path, cwd: &Path) -> PathBuf {
@@ -605,6 +615,7 @@ fn apply_os(
     _process_wide: &Permissions,
     allow_weaker: bool,
 ) -> Result<Vec<String>, Refused> {
+    working_directory();
     let missing = linux::missing();
     if !missing.is_empty() && !allow_weaker {
         return Err(refuse(&missing));
@@ -619,6 +630,7 @@ fn apply_os(
     process_wide: &Permissions,
     _allow_weaker: bool,
 ) -> Result<Vec<String>, Refused> {
+    working_directory();
     macos::apply(process_wide, &sandbox.limits).map_err(Refused)?;
     Ok(Vec::new())
 }
