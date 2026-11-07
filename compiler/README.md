@@ -4,16 +4,24 @@ The front end of the Unio compiler, written in Rust (requirements, section 10): 
 parser, the syntax tree, diagnostics and their catalog, the formatter, the outline, the static
 checks of [docs/semantics.md](../docs/semantics.md), `unio symbol`, and the interpreter of
 [docs/runtime.md](../docs/runtime.md) behind `unio run` and `unio test`, which run every program
-in the sandbox of SB-1. These are sprints S1 to S5 of the plan and the sandbox part of S6; the
-native runtime and code generation follow in sprint S6.
+in the sandbox of SB-1, and `unio build`, which compiles a program to one native executable
+through Cranelift (docs/runtime.md 8.4). These are sprints S1 to S5 of the plan, the sandbox
+part of S6, and the first part of its native code generation, for Linux on x86-64.
 
 ## Build and test
 
-Rust stable and the standard library only: there are no external crates, so the build needs no
-network and is reproducible (C-4). The sandbox keeps this: Landlock, seccomp, resource limits and
-Seatbelt are called through `extern` declarations in `unio-runtime/src/sandbox/`, as the runtime
-already does for `fsync`, `getpwuid` and `MoveFileExW`, so `libc` and `windows-sys` are not
-dependencies and the bill of materials stays empty (R-6).
+The front end, the interpreter and the runtime use the Rust standard library only. The code
+generator of `unio build` uses Cranelift (`cranelift-codegen`, `cranelift-frontend`,
+`cranelift-module`, `cranelift-object`, a stable release pinned to exact versions, with the
+crates they need recorded in `Cargo.lock`), the one dependency that requirements section 10 names;
+an executable contains none of it, because the linker drops what the runtime does not call. The
+sandbox calls Landlock, seccomp, resource limits and Seatbelt through `extern` declarations in
+`unio-runtime/src/sandbox/`, as the runtime already does for `fsync`, `getpwuid` and
+`MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6).
+
+The library crate `unio` is also built as a static library, `target/<profile>/libunio.a`: the
+runtime that `unio build` links into every executable, found next to the `unio` binary or
+through `UNIO_RUNTIME_LIB`. Linking needs the system C compiler (`cc`, or `CC`).
 
 ```sh
 cd compiler
@@ -22,6 +30,7 @@ cargo test                     # corpus, repository sources, diagnostics, fuzzin
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo test --release -p unio --test tools -- --ignored   # Unio tools against the Python checkers
+cargo test -p unio --test native                          # native executables against unio run
 ```
 
 The workspace has two crates: `unio` (this front end, the interpreter, and the command) and
@@ -40,6 +49,7 @@ The workspace has two crates: `unio` (this front end, the interpreter, and the c
 | `unio parse --ast FILE` | Prints the syntax tree as an S-expression without spans; the form is stable and is used to compare parses |
 | `unio explain CODE` | Prints the explanation of a diagnostic code with an example of the error and the example fixed (C-9) |
 | `unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`, in the sandbox described below. The sandbox options come before FILE, or between FILE and `--`. Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion (heap, stack, wall or CPU time of the policy), 103 when the policy or the manifest cannot be read or parsed or the sandbox cannot be applied, 1 if the program does not compile |
+| `unio build [--release] FILE [-o OUT]` | Checks the program like `unio run` and, without errors, compiles it to one executable OUT (by default the name of FILE without `.unio`), for Linux on x86-64 so far; `--release` optimises the generated code. The executable runs `main` with its arguments as `std.args.list()`, in the sandbox of the manifest of FILE's package narrowed by `UNIO_POLICY`, and ends with the codes of `unio run`. A construct not compiled natively yet stops the build with its place (docs/runtime.md 8.4). Exit code 0 when built, 1 otherwise, 2 on wrong usage |
 | `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). Each file's tests run in the sandbox of its package, with the same options and codes as `unio run`. Exit code 0 when every test passed, 1 otherwise |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,
@@ -258,6 +268,31 @@ checkers. A loop of a million iterations and 250,000 recursive calls takes 0.7 s
 table is built once per process, frames hold shared names, and method lookup does not allocate;
 the remaining cost is the tree walk and allocation of environments, which S6 replaces.
 
+## Native code (sprint S6)
+
+`src/native/` compiles the lowered form of `src/lower.rs` (docs/runtime.md 8.4):
+
+- `units.rs` lists the bodies of a program (functions, constants, defaults, lambdas) in one
+  order and the lowered statements, nodes, patterns and literals each passes to the runtime, in
+  one canonical walk that the build and the executable share.
+- `codegen.rs` translates every body with Cranelift: locals of type `Int`, `Float` and `Bool`
+  unboxed in registers with inline overflow and zero checks, direct calls with scalars in
+  registers, inline push and pop of the call frame and the current line for traces, temporaries
+  on the stack released on every path out, and unwinding by status to `try`, `on` and `using`.
+  It refuses a unit rather than generate doubtful code: a construct it cannot compile yet, or an
+  internal inconsistency it detects, stops the build with the place.
+- `support.rs` is the runtime side: the context of native code, the functions it calls for values
+  that own memory (methods, fields, construction, patterns, iteration, places), the hooks
+  through which the interpreter's dispatch and the constants and defaults enter native code, and
+  `unio_native_main`, the start of an executable.
+- `image.rs` encodes the embedded program; `mod.rs` loads, checks, compiles, and links.
+
+The executable rebuilds the declaration tables from its embedded sources (`src/vfs.rs` serves
+them to `Program::load`), lowers the program the same way, fills the reference tables of its
+bodies, applies the sandbox, and runs `main`; the interpreter then only dispatches and never
+evaluates lowered code. Timings against Python, Go and Rust are in
+[bench/README.md](../bench/README.md).
+
 ## Tests
 
 The tests were written before the code (concept, section 1.2):
@@ -304,6 +339,12 @@ The tests were written before the code (concept, section 1.2):
   for an unreadable or invalid policy or manifest; and tests that run in their package's sandbox.
   `unio-runtime` has unit tests for the TOML subset, scopes, narrowing, the runtime checks,
   Landlock and seccomp on a thread, and Seatbelt in a child process.
+- `tests/native.rs` (Linux x86-64; skipped with a note elsewhere): every reference program that
+  the interpreter tests run, with the same inputs, is built with `unio build --release` and
+  gives the same standard output, standard error and exit code as `unio run`: the utilities,
+  the task list, faults of every kind with their traces, exit codes, exhaustion of the stack, the
+  benchmarks, and the four tools over the repository; two builds give identical bytes; a program
+  with errors is not built; the executable applies the manifest of its package.
 - `tests/tools.rs` (ignored by default, run in CI in a release build): `tools/check_docs.unio`,
   `tools/check_grammar.unio` (corpus, self-check, sources, invalid sources, parse trees) and
   `tools/check_api.unio` under `unio run` give the same output and exit code as the Python
@@ -318,5 +359,5 @@ The tests were written before the code (concept, section 1.2):
   different modules would share an entry of the method table; no program of the repository has
   such types.
 - The sandbox of the operating system on Windows (AppContainer, Job Object), the isolated workers
-  of the tools (SB-10 to SB-13), the hostile projects of SB-15, the native runtime and code
-  generation of S6, and the other commands of requirement 6.1.
+  of the tools (SB-10 to SB-13), the hostile projects of SB-15, native code for macOS, Windows and AArch64 and the rest of S6
+  (docs/runtime.md 8.6), and the other commands of requirement 6.1.

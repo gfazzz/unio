@@ -8,6 +8,10 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+# The static library is the runtime that `unio build` links into every executable (C-5,
+# docs/runtime.md 8.4): the value model, the externals, the sandbox, and the support functions
+# that native code calls.
+crate-type = ["rlib", "staticlib"]
 
 [[bin]]
 name = "unio"
@@ -15,3 +19,9 @@ path = "src/main.rs"
 
 [dependencies]
 unio-runtime = { path = "../unio-runtime" }
+# The code generator of `unio build` (requirements, section 10). Exact versions, so that builds
+# are reproducible (C-4); updates are deliberate, with Cargo.lock.
+cranelift-codegen = { version = "=0.137.1", default-features = false, features = ["std", "x86"] }
+cranelift-frontend = { version = "=0.137.1", default-features = false, features = ["std"] }
+cranelift-module = { version = "=0.137.1", default-features = false, features = ["std"] }
+cranelift-object = { version = "=0.137.1", default-features = false }

@@ -4,12 +4,13 @@ use std::process::ExitCode;
 
 use unio::Lang;
 
-mod sandbox_cli;
+use unio::sandbox_cli;
 
 const USAGE: &str = "Usage:
     unio check [--diagnostics=json] [--lang=en|ru] [--profile=application|core] FILE...
     unio fmt [--check] FILE...
     unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]
+    unio build [--release] FILE [-o OUT]
     unio test [--json] [--policy FILE] [--allow-weaker-sandbox] [FILTER] FILE...
     unio outline [--json] FILE
     unio symbol [--json] MODULE.NAME
@@ -22,6 +23,9 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("run") {
         return run(&arguments[1..]);
+    }
+    if arguments.first().map(String::as_str) == Some("build") {
+        return build(&arguments[1..]);
     }
     let (sandbox, arguments) = if arguments.first().map(String::as_str) == Some("test") {
         match sandbox_cli::take(&arguments) {
@@ -269,6 +273,52 @@ fn on_run_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
         .expect("a thread for the interpreter")
         .join()
         .expect("the interpreter thread")
+}
+
+/// `unio build [--release] FILE [-o OUT]`: one executable (C-5, docs/runtime.md 8.4).
+fn build(arguments: &[String]) -> ExitCode {
+    let mut release = false;
+    let mut out = None;
+    let mut file = None;
+    let mut i = 0;
+    while i < arguments.len() {
+        let a = &arguments[i];
+        if a == "--release" {
+            release = true;
+        } else if a == "-o" {
+            match arguments.get(i + 1) {
+                Some(o) => out = Some(std::path::PathBuf::from(o)),
+                None => return usage("-o needs a file"),
+            }
+            i += 1;
+        } else if let Some(o) = a.strip_prefix("-o") {
+            out = Some(std::path::PathBuf::from(o));
+        } else if a.starts_with('-') {
+            return usage(&format!("unknown option '{a}'"));
+        } else if file.is_none() {
+            file = Some(std::path::PathBuf::from(a));
+        } else {
+            return usage("unio build takes one file");
+        }
+        i += 1;
+    }
+    let Some(file) = file else {
+        return usage("unio build needs a file");
+    };
+    let out = out.unwrap_or_else(|| std::path::PathBuf::from(file.file_stem().unwrap_or_default()));
+    match unio::native::build(&file, &out, release) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(unio::native::BuildError::Program(analyses)) => {
+            for analysis in analyses.iter().filter(|a| a.has_errors()) {
+                eprint!("{}", analysis.render_text(Lang::En));
+            }
+            ExitCode::from(1)
+        }
+        Err(unio::native::BuildError::Message(m)) => {
+            eprintln!("unio build: {m}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run(arguments: &[String]) -> ExitCode {

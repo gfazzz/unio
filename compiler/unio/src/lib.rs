@@ -2,7 +2,8 @@
 //! (requirements C-1, C-2, C-6 to C-10, R-12), the formatter (T-1 to T-3), the outline
 //! (C-12), the static checks of docs/semantics.md (names, types, errors, values, resources,
 //! layers, profiles and effects), and `unio symbol` with content hashes (C-11 to C-11b).
-//! Code generation is a later stage of the plan.
+//! The interpreter of docs/runtime.md runs programs for `unio run` and `unio test`, and
+//! `native` compiles them to an executable for `unio build` (docs/runtime.md 8.4).
 
 pub mod ast;
 pub mod catalog;
@@ -13,13 +14,16 @@ pub mod format;
 pub mod interp;
 pub mod lexer;
 mod lower;
+pub mod native;
 pub mod outline;
 pub mod parser;
 pub mod program;
+pub mod sandbox_cli;
 pub mod sexpr;
 pub mod sha;
 pub mod symbol;
 pub mod types;
+pub mod vfs;
 
 pub use diag::{explanation, Diagnostic, Lang, Msg, Severity, Span};
 

@@ -117,6 +117,15 @@ fn read_policy(options: &Options) -> Result<Policy, String> {
         .map_err(|e| format!("the policy {} is invalid: {e}", path.display()))
 }
 
+fn parse_manifest_at(text: &str, root: &Path) -> Result<Permissions, String> {
+    sandbox::parse_manifest(text, &Places::current(root)).map_err(|e| {
+        format!(
+            "the manifest {} is invalid: {e}",
+            root.join("unio.toml").display()
+        )
+    })
+}
+
 fn read_manifest(file: &Path) -> Result<(Permissions, Option<PathBuf>), String> {
     let Some(root) = package_root(file) else {
         return Ok((Permissions::default(), None));
@@ -124,9 +133,47 @@ fn read_manifest(file: &Path) -> Result<(Permissions, Option<PathBuf>), String> 
     let manifest = root.join("unio.toml");
     let text = std::fs::read_to_string(&manifest)
         .map_err(|e| format!("the manifest {} cannot be read: {e}", manifest.display()))?;
-    let permissions = sandbox::parse_manifest(&text, &Places::current(&root))
-        .map_err(|e| format!("the manifest {} is invalid: {e}", manifest.display()))?;
+    let permissions = parse_manifest_at(&text, &root)?;
     Ok((permissions, Some(root)))
+}
+
+/// The manifest of a program for `unio build`: its text and directory, which the executable
+/// keeps, so that it applies the permissions `unio run` would (C-5, SB-1).
+pub fn manifest_of(file: &Path) -> Result<Option<(String, PathBuf)>, String> {
+    let Some(root) = package_root(file) else {
+        return Ok(None);
+    };
+    let manifest = root.join("unio.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("the manifest {} cannot be read: {e}", manifest.display()))?;
+    parse_manifest_at(&text, &root)?;
+    Ok(Some((text, root)))
+}
+
+/// The sandbox of an executable made by `unio build`: the manifest kept by the build, narrowed
+/// by the policy of `UNIO_POLICY` (the arguments belong to the program, so there is no
+/// `--policy`). Paths with `$CWD`, `$HOME` and `$TEMP` are those of the run.
+pub fn prepare_embedded(manifest: Option<&(String, PathBuf)>) -> Result<Plan, i32> {
+    let fail = |message: String| {
+        eprintln!("unio: {message}");
+        EXIT_SANDBOX
+    };
+    let policy = read_policy(&Options::default()).map_err(fail)?;
+    let permissions = match manifest {
+        Some((text, root)) => parse_manifest_at(text, root).map_err(fail)?,
+        None => Permissions::default(),
+    };
+    let (permissions, warnings) = sandbox::effective(&permissions, &policy);
+    for warning in warnings {
+        eprintln!("unio: warning: {warning}");
+    }
+    let mut process_wide = Permissions::default();
+    process_wide.add(&permissions);
+    Ok(Plan {
+        sandboxes: vec![Sandbox::new(permissions, policy.limits.clone())],
+        process_wide,
+        allow_weaker: policy.allow_weaker,
+    })
 }
 
 /// The directory of the standard library, which `unio test` still reads after the first file

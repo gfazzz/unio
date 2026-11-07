@@ -53,9 +53,9 @@ jobs:
         run: cargo test --release -p unio --test tools -- --ignored
 
   benchmarks:
-    # Requirement 7.1: Unio at least 0.5x of CPython 3.13 (bench/README.md). JSON is still
-    # below the floor in the interpreter, so its step reports without failing the run until
-    # native code (sprint S6) or a faster interpreter brings it above 0.5x.
+    # Requirement 7.1: Unio at least 0.5x of CPython 3.13 (bench/README.md). The native
+    # executables of `unio build` (sprint S6) meet the floor on all four benchmarks; JSON is
+    # still below it in the interpreter, so that step reports without failing the run.
     name: benchmarks against Python
     runs-on: ubuntu-latest
     steps:
@@ -67,9 +67,11 @@ jobs:
         run: cargo build --release --manifest-path compiler/Cargo.toml -p unio
       - name: Text benchmarks meet the floor
         run: python3 bench/run.py --runs 3 --only wc,text,loop --check-floor
-      - name: JSON benchmark (below the floor, not yet enforced)
+      - name: JSON benchmark in the interpreter (below the floor, not yet enforced)
         continue-on-error: true
         run: python3 bench/run.py --runs 1 --only json --check-floor --json bench/results-json.json
+      - name: Native executables meet the floor (wc, json, text, loop)
+        run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-floor --json bench/results-native.json
 
   editors:
     name: editor highlighting
@@ -115,6 +117,9 @@ jobs:
         run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -80
       - name: Formatter speed (T-3, release build)
         run: cargo test --release --test format thousand
+      - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release -p unio --test native
       - name: Unio sources are in the one style (docs/style.md)
         shell: bash
         working-directory: .

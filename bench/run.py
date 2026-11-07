@@ -3,6 +3,10 @@
 
 Usage:
     python3 bench/run.py [--runs N] [--only NAME,...] [--json FILE] [--check-floor] [--unio PATH]
+                         [--native]
+
+With --native, each Unio program is also built with `unio build --release` and runs as a native
+executable ("Unio native"); the ratios and the floor then refer to the native executable.
 
 The rules of the comparison are in bench/README.md. Only the Python standard library is used.
 """
@@ -109,8 +113,9 @@ def find_unio(explicit):
 class Languages:
     """How to build and run each language; a language whose tools are missing is skipped."""
 
-    def __init__(self, unio):
+    def __init__(self, unio, native=False):
         self.unio = unio
+        self.native = native
         self.python = sys.executable
         self.versions = {}
         self.missing = {}
@@ -132,6 +137,12 @@ class Languages:
                 self.versions[name] = "Node.js " + (self.versions[name] or "")
         if unio is None:
             self.missing["Unio"] = "build compiler/ with cargo build --release first"
+        if native:
+            if unio is None:
+                self.missing["Unio native"] = "build compiler/ with cargo build --release first"
+            else:
+                self.versions["Unio native"] = "unio build --release, commit " + (
+                    version(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"]) or "?")
 
     def command(self, language, source, data):
         """The command that runs the program, after building it outside the measurement."""
@@ -139,6 +150,12 @@ class Languages:
         args = [data] if data else []
         if language == "Unio":
             return [self.unio, "run", str(source), "--"] + args if args else [self.unio, "run", str(source)]
+        if language == "Unio native":
+            BUILD.mkdir(exist_ok=True)
+            binary = BUILD / (source.stem + "-unio")
+            subprocess.run([self.unio, "build", "--release", str(source), "-o", str(binary)],
+                           check=True)
+            return [str(binary)] + args
         if language == "Python":
             return [self.python, str(source)] + args
         if language == "Ruby":
@@ -164,17 +181,19 @@ class Languages:
         raise ValueError(language)
 
 
-EXTENSIONS = {"Unio": ".unio", "Python": ".py", "Ruby": ".rb", "JavaScript": ".js", "Go": ".go",
+EXTENSIONS = {"Unio": ".unio", "Unio native": ".unio", "Python": ".py", "Ruby": ".rb", "JavaScript": ".js", "Go": ".go",
               "Java": ".java", "Rust": ".rs"}
-ORDER = ["Unio", "Python", "Ruby", "JavaScript", "Go", "Java", "Rust"]
+ORDER = ["Unio", "Unio native", "Python", "Ruby", "JavaScript", "Go", "Java", "Rust"]
 
 
-def programs(name):
+def programs(name, languages):
     """(language, variant, source): 'same' is the algorithm of the Unio program; 'built-in' is
     the language's own library for the task, where the benchmark has one (JSON)."""
     directory = BENCH / name
     found = []
     for language in ORDER:
+        if language == "Unio native" and not languages.native:
+            continue
         for path in sorted(directory.iterdir()):
             if path.suffix != EXTENSIONS[language]:
                 continue
@@ -195,6 +214,11 @@ def measure(command, runs, cwd):
         output = done.stdout.strip()
         best = elapsed if best is None else min(best, elapsed)
     return best, output
+
+
+def reference(languages):
+    """The Unio column that ratios and the floor refer to."""
+    return "Unio native" if languages.native else "Unio"
 
 
 def tool_rows(languages, runs):
@@ -222,6 +246,16 @@ def tool_rows(languages, runs):
             row["times"]["Unio"] = t
             if t is None:
                 row["notes"]["Unio"] = out
+        if languages.native and languages.unio:
+            BUILD.mkdir(exist_ok=True)
+            source = ROOT / unio_args[0]
+            binary = BUILD / (source.stem + "-unio")
+            subprocess.run([languages.unio, "build", "--release", str(source), "-o", str(binary)],
+                           check=True)
+            t, out = measure([str(binary)] + unio_args[2:], runs, ROOT)
+            row["times"]["Unio native"] = t
+            if t is None:
+                row["notes"]["Unio native"] = out
         t, out = measure([languages.python] + python_args, runs, ROOT)
         row["times"]["Python"] = t
         if t is None:
@@ -238,11 +272,13 @@ def main():
     parser.add_argument("--check-floor", action="store_true",
                         help="exit 1 if Unio is slower than 0.5x Python on wc, json, text, loop")
     parser.add_argument("--unio", default=None, help="path to the unio binary")
+    parser.add_argument("--native", action="store_true",
+                        help="also build the Unio programs with unio build --release and compare those")
     options = parser.parse_args()
     selected = options.only.split(",")
 
     unio = find_unio(options.unio)
-    languages = Languages(unio)
+    languages = Languages(unio, options.native)
     data = ensure_data()
 
     print("Versions:")
@@ -260,7 +296,7 @@ def main():
         if name not in selected:
             continue
         outputs = {}
-        for language, variant, source in programs(name):
+        for language, variant, source in programs(name, languages):
             row_case = "same algorithm" if variant == "same" else "built-in library"
             row = next((r for r in rows if r["benchmark"] == name and r["case"] == row_case), None)
             if row is None:
@@ -296,16 +332,17 @@ def main():
     if "tools" in selected:
         rows.extend(tool_rows(languages, options.runs))
 
-    print_table(rows)
+    print_table(rows, reference(languages))
 
     floor_failures = []
     for row in rows:
         if row["benchmark"] in FLOOR_BENCHMARKS and row["case"] == "same algorithm":
-            u, p = row["times"].get("Unio"), row["times"].get("Python")
+            ref = reference(languages)
+            u, p = row["times"].get(ref), row["times"].get("Python")
             if u is None or p is None:
-                floor_failures.append(f"{row['benchmark']}: no time for Unio or Python")
+                floor_failures.append(f"{row['benchmark']}: no time for {ref} or Python")
             elif p / u < FLOOR:
-                floor_failures.append(f"{row['benchmark']}: Unio {u:.3f} s is {p / u:.2f}x Python {p:.3f} s")
+                floor_failures.append(f"{row['benchmark']}: {ref} {u:.3f} s is {p / u:.2f}x Python {p:.3f} s")
 
     report = {
         "versions": languages.versions,
@@ -329,27 +366,27 @@ def main():
     return 0
 
 
-def print_table(rows):
-    """Times in seconds; 'x' is the speed of Unio relative to the language: above 1 means Unio
-    is faster, so Python 0.50x is the floor of requirement 7.1."""
+def print_table(rows, ref="Unio"):
+    """Times in seconds; 'x' is the speed of Unio (the `ref` column) relative to the language:
+    above 1 means Unio is faster, so Python 0.50x is the floor of requirement 7.1."""
     present = [l for l in ORDER if any(l in r["times"] for r in rows)]
     header = f"{'benchmark':<34}" + "".join(f"{l:>17}" for l in present)
     print(header)
     print("-" * len(header))
     for row in rows:
         cells = []
-        u = row["times"].get("Unio")
+        u = row["times"].get(ref)
         for language in present:
             t = row["times"].get(language)
             if t is None:
                 note = row["notes"].get(language, "")
                 cells.append(f"{'—' if not note else 'n/a':>17}")
-            elif language == "Unio" or u is None:
+            elif language == ref or u is None:
                 cells.append(f"{t:>15.3f} s")
             else:
                 cells.append(f"{t:>8.3f} s {t / u:>5.2f}x")
         print(f"{row['benchmark'] + ': ' + row['case']:<34}" + "".join(cells))
-    print("\nNx after a time is that language's time divided by Unio's: above 1, Unio is faster.")
+    print(f"\nNx after a time is that language's time divided by {ref}'s: above 1, {ref} is faster.")
     notes = sorted({(l, n) for r in rows for l, n in r["notes"].items()})
     for language, note in notes:
         print(f"  {language}: {note}")

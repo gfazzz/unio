@@ -167,6 +167,9 @@ pub struct Program {
 /// The directory of the standard library: `UNIO_STDLIB`, an ancestor of the first file that
 /// holds `stdlib/core/prelude.unio`, or the repository of the compiler.
 fn find_stdlib(start: &Path) -> Option<PathBuf> {
+    if let Some(embedded) = crate::vfs::embedded_stdlib() {
+        return embedded;
+    }
     if let Ok(dir) = std::env::var("UNIO_STDLIB") {
         let dir = PathBuf::from(dir);
         if dir.join("core/prelude.unio").is_file() {
@@ -192,7 +195,7 @@ const LAYERS: [&str; 3] = ["core", "alloc", "std"];
 fn package_root(file: &Path) -> PathBuf {
     let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
     for ancestor in dir.ancestors() {
-        if ancestor.join("unio.toml").is_file() {
+        if crate::vfs::is_file(&ancestor.join("unio.toml")) {
             return ancestor.to_path_buf();
         }
     }
@@ -234,6 +237,11 @@ pub fn symbol_module_files(query: &str, start: &Path) -> Vec<PathBuf> {
 }
 
 impl Program {
+    /// The directory of the standard library the program was loaded with.
+    pub fn stdlib_root(&self) -> Option<&Path> {
+        self.stdlib_root.as_deref()
+    }
+
     /// The layer of a module of the standard library: 0 core, 1 alloc, 2 std; None elsewhere.
     pub fn module_layer(&self, module: ModId) -> Option<usize> {
         let m = &self.modules[module];
@@ -272,17 +280,9 @@ impl Program {
             for layer in LAYERS {
                 let dir = root.join(layer);
                 let mut preludes = vec![dir.join("prelude.unio")];
-                if let Ok(entries) = std::fs::read_dir(dir.join("builtin")) {
-                    let mut builtin: Vec<PathBuf> = entries
-                        .flatten()
-                        .map(|e| e.path())
-                        .filter(|p| p.extension().is_some_and(|e| e == "unio"))
-                        .collect();
-                    builtin.sort();
-                    preludes.extend(builtin);
-                }
+                preludes.extend(crate::vfs::unio_files_in(&dir.join("builtin")));
                 for path in preludes {
-                    if path.is_file() {
+                    if crate::vfs::is_file(&path) {
                         program.load_file(&path, false);
                     }
                 }
@@ -324,11 +324,11 @@ impl Program {
     }
 
     fn load_file(&mut self, file: &Path, report: bool) -> Option<ModId> {
-        let canonical = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        let canonical = crate::vfs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
         if let Some(id) = self.by_path.get(&canonical) {
             return Some(*id);
         }
-        let source = std::fs::read_to_string(&canonical).ok()?;
+        let source = crate::vfs::read_to_string(&canonical).ok()?;
         let analysis = crate::analyse(&file.to_string_lossy(), &source);
         let (name, prelude, stdlib, package) = match self.stdlib_name(&canonical) {
             Some((name, prelude)) => (name, prelude, true, self.stdlib_root.clone().unwrap()),
@@ -368,10 +368,10 @@ impl Program {
             return LAYERS
                 .iter()
                 .map(|layer| root.join(layer).join(&rest))
-                .find(|p| p.is_file());
+                .find(|p| crate::vfs::is_file(p));
         }
         let file = self.modules[from].package.join(path.join("/") + ".unio");
-        file.is_file().then_some(file)
+        crate::vfs::is_file(&file).then_some(file)
     }
 
     fn load_imports(&mut self, id: ModId) {
@@ -647,7 +647,7 @@ impl Program {
                 let dotted = path.join(".");
                 let target = self
                     .module_file(module, &path)
-                    .and_then(|f| std::fs::canonicalize(f).ok())
+                    .and_then(|f| crate::vfs::canonicalize(&f).ok())
                     .and_then(|f| self.by_path.get(&f).copied());
                 let Some(target) = target else {
                     let span = import.module.first().unwrap().span.to(import

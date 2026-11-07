@@ -5,9 +5,12 @@
 Unio has a specification, a grammar, reference programs, standard library
 sources, project tools, and a compiler in Rust in `compiler/` (sprints S1 to S5
 of plan section 12): `unio check`, `fmt`, `outline`, `explain`, `symbol`, `run`,
-and `test`, with an interpreter. Native code generation and the OS sandbox
-(sprint S6) are not implemented yet. Report which checks ran: `unio test`
-executes Unio code, while parsing or `unio check` only checks it statically.
+and `test`, with an interpreter, the OS sandbox, and `unio build`, which makes a
+native executable through Cranelift for Linux x86-64 (first part of sprint S6;
+docs/runtime.md 8.4). Other targets and the rest of S6 are not implemented
+yet. Report which checks ran: `unio test` executes Unio code, `unio build` and
+its executables run it natively, while parsing or `unio check` only checks it
+statically.
 The project's checks run in Unio (`tools/`). The Python checkers in `spec/` and
 `.github/scripts/` stay as a reference: they must give the same results as the
 Unio tools, and they serve in performance comparisons with other languages.

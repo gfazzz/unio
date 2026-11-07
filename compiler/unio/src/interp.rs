@@ -26,9 +26,9 @@ use unio_runtime::value::{
     values_equal, Callable, EnumValue, OrderedMap, OrderedSet, StructValue, Value,
 };
 
-type ModId = usize;
-type FnId = usize;
-type DefId = usize;
+pub(crate) type ModId = usize;
+pub(crate) type FnId = usize;
+pub(crate) type DefId = usize;
 
 /// A type known at run time: needed only where a value must be built from its type
 /// (`std.json.from_value`).
@@ -48,13 +48,13 @@ pub enum RtTy {
     Named(DefId, Vec<RtTy>),
 }
 
-type Types = Rc<HashMap<String, RtTy>>;
+pub(crate) type Types = Rc<HashMap<String, RtTy>>;
 
 /// A hasher for the interpreter's own tables, keyed by small integers, addresses in the tree,
 /// and names (the multiplicative hash of rustc, FxHash). Values of programs are hashed by
 /// `unio-runtime`, whose hash does not depend on the run.
 #[derive(Default, Clone, Copy)]
-struct Fx(u64);
+pub(crate) struct Fx(u64);
 
 impl std::hash::Hasher for Fx {
     fn finish(&self) -> u64 {
@@ -81,7 +81,7 @@ impl std::hash::Hasher for Fx {
     }
 }
 
-type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+pub(crate) type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
 
 /// The frame of a running function: its slots, its module, and its type arguments.
 pub struct Env {
@@ -147,12 +147,12 @@ pub(crate) enum Global {
 }
 
 /// The names of one variant of an enum, shared by all its values.
-struct Shape {
+pub(crate) struct Shape {
     variant: Rc<str>,
     fields: Vec<Rc<str>>,
 }
 
-enum Flow {
+pub(crate) enum Flow {
     Normal,
     Return(Value),
     Break,
@@ -165,70 +165,73 @@ type Exec = Result<Flow, Unwind>;
 type MethodFrame<'c> = (Vec<Value>, Vec<(usize, &'c Place)>);
 
 #[derive(Clone)]
-enum Step {
+pub(crate) enum Step {
     Field(Rc<str>),
     Index(Value),
 }
 
-fn take(v: &mut Value) -> Value {
+pub(crate) fn take(v: &mut Value) -> Value {
     std::mem::replace(v, Value::Unit)
 }
 
-fn internal(rt: &Runtime, message: impl Into<String>) -> Unwind {
+pub(crate) fn internal(rt: &Runtime, message: impl Into<String>) -> Unwind {
     rt.fault(
         FaultKind::InvalidArgument,
         format!("internal: {}", message.into()),
     )
 }
 
-fn traced(rt: &Runtime, fault: Fault) -> Unwind {
+pub(crate) fn traced(rt: &Runtime, fault: Fault) -> Unwind {
     rt.fault(fault.kind, fault.message)
 }
 
 /// The interpreter: the checked program and the tables derived from it.
 pub struct Interp {
-    me: Weak<Interp>,
+    pub(crate) me: Weak<Interp>,
     pub program: Program,
-    methods: FxMap<String, FxMap<String, FnId>>,
+    pub(crate) methods: FxMap<String, FxMap<String, FnId>>,
     /// Trace label `module.function` of each function.
-    labels: Vec<Rc<str>>,
+    pub(crate) labels: Vec<Rc<str>>,
     /// Binding-table name of each function, used for externals.
-    external_names: Vec<String>,
-    variants: FxMap<String, Vec<DefId>>,
+    pub(crate) external_names: Vec<String>,
+    pub(crate) variants: FxMap<String, Vec<DefId>>,
     /// The value of each top-level constant, evaluated at its first use.
-    consts: Vec<std::cell::OnceCell<Value>>,
-    files: Vec<Rc<str>>,
+    pub(crate) consts: Vec<std::cell::OnceCell<Value>>,
+    pub(crate) files: Vec<Rc<str>>,
     /// The declaration of each function: its item and member (`signatures` by function).
-    sig_of: Vec<Option<(usize, Option<usize>)>>,
+    pub(crate) sig_of: Vec<Option<(usize, Option<usize>)>>,
     /// The bound external of each function without a body.
-    externs: Vec<Option<unio_runtime::externs::ExternFn>>,
+    pub(crate) externs: Vec<Option<unio_runtime::externs::ExternFn>>,
     /// The item of each struct or error declaration.
-    decl_of: Vec<Option<usize>>,
+    pub(crate) decl_of: Vec<Option<usize>>,
     /// The type name of each declaration, shared by its values.
-    def_names: Vec<Rc<str>>,
+    pub(crate) def_names: Vec<Rc<str>>,
     /// The variants of each enum.
-    shapes: Vec<Vec<Shape>>,
+    pub(crate) shapes: Vec<Vec<Shape>>,
     /// The field names of each struct or error.
-    field_names: Vec<Vec<Rc<str>>>,
-    empty_types: Types,
+    pub(crate) field_names: Vec<Vec<Rc<str>>>,
+    pub(crate) empty_types: Types,
     /// Names shared by the values and the lowered code that use them.
-    names: RefCell<FxMap<String, Rc<str>>>,
+    pub(crate) names: RefCell<FxMap<String, Rc<str>>>,
     /// The lowered body of each function, made at its first call.
-    codes: Vec<std::cell::OnceCell<Rc<Code>>>,
+    pub(crate) codes: Vec<std::cell::OnceCell<Rc<Code>>>,
     /// Storage of frames that ended, for the next calls.
-    pool: RefCell<Vec<Vec<Value>>>,
+    pub(crate) pool: RefCell<Vec<Vec<Value>>>,
     /// Library functions of the prelude that the interpreter runs natively, with the same
     /// result as their Unio definitions (see [`Intrinsic`]).
-    intrinsics: Vec<Option<Intrinsic>>,
+    pub(crate) intrinsics: Vec<Option<Intrinsic>>,
     /// Whether a function has a `var` parameter other than `self`.
-    var_params: Vec<bool>,
+    pub(crate) var_params: Vec<bool>,
     /// 1 for the JSON conversions that the interpreter provides, 0 for other functions.
-    externs_json: Vec<u8>,
+    pub(crate) externs_json: Vec<u8>,
     /// Lowered constants (by `(usize::MAX, constant)`) and defaults of externals (by function
     /// and parameter).
-    default_codes: RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
+    pub(crate) default_codes: RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
     /// Lowered defaults of fields, by declaration and field.
-    field_codes: RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
+    pub(crate) field_codes: RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
+    /// The native code of every lowered body, in an executable made by `unio build`; the
+    /// interpreter then only dispatches and never evaluates lowered code (runtime 8.4).
+    pub(crate) native: std::cell::OnceCell<crate::native::support::Hooks>,
 }
 
 impl Interp {
@@ -432,6 +435,7 @@ impl Interp {
                 .collect(),
             default_codes: RefCell::new(FxMap::default()),
             field_codes: RefCell::new(FxMap::default()),
+            native: std::cell::OnceCell::new(),
             labels,
             external_names,
             me: me.clone(),
@@ -444,7 +448,7 @@ impl Interp {
     }
 
     /// The function and file of every function, for the call stack of a runtime.
-    fn sites(&self) -> Vec<(Rc<str>, Rc<str>)> {
+    pub(crate) fn sites(&self) -> Vec<(Rc<str>, Rc<str>)> {
         self.program
             .funcs
             .iter()
@@ -458,7 +462,7 @@ impl Interp {
             .collect()
     }
 
-    fn rc(&self) -> Rc<Interp> {
+    pub(crate) fn rc(&self) -> Rc<Interp> {
         self.me.upgrade().expect("the interpreter is alive")
     }
 
@@ -492,7 +496,7 @@ impl Interp {
         }
     }
 
-    fn signature(&self, f: FnId) -> Option<(&Signature, Option<&crate::ast::Block>)> {
+    pub(crate) fn signature(&self, f: FnId) -> Option<(&Signature, Option<&crate::ast::Block>)> {
         let def = &self.program.funcs[f];
         let (item, member) = self.sig_of[f]?;
         let items = &self.program.modules[def.module].analysis.file.items;
@@ -517,7 +521,7 @@ impl Interp {
         }
     }
 
-    fn fields_of(&self, d: DefId) -> Option<&Vec<Field>> {
+    pub(crate) fn fields_of(&self, d: DefId) -> Option<&Vec<Field>> {
         let def = &self.program.defs[d];
         let i = self.decl_of[d]?;
         match &self.program.modules[def.module].analysis.file.items[i] {
@@ -545,7 +549,7 @@ impl Interp {
     }
 
     /// The method `name` of the type of a value, found without building the name of the type.
-    fn method_of(&self, value: &Value, name: &str) -> Option<FnId> {
+    pub(crate) fn method_of(&self, value: &Value, name: &str) -> Option<FnId> {
         match value {
             Value::Struct(s) => self.method(&s.type_name, name),
             Value::Enum(e) => self.method(&e.type_name, name),
@@ -555,7 +559,7 @@ impl Interp {
     }
 
     /// External name of a function without a body (unio-runtime README, binding table).
-    fn external_name(program: &Program, f: FnId) -> String {
+    pub(crate) fn external_name(program: &Program, f: FnId) -> String {
         let def = &program.funcs[f];
         match def.owner {
             Owner::Impl(i) => {
@@ -576,7 +580,7 @@ impl Interp {
     // ---------------------------------------------------------------- lowered code
 
     /// The lowered body of a function, made the first time it is called.
-    fn code(&self, f: FnId) -> Option<&Code> {
+    pub(crate) fn code(&self, f: FnId) -> Option<&Code> {
         if let Some(code) = self.codes[f].get() {
             return Some(code);
         }
@@ -609,7 +613,7 @@ impl Interp {
 
     /// A lowered expression evaluated alone in the module: a constant or a default of an
     /// external or of a field, kept by `key` in `cache`.
-    fn expr_code(
+    pub(crate) fn expr_code(
         &self,
         cache: &RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
         key: (usize, usize),
@@ -629,7 +633,10 @@ impl Interp {
         code
     }
 
-    fn eval_code(&self, rt: &mut Runtime, module: ModId, code: &ExprCode) -> Outcome {
+    pub(crate) fn eval_code(&self, rt: &mut Runtime, module: ModId, code: &ExprCode) -> Outcome {
+        if let Some(hooks) = self.native.get() {
+            return hooks.eval_expr(self, rt, code);
+        }
         let mut env = Env {
             vars: Slots::new(vec![Value::Unit; code.slots]),
             module,
@@ -660,7 +667,13 @@ impl Interp {
 
     /// Runs a function whose arguments are in the first slots of `frame`; `Unit` marks a
     /// missing argument. After the call, the slots of `var` parameters hold their values.
-    fn invoke(&self, rt: &mut Runtime, f: FnId, frame: &mut Vec<Value>, types: Types) -> Outcome {
+    pub(crate) fn invoke(
+        &self,
+        rt: &mut Runtime,
+        f: FnId,
+        frame: &mut Vec<Value>,
+        types: Types,
+    ) -> Outcome {
         let def = &self.program.funcs[f];
         if def.body.is_none() {
             return self.call_external(rt, f, frame, &types);
@@ -669,6 +682,9 @@ impl Interp {
             if let Some(result) = self.intrinsic(rt, intrinsic, frame) {
                 return result;
             }
+        }
+        if let Some(hooks) = self.native.get() {
+            return hooks.invoke(self, rt, f, frame, &types);
         }
         let Some(code) = self.code(f) else {
             return Err(internal(rt, format!("no declaration for {}", def.name)));
@@ -707,7 +723,7 @@ impl Interp {
 
     /// Runs a library function natively; `None` when the arguments need its Unio definition
     /// (for example `contains` on items whose equality a program defines).
-    fn intrinsic(
+    pub(crate) fn intrinsic(
         &self,
         rt: &mut Runtime,
         intrinsic: Intrinsic,
@@ -779,7 +795,7 @@ impl Interp {
         }))
     }
 
-    fn call_external(
+    pub(crate) fn call_external(
         &self,
         rt: &mut Runtime,
         f: FnId,
@@ -835,13 +851,33 @@ impl Interp {
         }
     }
 
-    fn generic_types(&self, env: &Env, f: FnId, types: &[Type]) -> Result<Types, Unwind> {
+    pub(crate) fn generic_types(
+        &self,
+        env: &Env,
+        f: FnId,
+        types: &[Type],
+    ) -> Result<Types, Unwind> {
+        self.generic_types_in(&env.types, env.module, f, types)
+    }
+
+    /// The type arguments of a call to `f`, with the names of the caller's type parameters
+    /// (`env_types`) and of its module.
+    pub(crate) fn generic_types_in(
+        &self,
+        env_types: &Types,
+        module: ModId,
+        f: FnId,
+        types: &[Type],
+    ) -> Result<Types, Unwind> {
         if types.is_empty() || self.program.funcs[f].generics.is_empty() {
             return Ok(Rc::clone(&self.empty_types));
         }
         let mut map = HashMap::new();
         for (p, t) in self.program.funcs[f].generics.iter().zip(types) {
-            map.insert(self.program.params[*p].name.clone(), self.rt_type(env, t)?);
+            map.insert(
+                self.program.params[*p].name.clone(),
+                self.rt_type(env_types, module, t)?,
+            );
         }
         Ok(Rc::new(map))
     }
@@ -849,7 +885,7 @@ impl Interp {
     /// The frame of a call to `f`: arguments in parameter order, `Unit` where missing, and
     /// the places that `var` arguments come from and go back to.
     #[inline]
-    fn new_frame(&self, f: FnId, count: usize) -> Vec<Value> {
+    pub(crate) fn new_frame(&self, f: FnId, count: usize) -> Vec<Value> {
         let slots = self.codes[f].get().map_or(count, |c| c.slots.max(count));
         let mut frame = self.pool.borrow_mut().pop().unwrap_or_default();
         frame.reserve(slots);
@@ -860,7 +896,7 @@ impl Interp {
     }
 
     /// Returns the storage of a frame for the next call, so that calls do not allocate.
-    fn recycle(&self, mut frame: Vec<Value>) {
+    pub(crate) fn recycle(&self, mut frame: Vec<Value>) {
         frame.clear();
         let mut pool = self.pool.borrow_mut();
         if pool.len() < 256 && frame.capacity() <= 1024 {
@@ -868,7 +904,7 @@ impl Interp {
         }
     }
 
-    fn call_known(&self, rt: &mut Runtime, env: &mut Env, call: &CallCode) -> Outcome {
+    pub(crate) fn call_known(&self, rt: &mut Runtime, env: &mut Env, call: &CallCode) -> Outcome {
         if call.types.is_empty() {
             if let Some(code) = self.codes[call.f].get() {
                 if !code.defaults && self.intrinsics[call.f].is_none() {
@@ -900,7 +936,7 @@ impl Interp {
     /// A call of a function whose body is lowered, without defaults to fill or type
     /// arguments: the arguments go straight into the callee's slots on the shared stack.
     #[inline]
-    fn call_lowered(
+    pub(crate) fn call_lowered(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -948,7 +984,7 @@ impl Interp {
     /// caller has filled with the arguments; the slots stay for the caller to read `var`
     /// parameters back and to truncate.
     #[inline]
-    fn run_on_stack(
+    pub(crate) fn run_on_stack(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -974,7 +1010,7 @@ impl Interp {
     }
 
     /// The arguments of a method call matched to the parameters of the method found.
-    fn method_frame<'c>(
+    pub(crate) fn method_frame<'c>(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1011,7 +1047,7 @@ impl Interp {
         Ok((frame, places))
     }
 
-    fn method_call(&self, rt: &mut Runtime, env: &mut Env, m: &MethodCode) -> Outcome {
+    pub(crate) fn method_call(&self, rt: &mut Runtime, env: &mut Env, m: &MethodCode) -> Outcome {
         if let Node::Local(slot) = m.receiver {
             if let Some(result) = self.local_method_call(rt, env, m, slot as usize) {
                 return result;
@@ -1026,7 +1062,7 @@ impl Interp {
     /// moves the value into the call and back without copying. `None` leaves the call to the
     /// general path, before anything is evaluated.
     #[inline]
-    fn local_method_call(
+    pub(crate) fn local_method_call(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1118,7 +1154,7 @@ impl Interp {
         Some(result)
     }
 
-    fn method_call_on(
+    pub(crate) fn method_call_on(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1187,7 +1223,7 @@ impl Interp {
     /// A method bound to an external function with every argument given positionally and at
     /// most three of them: the arguments are passed in a small array, without a frame.
     #[inline]
-    fn external_method(
+    pub(crate) fn external_method(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1216,7 +1252,7 @@ impl Interp {
     }
 
     /// The method of a call site for the type of the receiver, remembered for the last type.
-    fn cached_method(&self, m: &MethodCode, receiver: &Value) -> Option<FnId> {
+    pub(crate) fn cached_method(&self, m: &MethodCode, receiver: &Value) -> Option<FnId> {
         let key = match receiver {
             Value::Struct(s) => Rc::as_ptr(&s.type_name) as *const u8 as usize,
             Value::Enum(e) => Rc::as_ptr(&e.type_name) as *const u8 as usize,
@@ -1234,7 +1270,7 @@ impl Interp {
         Some(f)
     }
 
-    fn positional(
+    pub(crate) fn positional(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1244,7 +1280,7 @@ impl Interp {
     }
 
     /// Calls a method on a value that is not a place: the receiver is not written back.
-    fn call_method_value(
+    pub(crate) fn call_method_value(
         &self,
         rt: &mut Runtime,
         receiver: Value,
@@ -1256,7 +1292,7 @@ impl Interp {
     }
 
     /// Calls a method and returns its result together with the receiver after the call.
-    fn call_method_owned(
+    pub(crate) fn call_method_owned(
         &self,
         rt: &mut Runtime,
         receiver: Value,
@@ -1312,14 +1348,19 @@ impl Interp {
         }
     }
 
-    fn call_value(&self, rt: &mut Runtime, function: &Value, mut args: Vec<Value>) -> Outcome {
+    pub(crate) fn call_value(
+        &self,
+        rt: &mut Runtime,
+        function: &Value,
+        mut args: Vec<Value>,
+    ) -> Outcome {
         match function {
             Value::Function(f) => f.call(rt, &mut args),
             other => Err(internal(rt, format!("{} is not a function", other.kind()))),
         }
     }
 
-    fn error_code(&self, type_name: &str) -> String {
+    pub(crate) fn error_code(&self, type_name: &str) -> String {
         for def in &self.program.defs {
             if def.name == type_name && matches!(def.kind, DefKind::Error(_)) {
                 let module = &self.program.modules[def.module].name;
@@ -1332,7 +1373,12 @@ impl Interp {
     // ---------------------------------------------------------------- places
 
     /// The steps of a place with its indices evaluated.
-    fn steps(&self, rt: &mut Runtime, env: &mut Env, place: &Place) -> Result<Vec<Step>, Unwind> {
+    pub(crate) fn steps(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        place: &Place,
+    ) -> Result<Vec<Step>, Unwind> {
         let mut steps = Vec::with_capacity(place.steps.len());
         for step in &place.steps {
             steps.push(match step {
@@ -1344,7 +1390,7 @@ impl Interp {
     }
 
     /// Runs `f` on the place `root` + `steps`, whose indices are already evaluated.
-    fn with_resolved<R>(
+    pub(crate) fn with_resolved<R>(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1367,7 +1413,7 @@ impl Interp {
         result
     }
 
-    fn take_place(&self, rt: &mut Runtime, env: &mut Env, place: &Place) -> Outcome {
+    pub(crate) fn take_place(&self, rt: &mut Runtime, env: &mut Env, place: &Place) -> Outcome {
         if place.steps.is_empty() && !matches!(env.vars[place.root as usize], Value::Resource(_)) {
             return Ok(take(&mut env.vars[place.root as usize]));
         }
@@ -1375,7 +1421,7 @@ impl Interp {
         self.with_resolved(rt, env, place.root, &steps, |_, _, v| Ok(take(v)))
     }
 
-    fn put_place(
+    pub(crate) fn put_place(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1395,7 +1441,7 @@ impl Interp {
 
     // ---------------------------------------------------------------- statements
 
-    fn run_block(&self, rt: &mut Runtime, env: &mut Env, block: &Block) -> Exec {
+    pub(crate) fn run_block(&self, rt: &mut Runtime, env: &mut Env, block: &Block) -> Exec {
         for statement in &block.stmts {
             rt.at_line(statement.line);
             match self.run(rt, env, &statement.kind) {
@@ -1410,7 +1456,7 @@ impl Interp {
         Ok(Flow::Normal)
     }
 
-    fn run(&self, rt: &mut Runtime, env: &mut Env, statement: &S) -> Exec {
+    pub(crate) fn run(&self, rt: &mut Runtime, env: &mut Env, statement: &S) -> Exec {
         match statement {
             S::Let(slot, value) => {
                 env.vars[*slot as usize] = self.eval(rt, env, value)?;
@@ -1588,7 +1634,7 @@ impl Interp {
                     let Some(item) = self.next(rt, &mut cursor)? else {
                         return Ok(Flow::Normal);
                     };
-                    bind_names(rt, env, names, item)?;
+                    bind_names(rt, &mut env.vars, names, item)?;
                     match self.run_block(rt, env, body)? {
                         Flow::Break => return Ok(Flow::Normal),
                         Flow::Return(v) => return Ok(Flow::Return(v)),
@@ -1599,7 +1645,7 @@ impl Interp {
             S::Match(subject, cases) => {
                 let value = self.eval(rt, env, subject)?;
                 for case in cases {
-                    if self.matches(rt, env, &case.pattern, &value)?
+                    if self.matches(rt, &mut env.vars, &case.pattern, &value)?
                         && match &case.guard {
                             Some(g) => self.truth(rt, env, g)?,
                             None => true,
@@ -1649,7 +1695,7 @@ impl Interp {
         }
     }
 
-    fn release(&self, rt: &mut Runtime, resource: &Value) -> Result<(), Unwind> {
+    pub(crate) fn release(&self, rt: &mut Runtime, resource: &Value) -> Result<(), Unwind> {
         if let Value::Resource(cell) = resource {
             if cell.released.replace(true) {
                 return Ok(());
@@ -1665,7 +1711,7 @@ impl Interp {
 
     // ---------------------------------------------------------------- iteration
 
-    fn cursor(&self, rt: &mut Runtime, source: Value) -> Result<Cursor, Unwind> {
+    pub(crate) fn cursor(&self, rt: &mut Runtime, source: Value) -> Result<Cursor, Unwind> {
         Ok(match source {
             Value::List(l) | Value::Tuple(l) => Cursor::List(l, 0),
             Value::Set(s) => Cursor::Items(s.items().cloned().collect::<Vec<_>>().into_iter()),
@@ -1698,7 +1744,11 @@ impl Interp {
         })
     }
 
-    fn next(&self, rt: &mut Runtime, cursor: &mut Cursor) -> Result<Option<Value>, Unwind> {
+    pub(crate) fn next(
+        &self,
+        rt: &mut Runtime,
+        cursor: &mut Cursor,
+    ) -> Result<Option<Value>, Unwind> {
         match cursor {
             Cursor::List(items, i) => {
                 let item = items.get(*i).cloned();
@@ -1736,7 +1786,12 @@ impl Interp {
 
     // ---------------------------------------------------------------- expressions
 
-    fn truth(&self, rt: &mut Runtime, env: &mut Env, node: &Node) -> Result<bool, Unwind> {
+    pub(crate) fn truth(
+        &self,
+        rt: &mut Runtime,
+        env: &mut Env,
+        node: &Node,
+    ) -> Result<bool, Unwind> {
         match node {
             Node::Binary(op, left, right) => {
                 if let Some(Value::Bool(b)) = fast_binary(env, *op, left, right) {
@@ -1784,7 +1839,7 @@ impl Interp {
 
     /// A binary operator: integers that need no other evaluation first, then the general case.
     #[inline(never)]
-    fn binary(
+    pub(crate) fn binary(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -1815,7 +1870,7 @@ impl Interp {
     }
 
     #[inline(never)]
-    fn eval_node(&self, rt: &mut Runtime, env: &mut Env, node: &Node) -> Outcome {
+    pub(crate) fn eval_node(&self, rt: &mut Runtime, env: &mut Env, node: &Node) -> Outcome {
         match node {
             Node::Value(v) => Ok(v.clone()),
             Node::Local(slot) => Ok(env.vars[*slot as usize].clone()),
@@ -1903,7 +1958,7 @@ impl Interp {
                 let mut cursor = self.cursor(rt, source)?;
                 let mut out = Vec::new();
                 while let Some(item) = self.next(rt, &mut cursor)? {
-                    bind_names(rt, env, &c.names, item)?;
+                    bind_names(rt, &mut env.vars, &c.names, item)?;
                     let keep = match &c.condition {
                         Some(condition) => self.truth(rt, env, condition)?,
                         None => true,
@@ -1931,7 +1986,7 @@ impl Interp {
             }))),
             Node::Is(value, pattern) => {
                 let v = self.eval(rt, env, value)?;
-                Ok(Value::Bool(self.matches(rt, env, pattern, &v)?))
+                Ok(Value::Bool(self.matches(rt, &mut env.vars, pattern, &v)?))
             }
             Node::Conditional(parts) => {
                 let [condition, then, otherwise] = &**parts;
@@ -2010,7 +2065,7 @@ impl Interp {
     }
 
     /// `l or right` once `l` is known: `right` only for `false` and `none` (runtime 1.2).
-    fn or_value(
+    pub(crate) fn or_value(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -2037,7 +2092,7 @@ impl Interp {
         }
     }
 
-    fn eval_all(
+    pub(crate) fn eval_all(
         &self,
         rt: &mut Runtime,
         env: &mut Env,
@@ -2050,25 +2105,66 @@ impl Interp {
         Ok(out)
     }
 
-    fn constant(&self, rt: &mut Runtime, c: usize) -> Outcome {
-        if let Some(v) = self.consts[c].get() {
-            return Ok(v.clone());
-        }
+    /// The lowered value of a constant.
+    pub(crate) fn const_code(&self, c: usize) -> Option<Rc<ExprCode>> {
         let def = &self.program.consts[c];
         let expr = match &self.program.modules[def.module].analysis.file.items[def.item] {
             Item::Declaration(d) => match &d.kind {
                 DeclarationKind::Constant(k) => &k.value,
-                _ => return Err(internal(rt, "constant")),
+                _ => return None,
             },
-            _ => return Err(internal(rt, "constant")),
+            _ => return None,
         };
-        let code = self.expr_code(&self.default_codes, (usize::MAX, c), def.module, expr);
+        Some(self.expr_code(&self.default_codes, (usize::MAX, c), def.module, expr))
+    }
+
+    /// The lowered default of field `i` of a struct or an error.
+    pub(crate) fn field_default_code(&self, d: DefId, i: usize) -> Option<Rc<ExprCode>> {
+        let def = &self.program.defs[d];
+        let fields = match &def.kind {
+            DefKind::Struct(f) | DefKind::Error(f) => f,
+            _ => return None,
+        };
+        let field = fields.get(i)?;
+        let e = self
+            .fields_of(d)?
+            .iter()
+            .find(|f| f.name.text == field.name)?
+            .default
+            .as_ref()?;
+        Some(self.expr_code(&self.field_codes, (d, i), def.module, e))
+    }
+
+    /// The lowered default of parameter `i` (after `self`) of an external function.
+    pub(crate) fn extern_default_code(&self, f: FnId, i: usize) -> Option<Rc<ExprCode>> {
+        let def = &self.program.funcs[f];
+        let (sig, _) = self.signature(f)?;
+        let param = sig
+            .params
+            .iter()
+            .filter(|p| !matches!(p, Param::SelfParam { .. }))
+            .nth(i)?;
+        let e = match param {
+            Param::Named { default, .. } | Param::Plain { default, .. } => default.as_ref()?,
+            Param::SelfParam { .. } => return None,
+        };
+        Some(self.expr_code(&self.default_codes, (f, i), def.module, e))
+    }
+
+    pub(crate) fn constant(&self, rt: &mut Runtime, c: usize) -> Outcome {
+        if let Some(v) = self.consts[c].get() {
+            return Ok(v.clone());
+        }
+        let def = &self.program.consts[c];
+        let Some(code) = self.const_code(c) else {
+            return Err(internal(rt, "constant"));
+        };
         let value = self.eval_code(rt, def.module, &code)?;
         let _ = self.consts[c].set(value.clone());
         Ok(value)
     }
 
-    fn construct(&self, rt: &mut Runtime, env: &mut Env, c: &ConstructCode) -> Outcome {
+    pub(crate) fn construct(&self, rt: &mut Runtime, env: &mut Env, c: &ConstructCode) -> Outcome {
         match &c.variant {
             Some(variant) if c.fields == 1 && c.args.len() == 1 && c.args[0].0 == 0 => {
                 let value = self.eval(rt, env, &c.args[0].1)?;
@@ -2112,7 +2208,7 @@ impl Interp {
         }
     }
     /// A variant declared in the module, which hides a prelude name (semantics 1.4).
-    fn local_variant(&self, module: ModId, name: &str) -> Option<DefId> {
+    pub(crate) fn local_variant(&self, module: ModId, name: &str) -> Option<DefId> {
         self.variants
             .get(name)?
             .iter()
@@ -2134,7 +2230,7 @@ impl Interp {
             .copied()
     }
 
-    fn make_variant(&self, d: DefId, variant: &str, values: Vec<Value>) -> Value {
+    pub(crate) fn make_variant(&self, d: DefId, variant: &str, values: Vec<Value>) -> Value {
         // Names are shared, so the same address finds the variant without comparing texts.
         let shapes = &self.shapes[d];
         let shape = shapes
@@ -2160,7 +2256,12 @@ impl Interp {
     }
 
     /// Fills defaults (evaluated freshly in the declaring module) and builds the value.
-    fn finish_struct(&self, rt: &mut Runtime, d: DefId, mut values: Vec<Option<Value>>) -> Outcome {
+    pub(crate) fn finish_struct(
+        &self,
+        rt: &mut Runtime,
+        d: DefId,
+        mut values: Vec<Option<Value>>,
+    ) -> Outcome {
         let def = &self.program.defs[d];
         let fields = match &def.kind {
             DefKind::Struct(f) | DefKind::Error(f) => f,
@@ -2194,7 +2295,7 @@ impl Interp {
 
     // ---------------------------------------------------------------- operators
 
-    fn apply(&self, rt: &mut Runtime, op: Op, l: Value, r: Value) -> Outcome {
+    pub(crate) fn apply(&self, rt: &mut Runtime, op: Op, l: Value, r: Value) -> Outcome {
         use Value::*;
         let t = |rt: &Runtime, x: Result<i64, Fault>| x.map(Int).map_err(|f| traced(rt, f));
         Ok(match (op, &l, &r) {
@@ -2270,10 +2371,10 @@ impl Interp {
 
     // ---------------------------------------------------------------- patterns
 
-    fn matches(
+    pub(crate) fn matches<V: std::ops::IndexMut<usize, Output = Value> + ?Sized>(
         &self,
         rt: &mut Runtime,
-        env: &mut Env,
+        env: &mut V,
         pattern: &Pat,
         v: &Value,
     ) -> Result<bool, Unwind> {
@@ -2319,7 +2420,7 @@ impl Interp {
                 }
                 match fallback {
                     NameFallback::Bind(slot) => {
-                        env.vars[*slot as usize] = v.clone();
+                        env[*slot as usize] = v.clone();
                         Ok(true)
                     }
                     NameFallback::Const(c) => {
@@ -2380,7 +2481,7 @@ impl Interp {
                         }
                         ListPat::Rest(slot) => {
                             let count = items.len() - fixed;
-                            env.vars[*slot as usize] = Value::list(items[i..i + count].to_vec());
+                            env[*slot as usize] = Value::list(items[i..i + count].to_vec());
                             i += count;
                         }
                     }
@@ -2403,7 +2504,7 @@ impl Interp {
             }
             Pat::Bind(pattern, slot) => {
                 if self.matches(rt, env, pattern, v)? {
-                    env.vars[*slot as usize] = v.clone();
+                    env[*slot as usize] = v.clone();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -2419,7 +2520,7 @@ impl Interp {
             }
         }
     }
-    fn equal(&self, rt: &mut Runtime, l: &Value, r: &Value) -> Result<bool, Unwind> {
+    pub(crate) fn equal(&self, rt: &mut Runtime, l: &Value, r: &Value) -> Result<bool, Unwind> {
         if let (Value::Struct(_) | Value::Enum(_), true) = (l, true) {
             if let Some(&f) = self.method_of(l, "equals").as_ref() {
                 if self.program.funcs[f].body.is_some() {
@@ -2431,7 +2532,7 @@ impl Interp {
         Ok(values_equal(l, r))
     }
 
-    fn compare(
+    pub(crate) fn compare(
         &self,
         rt: &mut Runtime,
         l: &Value,
@@ -2498,7 +2599,7 @@ impl Interp {
         })
     }
 
-    fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
+    pub(crate) fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
         self.variants
             .get(variant)
             .map(|ds| ds.iter().any(|d| self.program.defs[*d].name == type_name))
@@ -2507,19 +2608,24 @@ impl Interp {
 
     // ---------------------------------------------------------------- JSON (S-5, S-17)
 
-    fn rt_type(&self, env: &Env, ty: &Type) -> Result<RtTy, Unwind> {
+    pub(crate) fn rt_type(
+        &self,
+        env_types: &Types,
+        module: ModId,
+        ty: &Type,
+    ) -> Result<RtTy, Unwind> {
         let name = ty.path.last().map(|n| n.text.as_str()).unwrap_or("");
         let args: Vec<RtTy> = ty
             .arguments
             .iter()
             .map(|a| match a {
-                TypeArgument::Type(t) => self.rt_type(env, t),
+                TypeArgument::Type(t) => self.rt_type(env_types, module, t),
                 _ => Ok(RtTy::Unknown),
             })
             .collect::<Result<_, _>>()?;
         let arg = |i: usize| Box::new(args.get(i).cloned().unwrap_or(RtTy::Unknown));
         if ty.path.len() == 1 {
-            if let Some(t) = env.types.get(name) {
+            if let Some(t) = env_types.get(name) {
                 return Ok(t.clone());
             }
             match name {
@@ -2538,10 +2644,10 @@ impl Interp {
         }
         let module = if ty.path.len() > 1 {
             self.program
-                .module_alias(env.module, &ty.path[0].text)
-                .unwrap_or(env.module)
+                .module_alias(module, &ty.path[0].text)
+                .unwrap_or(module)
         } else {
-            env.module
+            module
         };
         match self.program.lookup(module, name) {
             Some((_, Symbol::Def(d))) => Ok(RtTy::Named(d, args)),
@@ -2549,7 +2655,7 @@ impl Interp {
         }
     }
 
-    fn ty_to_rt(&self, ty: &Ty, subst: &HashMap<usize, RtTy>) -> RtTy {
+    pub(crate) fn ty_to_rt(&self, ty: &Ty, subst: &HashMap<usize, RtTy>) -> RtTy {
         use crate::types::Prim;
         match ty {
             Ty::Prim(Prim::Int) => RtTy::Int,
@@ -2573,7 +2679,7 @@ impl Interp {
         }
     }
 
-    fn json(&self, variant: &str, field: Option<(&str, Value)>) -> Value {
+    pub(crate) fn json(&self, variant: &str, field: Option<(&str, Value)>) -> Value {
         Value::Enum(Rc::new(EnumValue {
             type_name: Rc::from("Value"),
             variant: Rc::from(variant),
@@ -2584,7 +2690,7 @@ impl Interp {
         }))
     }
 
-    fn encode_json(&self, rt: &mut Runtime, v: &Value) -> Outcome {
+    pub(crate) fn encode_json(&self, rt: &mut Runtime, v: &Value) -> Outcome {
         Ok(match v {
             Value::Int(i) => self.json("Int", Some(("value", Value::Int(*i)))),
             Value::Float(f) => self.json("Float", Some(("value", Value::Float(*f)))),
@@ -2659,7 +2765,7 @@ impl Interp {
         })
     }
 
-    fn decode_error(&self, path: &str, message: impl Into<String>) -> Unwind {
+    pub(crate) fn decode_error(&self, path: &str, message: impl Into<String>) -> Unwind {
         Unwind::Error(Box::new(Value::record(
             "DecodeError",
             vec![
@@ -2669,7 +2775,13 @@ impl Interp {
         )))
     }
 
-    fn decode_json(&self, rt: &mut Runtime, ty: &RtTy, v: &Value, path: &str) -> Outcome {
+    pub(crate) fn decode_json(
+        &self,
+        rt: &mut Runtime,
+        ty: &RtTy,
+        v: &Value,
+        path: &str,
+    ) -> Outcome {
         let (variant, payload) = match v {
             Value::Enum(e) if &*e.type_name == "Value" => (
                 e.variant.to_string(),
@@ -2856,7 +2968,7 @@ impl Interp {
     }
 }
 
-enum Cursor {
+pub(crate) enum Cursor {
     List(Rc<unio_runtime::heap::Counted<Vec<Value>>>, usize),
     Text(unio_runtime::value::Text, usize),
     Items(std::vec::IntoIter<Value>),
@@ -2865,9 +2977,9 @@ enum Cursor {
 }
 
 /// A named function used as a value.
-struct FnRef {
-    interp: Rc<Interp>,
-    f: FnId,
+pub(crate) struct FnRef {
+    pub(crate) interp: Rc<Interp>,
+    pub(crate) f: FnId,
 }
 
 impl Callable for FnRef {
@@ -2895,7 +3007,7 @@ impl Callable for FnRef {
 }
 
 /// An anonymous function with the values it captured (L-11a).
-struct Closure {
+pub(crate) struct Closure {
     interp: Rc<Interp>,
     code: Rc<LambdaCode>,
     captured: Vec<Value>,
@@ -2926,7 +3038,7 @@ impl Callable for Closure {
 
 // ---------------------------------------------------------------- helpers
 
-fn ty_key(program: &Program, ty: &Ty) -> Option<String> {
+pub(crate) fn ty_key(program: &Program, ty: &Ty) -> Option<String> {
     Some(match ty {
         Ty::Prim(p) => p.name().to_string(),
         Ty::List(_) => "List".into(),
@@ -2939,7 +3051,7 @@ fn ty_key(program: &Program, ty: &Ty) -> Option<String> {
 }
 
 /// The type name of a value that is not a struct, an enum, or a resource.
-fn static_key(v: &Value) -> &'static str {
+pub(crate) fn static_key(v: &Value) -> &'static str {
     match v {
         Value::Int(_) => "Int",
         Value::Float(_) => "Float",
@@ -2957,7 +3069,7 @@ fn static_key(v: &Value) -> &'static str {
     }
 }
 
-fn value_key(v: &Value) -> String {
+pub(crate) fn value_key(v: &Value) -> String {
     match v {
         Value::Int(_) => "Int".into(),
         Value::Float(_) => "Float".into(),
@@ -2988,13 +3100,13 @@ pub(crate) fn parse_int(text: &str) -> Option<i64> {
     }
 }
 
-fn pointer(key: &str) -> String {
+pub(crate) fn pointer(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
 /// A local or a literal, read without copying it.
 #[inline]
-fn peek<'e>(env: &'e Env, node: &'e Node) -> Option<&'e Value> {
+pub(crate) fn peek<'e>(env: &'e Env, node: &'e Node) -> Option<&'e Value> {
     match node {
         Node::Local(slot) => Some(&env.vars[*slot as usize]),
         Node::Value(v) => Some(v),
@@ -3003,7 +3115,7 @@ fn peek<'e>(env: &'e Env, node: &'e Node) -> Option<&'e Value> {
 }
 
 /// Whether a node always gives a `Bool`, so that `or` with it on the left is boolean.
-fn gives_bool(node: &Node) -> bool {
+pub(crate) fn gives_bool(node: &Node) -> bool {
     match node {
         Node::Binary(op, _, _) => !matches!(
             op,
@@ -3019,7 +3131,7 @@ fn gives_bool(node: &Node) -> bool {
 /// succeeds; `None` sends it to the general path, which evaluates it again and reports the
 /// fault. Evaluating such an expression has no effects, so evaluating it twice is not observable.
 #[inline]
-fn fast_int(env: &Env, node: &Node) -> Option<i64> {
+pub(crate) fn fast_int(env: &Env, node: &Node) -> Option<i64> {
     match node {
         Node::Local(slot) => match env.vars[*slot as usize] {
             Value::Int(i) => Some(i),
@@ -3056,7 +3168,7 @@ fn fast_int(env: &Env, node: &Node) -> Option<i64> {
 
 /// The value of `left op right` when both sides are integer expressions of [`fast_int`].
 #[inline]
-fn fast_binary(env: &Env, op: Op, left: &Node, right: &Node) -> Option<Value> {
+pub(crate) fn fast_binary(env: &Env, op: Op, left: &Node, right: &Node) -> Option<Value> {
     let a = fast_int(env, left)?;
     let b = fast_int(env, right)?;
     Some(match op {
@@ -3077,7 +3189,7 @@ fn fast_binary(env: &Env, op: Op, left: &Node, right: &Node) -> Option<Value> {
 
 /// An operator on two integers.
 #[inline]
-fn int_op(rt: &Runtime, op: Op, a: i64, b: i64) -> Outcome {
+pub(crate) fn int_op(rt: &Runtime, op: Op, a: i64, b: i64) -> Outcome {
     let t = |x: Result<i64, Fault>| x.map(Value::Int).map_err(|f| traced(rt, f));
     Ok(Value::Bool(match op {
         Op::Add => return t(rf::int_add(a, b)),
@@ -3098,7 +3210,7 @@ fn int_op(rt: &Runtime, op: Op, a: i64, b: i64) -> Outcome {
 
 /// A comparison of integers, texts, or booleans, which have no methods that change it.
 #[inline]
-fn compare_simple(op: Op, a: &Value, b: &Value) -> Option<bool> {
+pub(crate) fn compare_simple(op: Op, a: &Value, b: &Value) -> Option<bool> {
     use std::cmp::Ordering;
     let ord: Ordering = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
@@ -3124,7 +3236,7 @@ fn compare_simple(op: Op, a: &Value, b: &Value) -> Option<bool> {
 /// Clears the slots a block bound, so that their values are freed and unshared as early as the
 /// scopes of the language allow.
 #[inline]
-fn clear_block(env: &mut Env, block: &Block) {
+pub(crate) fn clear_block(env: &mut Env, block: &Block) {
     let (start, end) = block.clear;
     for v in &mut env.vars[start as usize..end as usize] {
         *v = Value::Unit;
@@ -3132,15 +3244,20 @@ fn clear_block(env: &mut Env, block: &Block) {
 }
 
 /// Binds the item of an iteration to one name, or a tuple to several.
-fn bind_names(rt: &Runtime, env: &mut Env, names: &[Slot], item: Value) -> Result<(), Unwind> {
+pub(crate) fn bind_names<V: std::ops::IndexMut<usize, Output = Value> + ?Sized>(
+    rt: &Runtime,
+    env: &mut V,
+    names: &[Slot],
+    item: Value,
+) -> Result<(), Unwind> {
     if let [slot] = names {
-        env.vars[*slot as usize] = item;
+        env[*slot as usize] = item;
         return Ok(());
     }
     match item {
         Value::Tuple(t) => {
             for (slot, v) in names.iter().zip(t.iter()) {
-                env.vars[*slot as usize] = v.clone();
+                env[*slot as usize] = v.clone();
             }
             Ok(())
         }
@@ -3152,7 +3269,7 @@ fn bind_names(rt: &Runtime, env: &mut Env, names: &[Slot], item: Value) -> Resul
 }
 
 /// Whether a handler for the error type named `ty` receives the error.
-fn handles(ty: &str, error: &Value) -> bool {
+pub(crate) fn handles(ty: &str, error: &Value) -> bool {
     if ty == "Error" {
         return true;
     }
@@ -3164,7 +3281,7 @@ fn handles(ty: &str, error: &Value) -> bool {
 }
 
 /// The field at the end of a path of field names, copying shared levels on the way.
-fn navigate_fields<'a>(
+pub(crate) fn navigate_fields<'a>(
     rt: &Runtime,
     v: &'a mut Value,
     steps: &[PStep],
@@ -3192,14 +3309,18 @@ fn navigate_fields<'a>(
 
 /// The position of a field: by the shared name first, then by its text.
 #[inline]
-fn field_index(fields: &[(Rc<str>, Value)], name: &Rc<str>) -> Option<usize> {
+pub(crate) fn field_index(fields: &[(Rc<str>, Value)], name: &Rc<str>) -> Option<usize> {
     fields
         .iter()
         .position(|(k, _)| Rc::ptr_eq(k, name))
         .or_else(|| fields.iter().position(|(k, _)| **k == **name))
 }
 
-fn navigate<'a>(rt: &Runtime, v: &'a mut Value, steps: &[Step]) -> Result<&'a mut Value, Unwind> {
+pub(crate) fn navigate<'a>(
+    rt: &Runtime,
+    v: &'a mut Value,
+    steps: &[Step],
+) -> Result<&'a mut Value, Unwind> {
     let Some((first, rest)) = steps.split_first() else {
         return Ok(v);
     };
@@ -3243,7 +3364,7 @@ fn navigate<'a>(rt: &Runtime, v: &'a mut Value, steps: &[Step]) -> Result<&'a mu
 /// values of one type keep their fields in declaration order, and field names are shared, so a
 /// pointer comparison confirms the position.
 #[inline]
-fn field_cached(rt: &Runtime, v: &Value, name: &Rc<str>, at: &Cell<u32>) -> Outcome {
+pub(crate) fn field_cached(rt: &Runtime, v: &Value, name: &Rc<str>, at: &Cell<u32>) -> Outcome {
     let fields = match v {
         Value::Struct(s) => &s.fields[..],
         Value::Enum(e) => &e.fields[..],
@@ -3263,7 +3384,7 @@ fn field_cached(rt: &Runtime, v: &Value, name: &Rc<str>, at: &Cell<u32>) -> Outc
     }
 }
 
-fn field_of(rt: &Runtime, v: &Value, name: &str) -> Outcome {
+pub(crate) fn field_of(rt: &Runtime, v: &Value, name: &str) -> Outcome {
     match v {
         Value::Struct(s) => s
             .fields
@@ -3285,7 +3406,7 @@ fn field_of(rt: &Runtime, v: &Value, name: &str) -> Outcome {
     }
 }
 
-fn index_value(rt: &Runtime, t: &Value, i: &Value) -> Outcome {
+pub(crate) fn index_value(rt: &Runtime, t: &Value, i: &Value) -> Outcome {
     match (t, i) {
         (Value::List(l), Value::Int(i)) => usize::try_from(*i)
             .ok()
@@ -3341,7 +3462,7 @@ pub fn run_main(interp: &Rc<Interp>, rt: &mut Runtime, module: ModId) -> i32 {
     }
 }
 
-fn end(rt: &mut Runtime, e: Unwind) -> i32 {
+pub(crate) fn end(rt: &mut Runtime, e: Unwind) -> i32 {
     match e {
         Unwind::Fault(f) => {
             rt.write_error(&f.render());
@@ -3415,7 +3536,7 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
 /// of its Unio definition in `stdlib/`, which stays the specification and runs where an
 /// intrinsic declines (for example `contains` on structs with their own equality).
 #[derive(Clone, Copy)]
-enum Intrinsic {
+pub(crate) enum Intrinsic {
     IsEmpty,
     ToInt,
     First,

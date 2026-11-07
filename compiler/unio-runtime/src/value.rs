@@ -64,7 +64,13 @@ pub mod names {
 }
 
 /// A value of a Unio program.
+///
+/// The layout is fixed (`repr(u8)`): the variant's tag is the first byte, in the order below,
+/// and an `Int` or a `Float` is the eight bytes at offset 8, a `Bool` the byte at offset 1.
+/// Native code (docs/runtime.md 8.4) reads and writes the scalars directly and calls the
+/// runtime only for values that own memory; [`layout`] states the numbers it relies on.
 #[derive(Clone)]
+#[repr(u8)]
 pub enum Value {
     /// The result of a function without a result.
     Unit,
@@ -82,6 +88,45 @@ pub enum Value {
     Enum(Rc<EnumValue>),
     Function(Rc<dyn Callable>),
     Resource(Rc<ResourceCell>),
+}
+
+/// The layout of [`Value`] that native code relies on.
+pub mod layout {
+    /// The tags of the variants: the first byte of a value.
+    pub const UNIT: u8 = 0;
+    pub const INT: u8 = 1;
+    pub const FLOAT: u8 = 2;
+    pub const BOOL: u8 = 3;
+    pub const TEXT: u8 = 4;
+    pub const RESOURCE: u8 = 14;
+    /// Tags up to this one own no memory: copying the bytes copies the value and nothing
+    /// needs to be released (no reference count).
+    pub const LAST_SCALAR: u8 = BOOL;
+    /// Where the payload of `Int` and `Float` is, and that of `Bool`.
+    pub const PAYLOAD: i32 = 8;
+    pub const BOOL_PAYLOAD: i32 = 1;
+    /// The size of a value in bytes.
+    pub const SIZE: usize = std::mem::size_of::<super::Value>();
+
+    /// Whether the layout is the one stated here; the native code generator checks it.
+    pub fn holds() -> bool {
+        use super::Value;
+        let tag = |v: &Value| unsafe { *(v as *const Value as *const u8) };
+        let int = Value::Int(0x0102_0304_0506_0708);
+        let float = Value::Float(1.5);
+        let boolean = Value::Bool(true);
+        let at8 = |v: &Value| unsafe { *((v as *const Value as *const u8).add(8) as *const u64) };
+        let at1 = |v: &Value| unsafe { *((v as *const Value as *const u8).add(1)) };
+        tag(&Value::Unit) == UNIT
+            && tag(&int) == INT
+            && tag(&float) == FLOAT
+            && tag(&boolean) == BOOL
+            && tag(&Value::text("")) == TEXT
+            && at8(&int) == 0x0102_0304_0506_0708
+            && at8(&float) == 1.5f64.to_bits()
+            && at1(&boolean) == 1
+            && SIZE.is_multiple_of(8)
+    }
 }
 
 /// A function value. The interpreter implements it for closures and named functions.

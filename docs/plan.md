@@ -292,6 +292,8 @@ The stages of section 3 stay the acceptance criteria; this section orders the wo
 | S7 Packages and library | `unio.toml`, `unio.lock`, the registry with post-quantum signatures, `add`, `remove`, `update`, `unio doc`, the remaining modules of S-1 | Stage 5 exit criterion | 5 |
 | S8 Editor, trials, release | Language server and the VS Code extension on top of the existing highlighting, the R-10 and readability trials, 24 hours of fuzzing, the guide with the chapter on classes, reproducible signed release | Acceptance of requirements section 9.2 | 6, 7 |
 
+Status of S6: the sandbox on Linux and macOS, and native code for Linux on x86-64 (`unio build`, [runtime.md](runtime.md) section 8), which gives the output of the interpreter for every reference program and meets the floor of 7.1 on all four benchmarks; the other targets, the SB-15 suite, and the power-loss tests remain.
+
 Streams that run beside the critical path: the standard library and the reference programs grow with each sprint; documentation and its Russian localization follow every change; editor support started early, the syntax highlighting of `editors/` exists already and is tested against `spec/grammar.ebnf`.
 
 ## 13. Path to the self-hosted compiler
