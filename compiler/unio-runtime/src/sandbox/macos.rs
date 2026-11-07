@@ -119,7 +119,9 @@ pub fn profile(permissions: &Permissions) -> String {
         p.push_str(
             "(allow file-read* file-map-executable process-exec (subpath \"/usr/lib\") (subpath \"/usr/libexec\") \
              (subpath \"/System\") (subpath \"/Library/Apple\") (subpath \"/private/var/db/dyld\") \
-             (literal \"/private/etc/localtime\"))\n",
+             (subpath \"/private/preboot/Cryptexes\") (subpath \"/usr/share\") \
+             (literal \"/private/etc/localtime\"))\n\
+             (allow process-info* (target self))\n",
         );
         for program in &permissions.process {
             for path in program_paths(program) {

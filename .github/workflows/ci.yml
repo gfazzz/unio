@@ -110,6 +110,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests (corpus, all .unio sources, diagnostics, mutation)
         run: cargo test
+      - name: Seatbelt denials, when the tests fail on macOS
+        if: failure() && matrix.os == 'macos-latest'
+        run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -80
       - name: Formatter speed (T-3, release build)
         run: cargo test --release --test format thousand
       - name: Unio sources are in the one style (docs/style.md)
