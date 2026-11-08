@@ -77,6 +77,13 @@ jobs:
       - name: Native executables against Go (RFC 0003, reported)
         continue-on-error: true
         run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-go --json bench/results-go.json
+      - name: Keep the benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench/results*.json
+          if-no-files-found: warn
 
   editors:
     name: editor highlighting

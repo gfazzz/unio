@@ -17,6 +17,7 @@ import os
 import platform
 import random
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -245,8 +246,9 @@ def run_once(command, cwd):
     return done.returncode, done.stdout.decode("utf-8", "replace"), stderr, elapsed, peak
 
 
-def measure(command, runs, cwd, memory=None):
-    """Best wall time of the runs and the output; the smallest peak RSS goes into `memory`."""
+def measure(command, runs, cwd, memory=None, samples=None):
+    """Best wall time of the runs and the output; the peak RSS of each run goes into `memory`
+    and the time of each run into `samples`, so that the median and the spread are recorded."""
     best = None
     output = None
     for _ in range(runs):
@@ -255,6 +257,8 @@ def measure(command, runs, cwd, memory=None):
             return None, (stderr.strip().splitlines() or ["exit " + str(code)])[-1]
         output = stdout.strip()
         best = elapsed if best is None else min(best, elapsed)
+        if samples is not None:
+            samples.append(elapsed)
         if memory is not None and peak is not None:
             memory.append(peak)
     return best, output
@@ -357,10 +361,16 @@ def main():
                 row["notes"][language] = f"build failed: {e}"
                 failures.append(f"{name}/{language}: build failed")
                 continue
-            peaks = []
-            t, out = measure(command, options.runs, ROOT, peaks)
+            peaks, samples = [], []
+            t, out = measure(command, options.runs, ROOT, peaks, samples)
             if peaks:
                 row.setdefault("memory", {})[language] = min(peaks)
+            if samples:
+                row.setdefault("runs", {})[language] = {
+                    "times": samples,
+                    "median": statistics.median(samples),
+                    "spread": max(samples) - min(samples),
+                }
             if t is None:
                 row["notes"][language] = "failed: " + out
                 failures.append(f"{name}/{language}: {out}")
@@ -400,9 +410,12 @@ def main():
         if row["benchmark"] in FLOOR_BENCHMARKS and row["case"] == "same algorithm":
             ref = reference(languages)
             u, g = row["times"].get(ref), row["times"].get("Go")
-            if u is None or g is None:
-                continue
             gated = row["benchmark"] in GO_GATED
+            if u is None or g is None:
+                print(f"  {row['benchmark']:<5} not measured: no time for {ref} or Go")
+                if gated:
+                    go_failures.append(f"{row['benchmark']}: no time for {ref} or Go")
+                continue
             memory = row.get("memory", {})
             um, gm = memory.get(ref), memory.get("Go")
             memory_text = ""
@@ -412,9 +425,14 @@ def main():
                 if gated and um > limit:
                     go_failures.append(f"{row['benchmark']}: {ref} peak {um / 1e6:.1f} MB is above"
                                        f" {limit / 1e6:.1f} MB (2x Go {gm / 1e6:.1f} MB + 8 MB)")
+            elif gated:
+                go_failures.append(f"{row['benchmark']}: no peak memory for {ref} or Go")
             print(f"  {row['benchmark']:<5} time {u / g:5.2f}x Go{memory_text}{'  (gated)' if gated else ''}")
             if gated and u / g > GO_LIMIT:
                 go_failures.append(f"{row['benchmark']}: {ref} {u:.3f} s is {u / g:.2f}x Go {g:.3f} s")
+    for name in GO_GATED:
+        if not any(r["benchmark"] == name and r["case"] == "same algorithm" for r in rows):
+            go_failures.append(f"{name}: gated by RFC 0003 but not run")
     print_memory(rows)
 
     report = {
@@ -438,7 +456,7 @@ def main():
         print(f"{'error' if options.check_floor else 'note'}: below the {FLOOR}x floor of 7.1: {failure}",
               file=sys.stderr)
     for failure in go_failures:
-        print(f"{'error' if options.check_go else 'note'}: above {GO_LIMIT}x Go (RFC 0003): {failure}",
+        print(f"{'error' if options.check_go else 'note'}: against Go (RFC 0003): {failure}",
               file=sys.stderr)
     if failures or (options.check_floor and floor_failures) or (options.check_go and go_failures):
         return 1
