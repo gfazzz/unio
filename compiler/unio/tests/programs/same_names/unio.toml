@@ -1,0 +1,5 @@
+# Two modules with types of the same names (compiler/unio/tests: interpreter and native).
+
+[package]
+name = "same-names"
+version = "0.1.0"

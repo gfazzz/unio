@@ -382,6 +382,27 @@ fn benchmarks_and_tools_match_the_interpreter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Types of one name in two modules: the executable finds methods, implementations, handlers
+/// and variants by the identity of the type, as the interpreter does.
+#[test]
+fn types_of_one_name_in_two_modules_match_the_interpreter() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("same-names");
+    let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/same_names/main.unio");
+    let exe = build(&program, &dir, true);
+    let output = native(&exe, &case(program.clone(), &[], &dir));
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "trees node 1\ngraphs node 2\ntrees label 1\ngraphs label 2\ncaught graphs.Problem Problem(reason = g)\nown trees.Problem\nother graphs.Problem\ntrees inner 3\ngraphs leaf\ngraphs inner 4\n"
+    );
+    let differences = compare(&[case(program, &[], &dir)], &dir);
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn two_builds_are_byte_for_byte_the_same() {
     if !supported() {

@@ -372,13 +372,19 @@ fn text_repeat(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let Ok(times) = usize::try_from(times) else {
         return Err(assertion(runtime, "times >= 0"));
     };
-    let size = t.as_str().len().checked_mul(times);
-    if size.is_none_or(|n| n > isize::MAX as usize) {
+    let Some(size) = t.as_str().len().checked_mul(times) else {
         return Err(crate::fault::Unwind::Exhausted(
             crate::fault::Exhaustion::Heap,
         ));
+    };
+    // The size is checked against the heap limit and reserved before the text is built.
+    let mut data = Vec::new();
+    super::reserve(runtime, &mut data, size)?;
+    for _ in 0..times {
+        data.extend_from_slice(t.as_str().as_bytes());
     }
-    let result = Value::text(t.as_str().repeat(times));
+    let repeated = String::from_utf8(data).expect("repeated UTF-8 is UTF-8");
+    let result = Value::text(repeated);
     runtime.check_heap()?;
     Ok(result)
 }

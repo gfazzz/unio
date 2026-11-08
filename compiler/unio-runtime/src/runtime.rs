@@ -223,6 +223,18 @@ impl Runtime {
         }
     }
 
+    /// Ends with code 102 when `bytes` more would exceed the heap limit. Called before an
+    /// allocation whose size the program decides (a read buffer, a file, captured output), so
+    /// that memory over the budget is refused instead of allocated.
+    pub fn reserve_heap(&self, bytes: usize) -> Result<(), Unwind> {
+        match self.heap_limit {
+            Some(limit) if crate::heap::live_bytes().saturating_add(bytes) > limit => {
+                Err(Unwind::Exhausted(Exhaustion::Heap))
+            }
+            _ => Ok(()),
+        }
+    }
+
     // ---------------------------------------------------------------- resources
 
     /// A new resource with its own identity.

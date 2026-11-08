@@ -529,6 +529,38 @@ pub fn may_run(program: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The variables a child process always receives when they are set, besides those granted under
+/// `env`: `PATH`, so that the child finds the programs it runs as the runtime found it; on
+/// Windows also `SystemRoot`, without which system libraries of the child fail to load. Nothing
+/// else is passed: locale, time zone, home, and temporary directory variables reach a child only
+/// when the manifest grants them, and a child without them uses the defaults of its system.
+#[cfg(windows)]
+pub const CHILD_ENVIRONMENT: &[&str] = &["PATH", "SystemRoot"];
+#[cfg(not(windows))]
+pub const CHILD_ENVIRONMENT: &[&str] = &["PATH"];
+
+/// The environment of a child process (SB-1, SB-6): the variables the program may see under
+/// `env`, plus [`CHILD_ENVIRONMENT`], with the values of this process. `None` without a sandbox
+/// on this thread, as in the tests of the runtime, where the child inherits everything, just as
+/// [`may_use_env`] permits everything there.
+pub fn child_environment() -> Option<Vec<(String, std::ffi::OsString)>> {
+    let a = active()?;
+    let names: BTreeSet<&str> = a
+        .sandbox
+        .permissions
+        .env
+        .iter()
+        .map(String::as_str)
+        .chain(CHILD_ENVIRONMENT.iter().copied())
+        .collect();
+    Some(
+        names
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (name.to_string(), value)))
+            .collect(),
+    )
+}
+
 /// The heap limit of the policy in bytes, for [`crate::Runtime::new`].
 pub fn heap_limit() -> Option<usize> {
     active()
@@ -680,6 +712,7 @@ fn watchdog(limits: &Limits, stop: Arc<AtomicBool>) {
             };
             if let Some((what, limit)) = exhausted {
                 let seconds = limit.map_or(0, |l| l.as_secs());
+                crate::externs::process::stop_children();
                 eprintln!(
                     "fault: the {what} limit of the policy ({seconds} s) is used up; the program ends with code 102"
                 );
@@ -1054,6 +1087,10 @@ mod tests {
                 assert!(may_run("git").is_ok());
                 assert!(may_run("git").unwrap_err().contains("limits"));
                 assert_eq!(heap_limit(), Some(4096));
+                let environment = child_environment().unwrap();
+                assert!(environment
+                    .iter()
+                    .all(|(name, _)| name == "HOME" || CHILD_ENVIRONMENT.contains(&name.as_str())));
                 ACTIVE.with(|a| *a.borrow_mut() = None);
             }
         })

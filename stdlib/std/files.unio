@@ -32,6 +32,7 @@ public external function exists(path as Path) returns Bool
 public external function is_directory(path as Path) returns Bool
 
 ## The whole file as text; kind InvalidData if it is not UTF-8. Permission: files.read.
+## A file larger than the heap limit of the policy allows ends the program with code 102 before it is read.
 public external function read_text(path as Path) returns Text fails with IoError
 
 enum ReaderState:
@@ -73,7 +74,8 @@ extend FileReader with Resource:
 extend FileReader:
     ## some(nonempty bytes) up to max_bytes, or permanent none at EOF. max_bytes must be positive;
     ## otherwise InvalidData. Buffered bytes are returned before a pending error on the next call.
-    ## An error makes further reads return that error. Memory is O(max_bytes), independent of file size.
+    ## An error makes further reads return that error. Memory is O(max_bytes), independent of file size;
+    ## a max_bytes beyond the heap limit of the policy ends the program with code 102.
     public function read_bytes(
         var self,
         named max_bytes as Int = 65536,
@@ -115,7 +117,9 @@ extend FileReader:
 external function system_open_read(path as Path) returns Int fails with IoError
 
 ## Blocks until data, EOF or error; retries interrupted reads. data.length() <= max_bytes.
-## Permission: none; the descriptor was opened with files.read.
+## The buffer of max_bytes is checked against the heap limit before it is allocated: a max_bytes
+## that does not fit ends the program with code 102. Permission: none; the descriptor was opened
+## with files.read.
 external function system_read_chunk(
     descriptor as Int,
     path as Path,
@@ -187,10 +191,20 @@ public external function resolve(path as Path) returns Path fails with IoError
 public external function list_directory(path as Path) returns List[Path] fails with IoError
 
 ## Every file below the directory, sorted, depth first; directories themselves are not listed.
+## A symbolic link to a directory is listed as an entry and not followed, so that a link cannot
+## lead the listing into a cycle or out of the tree; the root itself may be a link.
+## A link is recognized because resolving it does not give its own place in the resolved tree.
 public function list_tree(root as Path) returns List[Path] fails with IoError:
+    return try list_tree_below(root, try resolve(root))
+
+function list_tree_below(directory as Path, real as Path) returns List[Path] fails with IoError:
     var found as List[Path] = []
-    for entry in try list_directory(root):
-        if is_directory(entry): found.append_all(try list_tree(entry))
+    for entry in try list_directory(directory):
+        if is_directory(entry):
+            let resolved = try resolve(entry)
+            if resolved.to_text() == real.join(entry.name()).to_text():
+                found.append_all(try list_tree_below(entry, resolved))
+            else: found.append(entry)
         else: found.append(entry)
     return found
 
@@ -200,7 +214,7 @@ public function write_text(path as Path, text as Text, durable as Bool = false) 
         try file.write(text)
         try file.commit()
 
-## The whole file as bytes. Permission: files.read.
+## The whole file as bytes. Permission: files.read. Memory is checked as in read_text.
 public external function read_bytes(path as Path) returns Bytes fails with IoError
 
 ## Replaces the file with the bytes atomically, like write_text. Permission: files.write.
@@ -223,9 +237,11 @@ public function copy_file(
     try write_bytes(target, try read_bytes(source), durable = durable)
 
 ## Gives a file or directory a new path on the same file system. It fails with kind AlreadyExists
-## instead of replacing an existing target, so that renaming never destroys data. For a file this
-## is atomic. For a directory the check and the rename are two steps, so a target that another
-## process creates between them can be replaced. Permission: files.write.
+## instead of replacing an existing target, so that renaming never destroys data. The check and the
+## rename are one atomic step: renameat2 with RENAME_NOREPLACE on Linux, renamex_np with
+## RENAME_EXCL on macOS, MoveFileExW on Windows. Where the system or the file system has no such
+## step, a file is linked under the new name and then unlinked from the old one, which still never
+## replaces a target, and a directory fails with kind Unsupported. Permission: files.write.
 public external function rename(source as Path, target as Path) fails with IoError
 
 ## Creates one directory; fails with kind AlreadyExists if it exists and NotFound if its parent

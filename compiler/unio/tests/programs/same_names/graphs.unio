@@ -1,0 +1,28 @@
+import labels
+
+public struct Node:
+    public value as Int
+
+public error Problem:
+    public reason as Text
+
+extend Node:
+    public function describe(self) returns Text:
+        return "graphs node {self.value}"
+
+extend Node with labels.Label:
+    function label(self) returns Text:
+        return "graphs label {self.value}"
+
+public function fail_with(reason as Text) returns Int fails with Problem:
+    fail Problem(reason = reason)
+
+public enum Mark:
+    Leaf
+    Inner(depth as Int)
+
+extend Mark:
+    public function name(self) returns Text:
+        match self:
+            case Leaf: return "graphs leaf"
+            case Inner(depth): return "graphs inner {depth}"

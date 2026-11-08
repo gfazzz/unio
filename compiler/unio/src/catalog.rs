@@ -477,6 +477,7 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0051", duplicate("x")),
         ("E0052", import_collision("x")),
         ("E0053", module_not_found("std.x")),
+        ("E0053", module_outside("lib.x")),
         ("E0054", name_not_in_module("x", "std.text")),
         ("E0058", import_cycle("a -> b -> a")),
         ("E0059", type_arity("Map", 2, 1)),
@@ -535,10 +536,17 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0082", missing_return("Int")),
         ("E0083", outside_loop("break")),
         ("E0084", layer_violation("print", "std", "core")),
-        ("E0084", profile_violation("main", "alloc", "main -> join")),
+        (
+            "E0084",
+            profile_violation("main", "alloc", ("main -> join", "main -> join")),
+        ),
+        (
+            "E0084",
+            layer_allocation(crate::effects::Allocation::List, "core"),
+        ),
         (
             "E0085",
-            effect_not_permitted("files.read", "main -> read_text"),
+            effect_not_permitted("files.read", ("main -> read_text", "main -> read_text")),
         ),
         ("E0050", is_name_not_bound("x")),
         ("E0065", operator_not_defined("+", "Point")),
@@ -693,8 +701,8 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "import std.files as file_system\n\nfunction files() returns Int:\n    return 1\n",
         ),
         "E0053" => (
-            "The module is not in the standard library or in the package. Check the spelling of the module path.",
-            "Модуля нет ни в стандартной библиотеке, ни в пакете. Проверьте написание пути модуля.",
+            "The module is not in the standard library or in the package, or its file is a link that leads outside them. Check the spelling of the module path, or move the module into the package.",
+            "Модуля нет ни в стандартной библиотеке, ни в пакете, или его файл — ссылка, ведущая за их пределы. Проверьте написание пути модуля или перенесите модуль в пакет.",
             "import std.filez\n",
             "import std.files\n",
         ),
@@ -915,6 +923,17 @@ pub fn module_not_found(name: &str) -> Msg {
     Msg::new(
         format!("module '{name}' not found in the standard library or the package"),
         format!("модуль '{name}' не найден ни в стандартной библиотеке, ни в пакете"),
+    )
+}
+
+pub fn module_outside(name: &str) -> Msg {
+    Msg::new(
+        format!(
+            "module '{name}' is reached through a link that leads outside the package or the standard library"
+        ),
+        format!(
+            "модуль '{name}' достижим только через ссылку, ведущую за пределы пакета или стандартной библиотеки"
+        ),
     )
 }
 
@@ -1388,16 +1407,29 @@ pub fn layer_violation(name: &str, needed: &str, here: &str) -> Msg {
     )
 }
 
-pub fn profile_violation(name: &str, needed: &str, chain: &str) -> Msg {
+/// `chain` is the chain of calls in English and in Russian; it may end with an allocating
+/// expression and its line.
+pub fn profile_violation(name: &str, needed: &str, chain: (&str, &str)) -> Msg {
+    let (en, ru) = chain;
     Msg::new(
-        format!("'{name}' needs the layer {needed} through {chain}, which the core profile does not have; avoid that call"),
-        format!("'{name}' требует слоя {needed} через {chain}, которого нет в профиле core; уберите этот вызов"),
+        format!("'{name}' needs the layer {needed} through {en}, which the core profile does not have; avoid that call"),
+        format!("'{name}' требует слоя {needed} через {ru}, которого нет в профиле core; уберите этот вызов"),
     )
 }
 
-pub fn effect_not_permitted(effect: &str, chain: &str) -> Msg {
+/// An allocating expression in a module of the `core` layer (S-11, semantics 8.4).
+pub fn layer_allocation(what: crate::effects::Allocation, here: &str) -> Msg {
+    let (en, ru) = what.describe();
     Msg::new(
-        format!("the effect '{effect}' is not permitted by unio.toml, but {chain} needs it; add the permission or remove the call"),
-        format!("эффект '{effect}' не разрешён в unio.toml, но он нужен {chain}; добавьте полномочие или уберите вызов"),
+        format!("{en} allocates and needs the layer alloc, but this module is in the layer {here}; move the code or avoid the allocation"),
+        format!("{ru} выделяет память и требует слоя alloc, а этот модуль в слое {here}; перенесите код или обойдитесь без выделения памяти"),
+    )
+}
+
+pub fn effect_not_permitted(effect: &str, chain: (&str, &str)) -> Msg {
+    let (en, ru) = chain;
+    Msg::new(
+        format!("the effect '{effect}' is not permitted by unio.toml, but {en} needs it; add the permission or remove the call"),
+        format!("эффект '{effect}' не разрешён в unio.toml, но он нужен {ru}; добавьте полномочие или уберите вызов"),
     )
 }

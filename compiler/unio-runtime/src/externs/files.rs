@@ -102,7 +102,7 @@ fn is_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn read_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     permit_read(&p)?;
-    let data = fs::read(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
+    let data = read_whole(runtime, &p)?;
     let text = String::from_utf8(data)
         .map_err(|_| io_error(p.as_str(), "InvalidData", "the file is not valid UTF-8"))?;
     let value = Value::text(text);
@@ -114,10 +114,39 @@ fn read_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn read_bytes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     permit_read(&p)?;
-    let data = fs::read(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
+    let data = read_whole(runtime, &p)?;
     let value = Value::bytes(data);
     runtime.check_heap()?;
     Ok(value)
+}
+
+/// The content of a file, with its size checked against the heap limit before the memory is
+/// allocated (C-18). A file that grows while it is read is read to its end in steps that are
+/// checked the same way.
+fn read_whole(runtime: &Runtime, p: &Text) -> Result<Vec<u8>, Unwind> {
+    let mut file = File::open(native(p)).map_err(|e| os_error(p.as_str(), &e))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut data = Vec::new();
+    super::reserve(
+        runtime,
+        &mut data,
+        usize::try_from(size).unwrap_or(usize::MAX),
+    )?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => return Ok(data),
+            Ok(n) => {
+                if data.capacity() - data.len() < n {
+                    let more = data.len().max(n);
+                    super::reserve(runtime, &mut data, more)?;
+                }
+                data.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(os_error(p.as_str(), &e)),
+        }
+    }
 }
 
 /// Opens a file for reading; no content is read ahead.
@@ -140,26 +169,29 @@ fn read_step(data: Vec<u8>, end: bool, problem: Option<Value>) -> Value {
 }
 
 /// Blocks until data, the end, or an error; retries interrupted reads; never returns more than
-/// max_bytes. Bytes read before an error are delivered together with it.
+/// max_bytes. Bytes read before an error are delivered together with it. The buffer of
+/// max_bytes is checked against the heap limit before it is allocated, so a max_bytes that does
+/// not fit ends the program with code 102 (C-18) instead of an abort.
 fn system_read_chunk(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let descriptor = int(runtime, arguments, 0)?;
     let p = path(runtime, arguments, 1)?;
     let max = usize::try_from(int(runtime, arguments, 2)?)
         .unwrap_or(0)
         .max(1);
-    let file = match runtime.descriptor(descriptor) {
-        Some(f) => f,
-        None => {
-            let problem = io_error_value(p.as_str(), "Other", "the descriptor is not open");
-            return Ok(read_step(Vec::new(), false, Some(problem)));
-        }
-    };
-    let mut buffer = vec![0u8; max];
+    if runtime.descriptor(descriptor).is_none() {
+        let problem = io_error_value(p.as_str(), "Other", "the descriptor is not open");
+        return Ok(read_step(Vec::new(), false, Some(problem)));
+    }
+    let mut buffer = super::buffer(runtime, max)?;
+    let file = runtime
+        .descriptor(descriptor)
+        .expect("the descriptor was checked above");
     loop {
         match file.read(&mut buffer) {
             Ok(0) => return Ok(read_step(Vec::new(), true, None)),
             Ok(n) => {
                 buffer.truncate(n);
+                buffer.shrink_to_fit();
                 return Ok(read_step(buffer, false, None));
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -199,10 +231,12 @@ fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 }
 
 /// Gives a file or directory a new path and fails with AlreadyExists instead of replacing an
-/// existing target. A file is renamed by linking the new name, which fails atomically when it
-/// exists, and then unlinking the old one; a directory, or a file system without links, is
-/// checked and then renamed, which leaves a short window in which another process could create
-/// the target.
+/// existing target. The check and the rename are one step of the operating system:
+/// renameat2 with RENAME_NOREPLACE on Linux, renamex_np with RENAME_EXCL on macOS, and
+/// MoveFileExW without MOVEFILE_REPLACE_EXISTING on Windows. Where the system or the file
+/// system has no such step, a file is linked under the new name, which fails atomically when
+/// the name exists, and then unlinked from the old one; a directory then fails with kind
+/// Unsupported rather than racing with another process that could create the target.
 fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let source = path(runtime, arguments, 0)?;
     let target = path(runtime, arguments, 1)?;
@@ -231,27 +265,123 @@ fn rename_without_replacing(source: &Path, target: &Path) -> std::io::Result<()>
 
 #[cfg(not(windows))]
 fn rename_without_replacing(source: &Path, target: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(source)?;
-    if metadata.is_file() {
-        match fs::hard_link(source, target) {
-            Ok(()) => {
-                if let Err(e) = fs::remove_file(source) {
-                    let _ = fs::remove_file(target);
-                    return Err(e);
-                }
-                return Ok(());
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(e),
-            Err(_) => {}
-        }
+    match rename_exclusive(source, target) {
+        Err(e) if no_exclusive_rename(&e) => {}
+        done => return done,
     }
-    if fs::symlink_metadata(target).is_ok() {
+    if !fs::symlink_metadata(source)?.is_file() {
         return Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            "the target already exists",
+            ErrorKind::Unsupported,
+            "this file system cannot rename a directory without the risk of replacing a target",
         ));
     }
-    fs::rename(source, target)
+    match fs::hard_link(source, target) {
+        Ok(()) => {
+            if let Err(e) = fs::remove_file(source) {
+                let _ = fs::remove_file(target);
+                return Err(e);
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(e),
+        Err(e) => Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "this file system cannot rename a file without the risk of replacing a target: {e}"
+            ),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn c_path(p: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "the path contains a zero byte"))
+}
+
+/// renameat2(AT_FDCWD, source, AT_FDCWD, target, RENAME_NOREPLACE), through the system call
+/// itself, which needs no particular version of the C library.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn rename_exclusive(source: &Path, target: &Path) -> std::io::Result<()> {
+    extern "C" {
+        fn syscall(number: i64, ...) -> i64;
+    }
+    #[cfg(target_arch = "x86_64")]
+    const SYS_RENAMEAT2: i64 = 316;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_RENAMEAT2: i64 = 276;
+    const AT_FDCWD: i32 = -100;
+    const RENAME_NOREPLACE: u32 = 1;
+    let (from, to) = (c_path(source)?, c_path(target)?);
+    // SAFETY: both paths end with 0 and live during the call.
+    let result = unsafe {
+        syscall(
+            SYS_RENAMEAT2,
+            AT_FDCWD,
+            from.as_ptr(),
+            AT_FDCWD,
+            to.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// renamex_np(source, target, RENAME_EXCL).
+#[cfg(target_vendor = "apple")]
+fn rename_exclusive(source: &Path, target: &Path) -> std::io::Result<()> {
+    extern "C" {
+        fn renamex_np(
+            from: *const std::os::raw::c_char,
+            to: *const std::os::raw::c_char,
+            flags: u32,
+        ) -> i32;
+    }
+    const RENAME_EXCL: u32 = 0x4;
+    let (from, to) = (c_path(source)?, c_path(target)?);
+    // SAFETY: both paths end with 0 and live during the call.
+    if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(
+    windows,
+    target_vendor = "apple",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+fn rename_exclusive(_: &Path, _: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::from(ErrorKind::Unsupported))
+}
+
+/// Whether the error says that the system or the file system has no exclusive rename: ENOSYS
+/// and EINVAL from renameat2 (EINVAL is also what an unsupported flag gives), ENOTSUP and
+/// EOPNOTSUPP from either call.
+#[cfg(not(windows))]
+fn no_exclusive_rename(error: &std::io::Error) -> bool {
+    #[cfg(target_os = "linux")]
+    const CODES: &[i32] = &[38, 22, 95];
+    #[cfg(target_vendor = "apple")]
+    const CODES: &[i32] = &[78, 45, 102];
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    const CODES: &[i32] = &[];
+    error.kind() == ErrorKind::Unsupported
+        || error
+            .raw_os_error()
+            .is_some_and(|code| CODES.contains(&code))
 }
 
 /// Creates one directory; AlreadyExists if it exists, NotFound if its parent does not.

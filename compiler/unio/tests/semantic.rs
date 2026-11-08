@@ -152,3 +152,58 @@ fn word_spans(source: &str) -> Vec<(usize, usize)> {
     }
     spans
 }
+
+/// An import resolves inside the package or the standard library; a link that leads out of the
+/// package is not followed (docs/semantics.md section 1, E0053).
+#[cfg(unix)]
+#[test]
+fn an_import_through_a_link_out_of_the_package_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("unio-import-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("package/lib")).unwrap();
+    std::fs::create_dir_all(dir.join("outside")).unwrap();
+    std::fs::write(dir.join("package/unio.toml"), "[package]\nname = \"p\"\n").unwrap();
+    std::fs::write(
+        dir.join("outside/secret.unio"),
+        "public function value() returns Int:\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package/lib/inner.unio"),
+        "public function value() returns Int:\n    return 2\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("outside/secret.unio"),
+        dir.join("package/secret.unio"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(dir.join("outside"), dir.join("package/linked")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("package/lib/inner.unio"),
+        dir.join("package/alias.unio"),
+    )
+    .unwrap();
+    let main = dir.join("package/main.unio");
+    std::fs::write(
+        &main,
+        "import secret\nimport linked.secret as other\nimport alias\n\npublic function main() returns Int:\n    return alias.value()\n",
+    )
+    .unwrap();
+    let results = unio::check_files(std::slice::from_ref(&main));
+    let analysis = results
+        .iter()
+        .find(|a| std::path::Path::new(&a.path) == main)
+        .expect("the file is checked");
+    let rendered = analysis.render_text(unio::Lang::En);
+    let lines: Vec<usize> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "E0053")
+        .map(|d| d.line())
+        .collect();
+    assert_eq!(lines, [1, 2], "{rendered}");
+    assert!(rendered.contains("outside the package"), "{rendered}");
+    assert_eq!(analysis.diagnostics.len(), 2, "{rendered}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

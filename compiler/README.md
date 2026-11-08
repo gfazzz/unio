@@ -99,6 +99,15 @@ A missing mechanism (no Landlock or seccomp in the kernel, Landlock below ABI 3,
 the start with 103; with `--allow-weaker-sandbox` or `allow_weaker = true` the program runs and
 the missing restrictions are printed (SB-5). The program itself cannot lift any of this.
 
+A child of `process.run` gets only the variables granted under `env` and `PATH` (on Windows also
+`SystemRoot`); it runs in a process group of its own on Unix and in a Job Object with
+kill-on-close on Windows, and what is left of that tree is stopped when the child ends, times
+out, or overflows its output. The deadline covers reading the outputs; each output holds at most
+16 MiB (`OutputTooLarge`) and counts against the heap limit (docs/runtime.md 9.5). Reads whose
+size the program decides (`read_bytes(max_bytes)`, whole files, `Text.repeat`) check the heap
+limit before they allocate, so a refused allocation ends with 102 instead of an abort
+(docs/runtime.md 3.4, 3.5).
+
 ## What is implemented
 
 - The lexer of grammar section L: INDENT, NEWLINE, and DEDENT, implicit continuation inside
@@ -198,8 +207,16 @@ an external of `std.files` has the scopes `files.read` and `files.write` that th
 sentence of its documentation names ("Permission: none" for an operation on a descriptor that is
 already open; a missing sentence counts as both scopes, and a test requires the sentence on every
 external of `std.files`), every function of the `alloc` layer has `allocates`, and a function has
-the union of what it calls. A library module that calls a higher layer is E0084;
-`--profile=core` applies the rule to the functions of a package, with the chain of calls. When
+the union of what it calls. The derivation is conservative (semantics 8.4): a call through an
+interface method, written or implicit (operators, `==`, comparisons, interpolation, `for`, the end
+of `using`, `in`), has the union of every implementation of the method in the program, or the
+method of the value's type when it is known; a lambda's body belongs to the function that makes
+it and a function named as a value counts as called there; a constant counts for the functions
+that use it, a parameter default for its function, and field defaults for the functions that
+build the type; list, map and comprehension literals, interpolation, `+` on texts and lambdas that
+capture values give `allocates` and the layer `alloc`. A library module that calls a higher
+layer, or a `core` module that allocates, is E0084; `--profile=core` applies the rule to the
+functions of a package, with the chain of calls down to the call or the allocating expression. When
 the `unio.toml` of a package has a `[permissions]` table, a call that needs an effect the table
 does not grant is E0085, once per effect and module, with the chain; `files.read` and
 `files.write` are checked separately against the keys of the same names (T-6), and `env`,
@@ -235,6 +252,12 @@ is the reference for it.
   methods of interfaces, functions of a type (`T.f`), and lambdas as closures that capture the
   values of the names they use; named functions and closures implement `unio_runtime::Callable`,
   so that externals such as `expect_fault` can call them.
+- Types: a value of a declared type carries the identity of its type, its name for a type of the
+  standard library (whose names are unique there and which the externals use) and `module.Name`
+  for a type of a package, so two types of one name in different modules keep their own methods,
+  implementations, handlers and variants; the method table, the per-call-site method caches and
+  the lowered handlers and patterns use the identity, in the interpreter and in native code.
+  Interpolation and the generated `to_text` show the short name.
 - Errors travel as `Unwind::Error` to the nearest `try ... on` or `try:` handler that names their
   type or `Error`; faults (`Unwind::Fault`) carry the trace of function, file and line of every
   frame (C-14), run the `release` of every open `using` block on the way out (C-17), and end
@@ -317,7 +340,9 @@ The tests were written before the code (concept, section 1.2):
   compiler internals.
 - `tests/symbol.rs`: `unio symbol` in text and JSON, content hashes that ignore layout, comments
   and order and follow changes through references and mutual recursion, the core profile and
-  the permissions of the manifest.
+  the permissions of the manifest, allocating expressions under the core profile and in a
+  `core` module of the library, and effects that reach a manifest through an interface method
+  and through a function value kept in a constant or a parameter default (semantics 8.4).
 - `tests/semantic.rs`: the semantic corpus in `spec/tests/semantic` (one focused file per code in
   `invalid/`, with `# expect-error: LINE CODE`, and programs in `valid/` that must be clean), the
   exit criterion of S3 and S4 that every `.unio` source of the repository passes `unio check`, and
@@ -329,21 +354,29 @@ The tests were written before the code (concept, section 1.2):
   `json_query`, `csv_sum`, `log_tail`, `rename --dry-run` and `todo` (with `TODO_FILE` in a
   temporary directory) end to end with their output and exit codes; a fault that releases two
   `using` blocks in reverse order and ends with 101 and its trace, exit codes of `main` inside and
-  outside 0–100, and recursion that ends with 102.
+  outside 0–100, and recursion that ends with 102; two modules with a struct, an error and an
+  enum of the same names (`tests/programs/same_names`), whose methods, interface
+  implementations, handlers and variants stay apart under `unio run` and `unio test`.
 - `tests/sandbox.rs` (SB-8): programs that try forbidden actions through `std.files`, `std.env`
   and `std.process` (reading, listing, resolving, writing, copying, renaming, creating outside
   the scopes, `..` and links out of a scope, hidden variables, unlisted programs), with no
   permissions at all, and through child processes that read, write, connect and start
   grandchildren (Linux and macOS); a policy that narrows and warns, through `--policy` and
   `UNIO_POLICY`; the limits of heap, wall and CPU time (102), processes and file size; code 103
-  for an unreadable or invalid policy or manifest; and tests that run in their package's sandbox.
+  for an unreadable or invalid policy or manifest; tests that run in their package's sandbox; a
+  child that sees only the granted environment; a read whose `max_bytes` exceeds the heap limit,
+  which ends with 102; and `list_tree` over a cycle of links (Unix). `unio-runtime/tests` cover
+  the process tree (a grandchild that holds the output, a timeout that stops the grandchild),
+  output over 16 MiB, captured output over the heap limit, renaming that never replaces a file
+  or a directory, and reads and `Text.repeat` over the heap limit.
   `unio-runtime` has unit tests for the TOML subset, scopes, narrowing, the runtime checks,
   Landlock and seccomp on a thread, and Seatbelt in a child process.
 - `tests/native.rs` (Linux x86-64; skipped with a note elsewhere): every reference program that
   the interpreter tests run, with the same inputs, is built with `unio build --release` and
   gives the same standard output, standard error and exit code as `unio run`: the utilities,
   the task list, faults of every kind with their traces, exit codes, exhaustion of the stack, the
-  benchmarks, and the four tools over the repository; two builds give identical bytes; a program
+  benchmarks, the four tools over the repository, and the types of one name in two modules of
+  `tests/programs/same_names`; two builds give identical bytes; a program
   with errors is not built; the executable applies the manifest of its package.
 - `tests/tools.rs` (ignored by default, run in CI in a release build): `tools/check_docs.unio`,
   `tools/check_grammar.unio` (corpus, self-check, sources, invalid sources, parse trees) and
@@ -352,12 +385,16 @@ The tests were written before the code (concept, section 1.2):
 
 ## Not done yet
 
-- Known limits: effects follow direct calls, so a call through an interface method or a function
-  value does not carry the effects of the implementation; the core profile looks at calls, not at
-  list or map literals; usages of types are listed per referencing declaration.
-- Methods are found by the short name of the receiver's type, so two types of one name in
-  different modules would share an entry of the method table; no program of the repository has
-  such types.
-- The sandbox of the operating system on Windows (AppContainer, Job Object), the isolated workers
+- Known limits of the effects: a call through an interface counts every implementation in the
+  program, not only those whose values can reach it, and a call through a function value is
+  charged where the value is made, so `unio symbol` shows the value's effects for the function
+  that makes it, not for one like `List.map` that only calls it (semantics 8.4); the checks of
+  parameter and field defaults record their effects but report no type errors yet; usages of
+  types are listed per referencing declaration.
+- Known limits of `process.run` (docs/runtime.md 9.5): a process that leaves the process group
+  (`setsid`) or, on Windows, starts before the child joins its job is not stopped; on Unix an
+  interrupt from the terminal does not reach a child in its own group. Heap exhaustion that the
+  system reports late (overcommit and its out-of-memory killer) ends the process without 102.
+- The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object), the isolated workers
   of the tools (SB-10 to SB-13), the hostile projects of SB-15, native code for macOS, Windows and AArch64 and the rest of S6
   (docs/runtime.md 8.6), and the other commands of requirement 6.1.

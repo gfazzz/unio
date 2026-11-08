@@ -160,6 +160,9 @@ pub struct Program {
     pub calls: Vec<CallEdge>,
     /// Places where a function is named, for `unio symbol`.
     pub usages: Vec<(FnId, ModId, Span)>,
+    /// What the effects need beyond `calls`: implicit calls through interfaces, uses of
+    /// constants and field defaults, and allocating expressions (semantics 8.4).
+    pub effect_facts: crate::effects::Facts,
     by_path: HashMap<PathBuf, ModId>,
     stdlib_root: Option<PathBuf>,
 }
@@ -273,6 +276,7 @@ impl Program {
             diagnostics: Vec::new(),
             calls: Vec::new(),
             usages: Vec::new(),
+            effect_facts: Default::default(),
             by_path: HashMap::new(),
             stdlib_root,
         };
@@ -360,18 +364,39 @@ impl Program {
         Some(id)
     }
 
-    /// The file of a module path written in an import, if it exists.
+    /// The file of a module path written in an import, if it exists and stays inside the root
+    /// it was found in.
     fn module_file(&self, from: ModId, path: &[String]) -> Option<PathBuf> {
-        if path.first().is_some_and(|p| p == "std") && path.len() > 1 {
-            let root = self.stdlib_root.as_ref()?;
+        self.locate_module(from, path).ok()
+    }
+
+    /// Finds the file of a module path: below the standard library for `std.*`, below the
+    /// package otherwise. A file whose resolved path (links followed) leaves that root is
+    /// `Err(true)`: an import cannot lead out of the package or the standard library through
+    /// a link. A missing file is `Err(false)`.
+    fn locate_module(&self, from: ModId, path: &[String]) -> Result<PathBuf, bool> {
+        let (root, file) = if path.first().is_some_and(|p| p == "std") && path.len() > 1 {
+            let root = self.stdlib_root.as_ref().ok_or(false)?;
             let rest = path[1..].join("/") + ".unio";
-            return LAYERS
+            let file = LAYERS
                 .iter()
                 .map(|layer| root.join(layer).join(&rest))
-                .find(|p| crate::vfs::is_file(p));
+                .find(|p| crate::vfs::is_file(p))
+                .ok_or(false)?;
+            (root, file)
+        } else {
+            let root = &self.modules[from].package;
+            let file = root.join(path.join("/") + ".unio");
+            if !crate::vfs::is_file(&file) {
+                return Err(false);
+            }
+            (root, file)
+        };
+        let root = crate::vfs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        match crate::vfs::canonicalize(&file) {
+            Ok(real) if real.starts_with(&root) => Ok(file),
+            _ => Err(true),
         }
-        let file = self.modules[from].package.join(path.join("/") + ".unio");
-        crate::vfs::is_file(&file).then_some(file)
     }
 
     fn load_imports(&mut self, id: ModId) {
@@ -645,9 +670,11 @@ impl Program {
                 };
                 let path: Vec<String> = import.module.iter().map(|n| n.text.clone()).collect();
                 let dotted = path.join(".");
-                let target = self
-                    .module_file(module, &path)
-                    .and_then(|f| crate::vfs::canonicalize(&f).ok())
+                let located = self.locate_module(module, &path);
+                let target = located
+                    .as_ref()
+                    .ok()
+                    .and_then(|f| crate::vfs::canonicalize(f).ok())
                     .and_then(|f| self.by_path.get(&f).copied());
                 let Some(target) = target else {
                     let span = import.module.first().unwrap().span.to(import
@@ -655,10 +682,12 @@ impl Program {
                         .last()
                         .unwrap()
                         .span);
-                    self.error(
-                        module,
-                        Diagnostic::error("E0053", span, catalog::module_not_found(&dotted)),
-                    );
+                    let message = if located == Err(true) {
+                        catalog::module_outside(&dotted)
+                    } else {
+                        catalog::module_not_found(&dotted)
+                    };
+                    self.error(module, Diagnostic::error("E0053", span, message));
                     continue;
                 };
                 self.modules[module].edges.push((target, import.span));

@@ -7,9 +7,11 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{self, ExprKind, PatternKind, StatementKind};
 use crate::catalog;
 use crate::diag::{Diagnostic, Fix, Span};
+use crate::effects::{Allocation, Link, Site};
 use crate::program::{
     closest, CallEdge, ConstId, DefKind, FnId, ModId, Owner, Program, Symbol, LAYER_NAMES,
 };
+use crate::symbol::Node;
 use crate::types::{DefId, FnTy, ParamId, Prim, Ty};
 
 /// Prelude declarations the rules refer to by name.
@@ -145,6 +147,7 @@ pub fn check_program(program: &mut Program) {
         let value = c.value.clone();
         let annotated = program.consts[id].annotated.clone();
         let mut checker = Checker::new(program, &known, &const_types, module);
+        checker.holder = Some(Node::Const(id));
         let ty = checker.expr(&value, annotated.as_ref().unwrap_or(&Ty::Unknown));
         if let Some(expected) = &annotated {
             checker.expect(&ty, expected, value.span);
@@ -175,6 +178,7 @@ pub fn check_program(program: &mut Program) {
         let mut checker = Checker::new(program, &known, &const_types, body.module);
         checker.function(f, &block);
     }
+    defaults(program, &known, &const_types);
     for module in 0..program.modules.len() {
         let tests: Vec<ast::Block> = program.modules[module]
             .analysis
@@ -192,6 +196,94 @@ pub fn check_program(program: &mut Program) {
             checker.scopes.push(Vec::new());
             checker.block(&body);
         }
+    }
+}
+
+/// The defaults of parameters and fields, for their effects only: what a default calls,
+/// allocates or uses counts for its function, or for every function that builds its type
+/// (semantics 8.4). Their diagnostics are left out: the checks of defaults are not part of
+/// docs/semantics.md yet.
+fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId, Ty>) {
+    let mut work: Vec<(ModId, Node, Vec<ast::Expr>)> = Vec::new();
+    // The signatures of each module by the place of their names, as functions record them.
+    let mut signatures: HashMap<(ModId, usize), &ast::Signature> = HashMap::new();
+    for (m, module) in program.modules.iter().enumerate() {
+        for item in &module.analysis.file.items {
+            match item {
+                ast::Item::Declaration(d) => match &d.kind {
+                    ast::DeclarationKind::Function(func) => {
+                        let sig = &func.signature;
+                        signatures.insert((m, sig.name.span.start.offset), sig);
+                    }
+                    ast::DeclarationKind::External(sig) => {
+                        signatures.insert((m, sig.name.span.start.offset), sig);
+                    }
+                    ast::DeclarationKind::Interface(i) => {
+                        for (sig, _) in &i.members {
+                            signatures.insert((m, sig.name.span.start.offset), sig);
+                        }
+                    }
+                    _ => {}
+                },
+                ast::Item::Extend(e) => {
+                    for member in &e.members {
+                        let sig = &member.signature;
+                        signatures.insert((m, sig.name.span.start.offset), sig);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (f, def) in program.funcs.iter().enumerate() {
+        let Some(sig) = signatures.get(&(def.module, def.span.start.offset)) else {
+            continue;
+        };
+        let exprs: Vec<ast::Expr> = sig
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                ast::Param::Named { default, .. } | ast::Param::Plain { default, .. } => {
+                    default.clone()
+                }
+                ast::Param::SelfParam { .. } => None,
+            })
+            .collect();
+        if !exprs.is_empty() {
+            work.push((def.module, Node::Func(f), exprs));
+        }
+    }
+    for (d, def) in program.defs.iter().enumerate() {
+        let module = def.module;
+        let exprs: Vec<ast::Expr> = program.modules[module]
+            .analysis
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ast::Item::Declaration(decl) => match &decl.kind {
+                    ast::DeclarationKind::Struct(x) if x.name.text == def.name => x.fields.as_ref(),
+                    ast::DeclarationKind::Error(x) if x.name.text == def.name => x.fields.as_ref(),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|field| field.default.clone())
+            .collect();
+        if !exprs.is_empty() {
+            work.push((module, Node::Def(d), exprs));
+        }
+    }
+    for (module, holder, exprs) in work {
+        let before = program.diagnostics.len();
+        let mut checker = Checker::new(program, known, const_types, module);
+        checker.holder = Some(holder);
+        checker.scopes.push(Vec::new());
+        for e in &exprs {
+            checker.expr(e, &Ty::Unknown);
+        }
+        program.diagnostics.truncate(before);
     }
 }
 
@@ -246,6 +338,12 @@ struct Checker<'a> {
     loops: usize,
     /// The first scope of the current lambda: names below it are captured.
     lambda_floor: usize,
+    /// The first scope of each enclosing lambda and whether it captures a value (an
+    /// allocating closure, semantics 8.4).
+    captures: Vec<(usize, bool)>,
+    /// What has the effects of the code checked outside a function: a constant or the field
+    /// defaults of a type.
+    holder: Option<Node>,
     self_var: bool,
     /// Expressions where a resource may be created (E0080).
     creation_ok: HashSet<(usize, usize)>,
@@ -290,6 +388,8 @@ impl<'a> Checker<'a> {
             in_try_block: 0,
             loops: 0,
             lambda_floor: 0,
+            captures: Vec::new(),
+            holder: None,
             self_var: false,
             creation_ok: HashSet::new(),
             use_ok: HashSet::new(),
@@ -588,6 +688,7 @@ impl<'a> Checker<'a> {
             StatementKind::Using { name, value, body } => {
                 self.allow_creation(value);
                 let ty = self.expr(value, &Ty::Unknown);
+                self.implicit_call(&ty, "Resource", "release", value.span);
                 self.push();
                 self.bind_kind(&name.text, ty, name.span, LocalKind::Using);
                 let completes = self.block(body);
@@ -1252,6 +1353,8 @@ impl<'a> Checker<'a> {
                 module: self.module,
                 span,
             });
+        } else if self.holder.is_some() {
+            self.link(Node::Func(f), span);
         }
         let callee_module = self.p.funcs[f].module;
         if let (Some(here), Some(there)) = (
@@ -1265,6 +1368,93 @@ impl<'a> Checker<'a> {
                     span,
                     catalog::layer_violation(&name, LAYER_NAMES[there], LAYER_NAMES[here]),
                 );
+            }
+        }
+    }
+
+    /// What has the effects of the code being checked: the function, or the constant or type
+    /// whose initializer or field defaults are checked. A test has none.
+    fn effect_holder(&self) -> Option<Node> {
+        self.current_fn.map(Node::Func).or(self.holder)
+    }
+
+    /// A use that is not a recorded call: an implicit call through an interface, or a use of
+    /// a constant or of field defaults (semantics 8.4).
+    fn link(&mut self, to: Node, span: Span) {
+        if self.silent > 0 {
+            return;
+        }
+        if let Some(from) = self.effect_holder() {
+            if from != to {
+                self.p.effect_facts.links.push(Link {
+                    from,
+                    to,
+                    module: self.module,
+                    span,
+                });
+            }
+        }
+    }
+
+    /// An expression that allocates: `allocates` and the layer `alloc` for what holds it, and
+    /// E0084 in a module of the `core` layer (S-11, semantics 8.4).
+    fn allocates(&mut self, what: Allocation, span: Span) {
+        if self.silent > 0 {
+            return;
+        }
+        if let Some(at) = self.effect_holder() {
+            self.p.effect_facts.sites.push(Site {
+                at,
+                what,
+                module: self.module,
+                span,
+            });
+        }
+        if self.p.module_layer(self.module) == Some(0) {
+            self.err(
+                "E0084",
+                span,
+                catalog::layer_allocation(what, LAYER_NAMES[0]),
+            );
+        }
+    }
+
+    /// A call the language makes through an interface: `==` through `Equal`, `<` through
+    /// `Order`, `+` through `Add`, interpolation through `Display`, `using` through `Resource`.
+    /// The method of a known type is the one called; for any other type every implementation
+    /// may be (the interface method, whose effects are their union). Built-in types call none.
+    fn implicit_call(&mut self, ty: &Ty, interface: &str, method: &str, span: Span) {
+        if self.silent > 0 {
+            return;
+        }
+        let ty = self.resolved(ty);
+        if matches!(ty, Ty::Prim(_) | Ty::Unknown | Ty::Never | Ty::Unit) {
+            return;
+        }
+        let direct = match ty {
+            Ty::Named(..) | Ty::Param(_) => self.find_method(&ty, method).map(|(f, _, _)| f),
+            _ => None,
+        };
+        let called = direct.or_else(|| {
+            let i = prelude_iface(self.p, interface)?;
+            match &self.p.defs[i].kind {
+                DefKind::Interface(fs) => {
+                    fs.iter().copied().find(|f| self.p.funcs[*f].name == method)
+                }
+                _ => None,
+            }
+        });
+        if let Some(f) = called {
+            self.link(Node::Func(f), span);
+        }
+    }
+
+    /// A local name used inside lambdas: each lambda whose first scope is above the name's
+    /// captures it.
+    fn note_capture(&mut self, scope: usize) {
+        for (floor, captured) in &mut self.captures {
+            if scope < *floor {
+                *captured = true;
             }
         }
     }
@@ -1309,11 +1499,17 @@ impl<'a> Checker<'a> {
             Ty::Unknown | Ty::Never => Ty::Unknown,
             Ty::Named(d, _) if Some(*d) == self.known.range => Ty::int(),
             _ => {
+                // Iterating calls `next`, after `iterator` for a value that is not a cursor.
                 if let Some(t) = self.iterator_item(ty) {
+                    self.implicit_call(ty, "Iterator", "next", span);
                     return t;
                 }
                 if let Some(cursor) = self.method_result(ty, "iterator") {
                     if let Some(t) = self.iterator_item(&cursor) {
+                        if let Some((f, _, _)) = self.find_method(ty, "iterator") {
+                            self.link(Node::Func(f), span);
+                        }
+                        self.implicit_call(&cursor, "Iterator", "next", span);
                         return t;
                     }
                 }
@@ -2048,6 +2244,10 @@ impl<'a> Checker<'a> {
                 .collect(),
             _ => Vec::new(),
         };
+        // Building a value may evaluate the defaults of its fields.
+        if fields.iter().any(|f| f.3) {
+            self.link(Node::Def(def), span);
+        }
         // The fields of a resource may hold resources created right here (L-20).
         let unknown_args: Vec<Ty> = self.p.defs[def]
             .generics
@@ -2239,12 +2439,14 @@ impl<'a> Checker<'a> {
                     fails: def.fails.iter().map(|t| t.subst(&subst, None)).collect(),
                 }))
             }
-            Symbol::Const(c) => self
-                .const_types
-                .get(&c)
-                .cloned()
-                .or_else(|| self.p.consts[c].annotated.clone())
-                .unwrap_or(Ty::Unknown),
+            Symbol::Const(c) => {
+                self.link(Node::Const(c), span);
+                self.const_types
+                    .get(&c)
+                    .cloned()
+                    .or_else(|| self.p.consts[c].annotated.clone())
+                    .unwrap_or(Ty::Unknown)
+            }
             Symbol::Def(d) => {
                 let name = self.p.defs[d].name.clone();
                 self.err("E0061", span, catalog::type_is_not_a_value(&name));
@@ -2262,6 +2464,7 @@ impl<'a> Checker<'a> {
     fn name_value(&mut self, name: &str, span: Span, expected: &Ty) -> Ty {
         if let Some((scope, t, kind)) = self.find_local_full(name) {
             self.mark_read(name);
+            self.note_capture(scope);
             if self.silent == 0 && !t.is_unknown() {
                 let resolved = self.resolved(&t);
                 let captured = scope < self.lambda_floor;
@@ -2351,10 +2554,19 @@ impl<'a> Checker<'a> {
             ExprKind::Float(_) => Ty::float(),
             ExprKind::Bool(_) => Ty::bool(),
             ExprKind::Text(parts) => {
+                if parts
+                    .iter()
+                    .any(|p| matches!(p, ast::TextPart::Interpolation(_)))
+                {
+                    self.allocates(Allocation::Interpolation, e.span);
+                }
                 self.text(parts);
                 Ty::text()
             }
-            ExprKind::SelfValue => self.self_ty.clone().unwrap_or(Ty::Unknown),
+            ExprKind::SelfValue => {
+                self.note_capture(0);
+                self.self_ty.clone().unwrap_or(Ty::Unknown)
+            }
             ExprKind::Name(n) => self.name_value(n, e.span, expected),
             ExprKind::Paren(inner) => self.expr(inner, expected),
             ExprKind::Tuple(items) => {
@@ -2371,6 +2583,7 @@ impl<'a> Checker<'a> {
                 )
             }
             ExprKind::List(items) => {
+                self.allocates(Allocation::List, e.span);
                 let mut element = match self.resolved_keep(expected) {
                     Ty::List(t) => *t,
                     _ => Ty::Unknown,
@@ -2401,6 +2614,7 @@ impl<'a> Checker<'a> {
                 iterable,
                 condition,
             } => {
+                self.allocates(Allocation::Comprehension, e.span);
                 let ty = self.expr(iterable, &Ty::Unknown);
                 let item = self.element_of(&ty, iterable.span);
                 self.push();
@@ -2419,6 +2633,7 @@ impl<'a> Checker<'a> {
                 Ty::List(Box::new(t))
             }
             ExprKind::Map(entries) => {
+                self.allocates(Allocation::Map, e.span);
                 let (mut k, mut v) = match self.resolved_keep(expected) {
                     Ty::Map(k, v) => (*k, *v),
                     _ => (Ty::Unknown, Ty::Unknown),
@@ -2593,6 +2808,7 @@ impl<'a> Checker<'a> {
             if let ast::TextPart::Interpolation(e) = part {
                 let t = self.expr(e, &Ty::Unknown);
                 let t = self.resolved(&t);
+                self.implicit_call(&t, "Display", "to_text", e.span);
                 if let Some(display) = self.known.display {
                     if !self.implements(&t, display, &[]) {
                         let shown = self.p.show(&t);
@@ -2657,6 +2873,7 @@ impl<'a> Checker<'a> {
         let saved_try = std::mem::replace(&mut self.in_try_block, 0);
         let saved_loops = std::mem::replace(&mut self.loops, 0);
         let saved_floor = std::mem::replace(&mut self.lambda_floor, self.scopes.len());
+        self.captures.push((self.scopes.len(), false));
         self.push();
         for (p, (_, t)) in params.iter().zip(&types) {
             let t = if matches!(t, Ty::Var(_)) {
@@ -2676,10 +2893,12 @@ impl<'a> Checker<'a> {
         self.in_try_block = saved_try;
         self.loops = saved_loops;
         self.lambda_floor = saved_floor;
+        if let Some((_, true)) = self.captures.pop() {
+            self.allocates(Allocation::Closure, span);
+        }
         if returns.is_some() {
             self.expect(&found, &ret, body.span);
         }
-        let _ = span;
         let ret = if returns.is_some() {
             ret
         } else if matches!(ret, Ty::Unit) {
@@ -2757,6 +2976,11 @@ impl<'a> Checker<'a> {
                 }
                 let subject = if l.is_unknown() { r.clone() } else { l.clone() };
                 if matches!(op, "==" | "!=") {
+                    self.implicit_call(&subject, "Equal", "equals", span);
+                } else {
+                    self.implicit_call(&subject, "Order", "compare", span);
+                }
+                if matches!(op, "==" | "!=") {
                     if self.is_resource(&subject) {
                         self.err("E0066", span, catalog::resource_equality());
                         return Ty::bool();
@@ -2784,6 +3008,7 @@ impl<'a> Checker<'a> {
                 let r = self.resolved(&rt);
                 match self.find_method(&r, "contains") {
                     Some((f, subst, self_ty)) => {
+                        self.link(Node::Func(f), span);
                         let params = self.fn_params(f, &subst, Some(&self_ty));
                         let expected_item =
                             params.first().map(|p| p.ty.clone()).unwrap_or(Ty::Unknown);
@@ -2828,6 +3053,12 @@ impl<'a> Checker<'a> {
                     "/" => "Divide",
                     _ => "",
                 };
+                if op == "+" && l == Ty::text() {
+                    self.allocates(Allocation::Concatenation, span);
+                } else if !interface.is_empty() {
+                    let method = interface.to_lowercase();
+                    self.implicit_call(&l, interface, &method, span);
+                }
                 let defined = if interface.is_empty() {
                     matches!(l, Ty::Prim(Prim::Int | Prim::Float) | Ty::Param(_))
                 } else {

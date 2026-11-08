@@ -1,0 +1,37 @@
+import labels
+from graphs import fail_with
+
+public struct Node:
+    public value as Int
+
+error Problem:
+    reason as Text
+
+extend Node:
+    public function describe(self) returns Text:
+        return "trees node {self.value}"
+
+extend Node with labels.Label:
+    function label(self) returns Text:
+        return "trees label {self.value}"
+
+function fail_here(reason as Text) returns Int fails with Problem:
+    fail Problem(reason = reason)
+
+## A handler of this module's Problem does not receive the Problem of graphs.
+public function attempt(here as Bool) returns Text:
+    try:
+        let value = fail_here("t") if here else fail_with("g")
+        return "none {value}"
+    on Problem as e: return "own {e.diagnostic_code()}"
+    on Error as e: return "other {e.diagnostic_code()}"
+
+public enum Mark:
+    Leaf
+    Inner(depth as Int)
+
+extend Mark:
+    public function name(self) returns Text:
+        match self:
+            case Leaf: return "trees leaf"
+            case Inner(depth): return "trees inner {depth}"

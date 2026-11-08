@@ -314,3 +314,21 @@ fn faults_release_resources_and_end_with_their_codes() {
     assert!(text(&output.stderr).contains("E0056"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// What `tests/programs/same_names/main.unio` prints: every call reaches the method, the
+/// implementation, the handler and the variant of its own module's type.
+const SAME_NAMES_OUTPUT: &str = "trees node 1\ngraphs node 2\ntrees label 1\ngraphs label 2\ncaught graphs.Problem Problem(reason = g)\nown trees.Problem\nother graphs.Problem\ntrees inner 3\ngraphs leaf\ngraphs inner 4\n";
+
+/// Two modules each declare `Node`, `Problem` and `Mark` with methods of the same names and an
+/// implementation of one interface: a type is known by its module and name at run time, not by
+/// its short name, so neither module's methods replace the other's.
+#[test]
+fn types_of_one_name_in_two_modules_keep_their_own_methods() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/same_names");
+    let main = dir.join("main.unio");
+    expect(&run(&main, &[], &dir, &[]), 0, SAME_NAMES_OUTPUT);
+    let output = unio().arg("test").arg(&main).output().unwrap();
+    let out = text(&output.stdout);
+    assert!(out.contains("1 passed, 0 failed"), "{out}");
+    assert!(output.status.success(), "{out}");
+}

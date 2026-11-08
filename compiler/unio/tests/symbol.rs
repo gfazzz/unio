@@ -358,3 +358,226 @@ public function main() returns Int:
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Allocating expressions need the layer `alloc` (semantics 8.4): under the core profile a
+/// list literal, interpolation, a comprehension, a map literal, joining texts and a lambda that
+/// captures a value are E0084 with the chain down to the expression; code without them is not.
+#[test]
+fn the_core_profile_reports_allocating_expressions() {
+    let source = "\
+function pair(x as Int) returns List[Int]:
+    return [x, x]
+
+function label(x as Int) returns Text:
+    return \"x = {x}\"
+
+function twice(x as Int) returns Int:
+    return pair(x)[0] + x
+
+function squares(xs as List[Int]) returns List[Int]:
+    return [x * x for x in xs]
+
+function table() returns Map[Text, Int]:
+    return {\"a\": 1}
+
+function joined(a as Text, b as Text) returns Text:
+    return a + b
+
+function adder(n as Int) returns Function[(Int) -> Int]:
+    return function(x as Int) returns Int: x + n
+
+function plain(x as Int) returns Int:
+    let double = function(y as Int) returns Int: y * 2
+    return double(x) + 1 if x > 0 else 0
+";
+    let dir = package("allocating", &[("core.unio", source)]);
+    assert!(codes(&dir, "core.unio", Profile::Application).is_empty());
+    let found = codes(&dir, "core.unio", Profile::Core);
+    let lines: Vec<usize> = found.iter().map(|f| f.1).collect();
+    assert_eq!(lines, [1, 4, 7, 10, 13, 16, 19], "{found:?}");
+    assert!(found.iter().all(|f| f.0 == "E0084"), "{found:?}");
+    let messages: Vec<&str> = found.iter().map(|f| f.2.as_str()).collect();
+    assert!(
+        messages[0].contains("core.pair -> a list literal on line 2"),
+        "{}",
+        messages[0]
+    );
+    assert!(
+        messages[1].contains("a text with interpolation on line 5"),
+        "{}",
+        messages[1]
+    );
+    assert!(
+        messages[2].contains("core.twice -> core.pair -> a list literal on line 2"),
+        "{}",
+        messages[2]
+    );
+    assert!(messages[3].contains("a list comprehension on line 11"));
+    assert!(messages[4].contains("a map literal on line 14"));
+    assert!(messages[5].contains("joining texts with + on line 17"));
+    assert!(messages[6].contains("a lambda that captures values on line 20"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A module of the `core` layer of the standard library may not allocate (S-11): a list literal
+/// there is E0084 at the literal, as a call of a higher layer is.
+#[test]
+fn a_core_module_of_the_library_may_not_allocate() {
+    let stdlib = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib");
+    let root = std::env::temp_dir().join(format!("unio-symbol-{}-core-layer", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let copy = root.join("stdlib");
+    for file in [
+        "core/prelude.unio",
+        "core/builtin/bool.unio",
+        "core/builtin/float.unio",
+        "core/builtin/int.unio",
+        "core/builtin/option.unio",
+    ] {
+        let target = copy.join(file);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(stdlib.join(file), &target).unwrap();
+    }
+    let extra = copy.join("core/builtin/extra.unio");
+    std::fs::write(
+        &extra,
+        "## Not a part of the library: a core module that allocates.\n\nfunction pair(x as Int) returns List[Int]:\n    return [x, x]\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_unio"))
+        .env("UNIO_STDLIB", &copy)
+        .args(["check", "--diagnostics=json"])
+        .arg(&extra)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{out}");
+    assert!(out.contains("\"E0084\""), "{out}");
+    assert!(out.contains("a list literal allocates"), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+const MANIFEST_READ_ONLY: &str =
+    "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = [\"$CWD/**\"]\n";
+
+/// A call through an interface has the effects of every implementation (semantics 8.4): the
+/// module that only calls `Sink.put` needs files.write too, with the chain through the
+/// implementation, and `unio symbol` shows it.
+#[test]
+fn a_call_through_an_interface_has_the_effects_of_its_implementations() {
+    let sinks = "\
+import std.files as files
+
+public interface Sink:
+    function put(self, path as Path) fails with IoError
+
+public struct FileSink:
+    public text as Text
+
+extend FileSink with Sink:
+    function put(self, path as Path) fails with IoError:
+        try files.write_text(path, self.text)
+";
+    let app = "\
+import sinks
+import std.files
+
+function store(sink as sinks.Sink) fails with IoError:
+    try sink.put(Path(\"a.txt\"))
+
+public function main() returns Int:
+    try store(sinks.FileSink(text = \"x\")) on IoError as e:
+        return 1
+    return 0
+";
+    let dir = package(
+        "interface",
+        &[
+            ("sinks.unio", sinks),
+            ("app.unio", app),
+            ("unio.toml", MANIFEST_READ_ONLY),
+        ],
+    );
+    let found = codes(&dir, "app.unio", Profile::Application);
+    let in_app: Vec<_> = found.iter().filter(|f| f.2.contains("app.store")).collect();
+    assert_eq!(in_app.len(), 1, "{found:?}");
+    assert_eq!((in_app[0].0.as_str(), in_app[0].1), ("E0085", 5));
+    assert!(
+        in_app[0]
+            .2
+            .contains("app.store -> sinks.Sink.put -> sinks.FileSink.put -> std.files.write_text"),
+        "{}",
+        in_app[0].2
+    );
+    let reports = unio::symbol("app.store", &dir);
+    assert!(
+        reports[0].effects.contains(&"files.write"),
+        "{:?}",
+        reports[0].effects
+    );
+    // With the permission there is nothing to report.
+    std::fs::write(
+        dir.join("unio.toml"),
+        MANIFEST_READ_ONLY.replace("files.read", "files.write"),
+    )
+    .unwrap();
+    assert!(codes(&dir, "app.unio", Profile::Application).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The effects of a function value count where the value is made (semantics 8.4); a constant
+/// counts for every function that uses it, so a call through a function value kept in a
+/// constant of another module needs what the value's body needs.
+#[test]
+fn a_call_through_a_function_value_has_the_effects_of_the_value() {
+    let actions = "\
+import std.files as files
+
+## Writes a mark into a file.
+public let SAVE = function(path as Path) fails with IoError: try files.write_text(path, \"x\")
+";
+    let app = "\
+import actions
+import std.files
+
+function save(path as Path) fails with IoError:
+    try actions.SAVE(path)
+
+function keep(path as Path, write as Function[(Path) fails with IoError] = actions.SAVE) fails with IoError:
+    try write(path)
+
+public function main() returns Int:
+    try save(Path(\"a.txt\")) on IoError as e:
+        return 1
+    try keep(Path(\"b.txt\")) on IoError as e:
+        return 1
+    return 0
+";
+    let dir = package(
+        "function_value",
+        &[
+            ("actions.unio", actions),
+            ("app.unio", app),
+            ("unio.toml", MANIFEST_READ_ONLY),
+        ],
+    );
+    let found = codes(&dir, "app.unio", Profile::Application);
+    let in_app: Vec<_> = found.iter().filter(|f| f.2.contains("app.")).collect();
+    assert_eq!(in_app.len(), 1, "{found:?}");
+    assert_eq!((in_app[0].0.as_str(), in_app[0].1), ("E0085", 5));
+    assert!(
+        in_app[0]
+            .2
+            .contains("app.save -> actions.SAVE -> std.files.write_text"),
+        "{}",
+        in_app[0].2
+    );
+    // The default of a parameter counts for its function.
+    let keep = unio::symbol("app.keep", &dir);
+    assert!(
+        keep[0].effects.contains(&"files.write"),
+        "{:?}",
+        keep[0].effects
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

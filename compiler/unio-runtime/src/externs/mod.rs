@@ -196,6 +196,29 @@ pub(crate) fn self_set<'a>(
     }
 }
 
+// ---------------------------------------------------------------- memory
+
+/// Room for `additional` more bytes in `data`, checked against the heap limit first and
+/// reserved with fallible allocation: an allocation the system refuses is exhaustion with code
+/// 102 (C-18), not an abort of the process.
+pub(crate) fn reserve(
+    runtime: &Runtime,
+    data: &mut Vec<u8>,
+    additional: usize,
+) -> Result<(), Unwind> {
+    runtime.reserve_heap(additional)?;
+    data.try_reserve_exact(additional)
+        .map_err(|_| Unwind::Exhausted(crate::fault::Exhaustion::Heap))
+}
+
+/// A zeroed buffer of `length` bytes, allocated as [`reserve`] does.
+pub(crate) fn buffer(runtime: &Runtime, length: usize) -> Result<Vec<u8>, Unwind> {
+    let mut data = Vec::new();
+    reserve(runtime, &mut data, length)?;
+    data.resize(length, 0);
+    Ok(data)
+}
+
 // ---------------------------------------------------------------- errors of std.files
 
 /// The variant of `std.files.IoErrorKind` for an operating-system error.

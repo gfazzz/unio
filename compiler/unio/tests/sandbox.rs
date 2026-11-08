@@ -639,3 +639,91 @@ fn tests_run_in_the_sandbox_of_their_package() {
     assert!(out.contains("1 passed, 0 failed"), "{out}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A child sees only the variables the manifest grants under `env`, and PATH (docs/runtime.md
+/// 9.5): a secret in the environment of `unio run` does not reach it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_child_sees_only_the_granted_environment() {
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():
+    let output = try process.run(\"env\", []) on ProcessError as e:
+        print(\"BREACH env does not start: {{e.reason}}\")
+        return
+    print(output.stdout)
+"
+    );
+    let manifest = "[permissions]\nenv = [\"UNIO_ALLOWED\"]\nprocess = [\"env\"]\n";
+    let dir = package("child-env", manifest, &program);
+    let output = run(
+        &dir,
+        &[],
+        &[("UNIO_SECRET", SECRET), ("UNIO_ALLOWED", "yes")],
+    );
+    let lines = lines_of(&output);
+    assert!(!text(&output.stdout).contains(SECRET), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "UNIO_ALLOWED=yes"), "{lines:?}");
+    let names: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.split_once('=').map(|(name, _)| name))
+        .collect();
+    assert!(
+        names.iter().all(|n| ["UNIO_ALLOWED", "PATH"].contains(n)),
+        "the child sees variables that are not granted: {names:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A read whose buffer the program sizes is checked against the heap limit before the buffer
+/// is allocated (C-18): the program ends with code 102 and its diagnostic, not with an abort.
+#[test]
+fn a_huge_read_under_a_heap_limit_ends_with_code_102() {
+    let program = "import std.files
+
+public function main():
+    try:
+        using reader = try files.open_reader(Path(\"open/a.txt\")):
+            let data = try reader.read_bytes(max_bytes = 4_000_000_000_000_000)
+            print(\"read {data.is_some()}\")
+    on IoError as e:
+        print(\"error {e.reason}\")
+";
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\n";
+    let dir = package("huge-read", manifest, program);
+    let file = policy(&dir, "[limits]\nheap_bytes = 10_000_000\n");
+    let output = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+    let err = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(102), "{err}");
+    assert!(err.contains("memory exhausted"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// list_tree does not follow links to directories, so a cycle of links ends (std.files).
+#[cfg(unix)]
+#[test]
+fn list_tree_does_not_follow_links_to_directories() {
+    let program = "import std.files
+
+public function main():
+    let found = try files.list_tree(Path(\"open\")) on IoError as e:
+        print(\"error {e.reason}\")
+        return
+    for entry in found:
+        print(entry.to_text())
+";
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\n";
+    let dir = package("tree-cycle", manifest, program);
+    std::os::unix::fs::symlink(dir.join("open"), dir.join("open/sub/loop")).unwrap();
+    std::os::unix::fs::symlink(dir.join("open/sub/b.txt"), dir.join("open/file-link")).unwrap();
+    let output = run(&dir, &[], &[]);
+    assert_eq!(
+        lines_of(&output),
+        [
+            "open/a.txt",
+            "open/file-link",
+            "open/sub/b.txt",
+            "open/sub/loop"
+        ]
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

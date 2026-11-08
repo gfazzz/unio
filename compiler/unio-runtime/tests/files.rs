@@ -325,3 +325,119 @@ fn directories_listing_and_renaming_without_replacing() {
     .unwrap();
     assert!(matches!(durable, Value::Bool(_)));
 }
+
+#[test]
+fn renaming_never_replaces_a_file_or_a_directory() {
+    let scratch = Scratch::new("rename-no-replace");
+    let mut rt = Runtime::new(vec![]);
+    for name in ["dir", "empty", "full"] {
+        std::fs::create_dir(scratch.path(name)).unwrap();
+    }
+    std::fs::write(scratch.path("dir/inside"), "dir").unwrap();
+    std::fs::write(scratch.path("full/inside"), "full").unwrap();
+    std::fs::write(scratch.path("file"), "file").unwrap();
+    // rename(2) alone would replace an empty directory with a directory.
+    for (source, target) in [
+        ("dir", "empty"),
+        ("dir", "full"),
+        ("dir", "file"),
+        ("file", "empty"),
+        ("file", "full/inside"),
+    ] {
+        assert_eq!(
+            kind_of(call(
+                &mut rt,
+                "std.files.rename",
+                &mut [p(&scratch.path(source)), p(&scratch.path(target))]
+            )),
+            "AlreadyExists",
+            "{source} -> {target}"
+        );
+    }
+    assert!(scratch.path("empty").is_dir() && scratch.path("dir/inside").is_file());
+    assert_eq!(
+        std::fs::read_to_string(scratch.path("full/inside")).unwrap(),
+        "full"
+    );
+    call(
+        &mut rt,
+        "std.files.rename",
+        &mut [p(&scratch.path("dir")), p(&scratch.path("new"))],
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(scratch.path("new/inside")).unwrap(),
+        "dir"
+    );
+    assert!(!scratch.path("dir").exists());
+}
+
+fn exhausted(outcome: Outcome) -> bool {
+    matches!(
+        outcome,
+        Err(Unwind::Exhausted(unio_runtime::Exhaustion::Heap))
+    )
+}
+
+#[test]
+fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
+    let scratch = Scratch::new("read-budget");
+    let file = scratch.path("big.bin");
+    std::fs::write(&file, vec![b'x'; 300_000]).unwrap();
+    let mut rt = Runtime::new(vec![]);
+    rt.heap_limit = Some(100_000);
+    let descriptor = call(&mut rt, "std.files.system_open_read", &mut [p(&file)]).unwrap();
+    // A buffer of 2^50 bytes cannot be allocated at all: it must be refused, not attempted.
+    let outcome = call(
+        &mut rt,
+        "std.files.system_read_chunk",
+        &mut [descriptor.clone(), p(&file), Value::Int(1 << 50)],
+    );
+    assert!(exhausted(outcome));
+    assert!(exhausted(call(
+        &mut rt,
+        "std.files.read_bytes",
+        &mut [p(&file)]
+    )));
+    assert!(exhausted(call(
+        &mut rt,
+        "std.files.read_text",
+        &mut [p(&file)]
+    )));
+    // Within the limit, a large max reads what there is.
+    rt.heap_limit = Some(1 << 30);
+    let step = call(
+        &mut rt,
+        "std.files.system_read_chunk",
+        &mut [descriptor.clone(), p(&file), Value::Int(1 << 50)],
+    );
+    assert!(exhausted(step), "a buffer over the limit is refused");
+    let step = call(
+        &mut rt,
+        "std.files.system_read_chunk",
+        &mut [descriptor.clone(), p(&file), Value::Int(1 << 20)],
+    )
+    .unwrap();
+    assert!(matches!(step.field("data"), Some(Value::Bytes(b)) if b.len() == 300_000));
+    call(&mut rt, "std.files.system_close", &mut [descriptor]).unwrap();
+    // Without a heap limit, an allocation the system cannot make is exhaustion, not an abort.
+    rt.heap_limit = None;
+    let descriptor = call(&mut rt, "std.files.system_open_read", &mut [p(&file)]).unwrap();
+    assert!(exhausted(call(
+        &mut rt,
+        "std.files.system_read_chunk",
+        &mut [descriptor.clone(), p(&file), Value::Int(i64::MAX)],
+    )));
+    call(&mut rt, "std.files.system_close", &mut [descriptor]).unwrap();
+}
+
+#[test]
+fn repeating_a_text_over_the_heap_limit_is_exhaustion() {
+    let mut rt = Runtime::new(vec![]);
+    rt.heap_limit = Some(100_000);
+    assert!(exhausted(call(
+        &mut rt,
+        "Text.repeat",
+        &mut [Value::text("ab"), Value::Int(1 << 40)]
+    )));
+}

@@ -1,0 +1,2 @@
+public interface Label:
+    function label(self) returns Text

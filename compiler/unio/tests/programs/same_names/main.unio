@@ -1,0 +1,49 @@
+## Two modules declare a struct Node, an error Problem and an enum Mark of the same names, each
+## with methods and an implementation of one interface; every call, handler and pattern reaches
+## its own module's type.
+import graphs
+import labels
+import trees
+
+function show(item as labels.Label) returns Text:
+    return item.label()
+
+function caught() returns Text:
+    try:
+        let first = graphs.fail_with("g")
+        return "none {first}"
+    on graphs.Problem as e: return "caught {e.diagnostic_code()} {e}"
+
+function lines() returns List[Text]:
+    let tree = trees.Node(value = 1)
+    let graph = graphs.Node(value = 2)
+    return [
+        tree.describe(),
+        graph.describe(),
+        show(tree),
+        show(graph),
+        caught(),
+        trees.attempt(true),
+        trees.attempt(false),
+        trees.Mark.Inner(3).name(),
+        graphs.Mark.Leaf.name(),
+        graphs.Mark.Inner(4).name(),
+    ]
+
+public function main():
+    for line in lines():
+        print(line)
+
+test "types of one name in two modules keep their methods":
+    assert lines() == [
+        "trees node 1",
+        "graphs node 2",
+        "trees label 1",
+        "graphs label 2",
+        "caught graphs.Problem Problem(reason = g)",
+        "own trees.Problem",
+        "other graphs.Problem",
+        "trees inner 3",
+        "graphs leaf",
+        "graphs inner 4",
+    ]

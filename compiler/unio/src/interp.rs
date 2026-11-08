@@ -354,7 +354,10 @@ impl Interp {
             names.insert(name.to_string(), Rc::clone(&n));
             n
         };
-        let def_names: Vec<Rc<str>> = program.defs.iter().map(|def| shared(&def.name)).collect();
+        // Values of a declared type carry its identity, not its short name (`type_identity`).
+        let def_names: Vec<Rc<str>> = (0..program.defs.len())
+            .map(|d| shared(&type_identity(&program, d)))
+            .collect();
         let shapes: Vec<Vec<Shape>> = program
             .defs
             .iter()
@@ -1265,6 +1268,13 @@ impl Interp {
         }
         let f = self.method_of(receiver, &m.name)?;
         if key != 0 {
+            // The identity stays alive while its address is cached, so no other type's name
+            // can take that address (the externals make names of their own).
+            *m.pin.borrow_mut() = match receiver {
+                Value::Struct(s) => Some(Rc::clone(&s.type_name)),
+                Value::Enum(e) => Some(Rc::clone(&e.type_name)),
+                _ => None,
+            };
             m.cache.set((key, f));
         }
         Some(f)
@@ -1360,11 +1370,12 @@ impl Interp {
         }
     }
 
+    /// The fully qualified identifier of an error from the identity of its type.
     pub(crate) fn error_code(&self, type_name: &str) -> String {
-        for def in &self.program.defs {
-            if def.name == type_name && matches!(def.kind, DefKind::Error(_)) {
+        for (d, def) in self.program.defs.iter().enumerate() {
+            if &*self.def_names[d] == type_name && matches!(def.kind, DefKind::Error(_)) {
                 let module = &self.program.modules[def.module].name;
-                return format!("{module}.{type_name}");
+                return format!("{module}.{}", def.name);
             }
         }
         type_name.to_string()
@@ -2395,6 +2406,7 @@ impl Interp {
                 last,
                 fallback,
                 known,
+                pin,
             } => {
                 match v {
                     Value::Enum(e) => {
@@ -2407,6 +2419,7 @@ impl Interp {
                             return Ok(*e.variant == **last);
                         }
                         if self.enum_has_variant(&e.type_name, last) {
+                            *pin.borrow_mut() = Some(Rc::clone(&e.type_name));
                             known.set(ty);
                             return Ok(*e.variant == **last);
                         }
@@ -2576,7 +2589,7 @@ impl Interp {
                     for (n, f) in &s.fields {
                         parts.push(format!("{n} = {}", self.display(rt, f)?));
                     }
-                    format!("{}({})", s.type_name, parts.join(", "))
+                    format!("{}({})", short_type_name(&s.type_name), parts.join(", "))
                 }
             }
             Value::Enum(e) => {
@@ -2602,7 +2615,7 @@ impl Interp {
     pub(crate) fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
         self.variants
             .get(variant)
-            .map(|ds| ds.iter().any(|d| self.program.defs[*d].name == type_name))
+            .map(|ds| ds.iter().any(|d| &*self.def_names[*d] == type_name))
             .unwrap_or(false)
     }
 
@@ -3045,9 +3058,37 @@ pub(crate) fn ty_key(program: &Program, ty: &Ty) -> Option<String> {
         Ty::Map(..) => "Map".into(),
         Ty::Set(_) => "Set".into(),
         Ty::Tuple(_) => "Tuple".into(),
-        Ty::Named(d, _) => program.defs[*d].name.clone(),
+        Ty::Named(d, _) => type_identity(program, *d),
         _ => return None,
     })
+}
+
+/// The identity of a declared type at run time, which its values carry and by which its methods,
+/// handlers and patterns are found: the name of a type of the standard library, whose names are
+/// unique there and which the externals use, and `module.Name` for a type of a package, so that
+/// types of one name in two modules stay apart. Should two packages of one
+/// program have modules of the same name, the module's number tells them apart.
+pub(crate) fn type_identity(program: &Program, d: DefId) -> String {
+    let def = &program.defs[d];
+    let module = &program.modules[def.module];
+    if module.stdlib {
+        return def.name.clone();
+    }
+    let clash = program
+        .modules
+        .iter()
+        .enumerate()
+        .any(|(m, other)| m != def.module && !other.stdlib && other.name == module.name);
+    if clash {
+        format!("{}@{}.{}", module.name, def.module, def.name)
+    } else {
+        format!("{}.{}", module.name, def.name)
+    }
+}
+
+/// The name of a type as a program writes it, from its identity: `Node` for `trees.Node`.
+pub(crate) fn short_type_name(identity: &str) -> &str {
+    identity.rsplit('.').next().unwrap_or(identity)
 }
 
 /// The type name of a value that is not a struct, an enum, or a resource.
@@ -3081,8 +3122,8 @@ pub(crate) fn value_key(v: &Value) -> String {
         Value::Tuple(_) => "Tuple".into(),
         Value::Map(_) => "Map".into(),
         Value::Set(_) => "Set".into(),
-        Value::Struct(s) => s.type_name.to_string(),
-        Value::Enum(e) => e.type_name.to_string(),
+        Value::Struct(s) => short_type_name(&s.type_name).to_string(),
+        Value::Enum(e) => short_type_name(&e.type_name).to_string(),
         Value::Resource(cell) => value_key(&cell.value.borrow()),
         Value::Function(_) => "Function".into(),
         Value::Unit => "Unit".into(),

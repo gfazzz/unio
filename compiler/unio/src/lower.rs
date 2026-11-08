@@ -245,8 +245,11 @@ pub(crate) struct MethodCode {
     pub args: Vec<MethodArg>,
     /// The receiver as a place, for a `var self` method.
     pub place: Option<Place>,
-    /// The last type seen here and its method: the address of the type's name and the method.
+    /// The last type seen here and its method: the address of the type's identity and the method.
     pub cache: Cell<(usize, usize)>,
+    /// The identity whose address `cache` holds, kept alive so that the address cannot be
+    /// reused by the name of another type while it is cached.
+    pub pin: std::cell::RefCell<Option<Rc<str>>>,
     /// Whether every argument is positional.
     pub positional: bool,
 }
@@ -273,8 +276,10 @@ pub(crate) enum Pat {
     Name {
         last: Rc<str>,
         fallback: NameFallback,
-        /// The address of the name of the last enum type seen here that has this variant.
+        /// The address of the identity of the last enum type seen here that has this variant.
         known: Cell<usize>,
+        /// The identity whose address `known` holds, kept alive while it is cached.
+        pin: std::cell::RefCell<Option<Rc<str>>>,
     },
     Constructor {
         last: Rc<str>,
@@ -408,7 +413,7 @@ impl<'a> Lowering<'a> {
                             body.clear.0 = start;
                             S::Handled {
                                 inner: Box::new(inner),
-                                ty: type_name(ty),
+                                ty: self.handler_type(ty),
                                 bind,
                                 block: body,
                             }
@@ -485,7 +490,7 @@ impl<'a> Lowering<'a> {
                         let (start, _) = self.restore(mark);
                         body.clear.0 = start;
                         HandlerCode {
-                            ty: type_name(&h.ty),
+                            ty: self.handler_type(&h.ty),
                             bind,
                             body,
                         }
@@ -779,10 +784,10 @@ impl<'a> Lowering<'a> {
                         _ => Node::Fault(format!("internal: unknown {n}.{name}")),
                     };
                 }
-                if let Some((_, Symbol::Def(d))) = program.lookup(self.module, n) {
-                    return Node::Variant(d, self.interp.shared(name));
-                }
             }
+        }
+        if let Some(d) = self.type_target(target) {
+            return Node::Variant(d, self.interp.shared(name));
         }
         let t = self.expr(target);
         Node::Field(Box::new(t), self.interp.shared(name), Cell::new(0))
@@ -813,18 +818,19 @@ impl<'a> Lowering<'a> {
                                 _ => Node::Fault(format!("internal: unknown {n}.{}", name.text)),
                             };
                         }
-                        if let Some((_, Symbol::Def(d))) = program.lookup(self.module, n) {
-                            if matches!(program.defs[d].kind, DefKind::Enum(_)) {
-                                return self.construct(d, Some(&name.text), arguments);
-                            }
-                            return match self.interp.method(&program.defs[d].name, &name.text) {
-                                Some(f) => self.call_fn(f, &[], arguments),
-                                None => {
-                                    Node::Fault(format!("internal: no function {n}.{}", name.text))
-                                }
-                            };
-                        }
                     }
+                }
+                if let Some(d) = self.type_target(target) {
+                    if matches!(self.interp.program.defs[d].kind, DefKind::Enum(_)) {
+                        return self.construct(d, Some(&name.text), arguments);
+                    }
+                    return match self.interp.method(&self.interp.def_names[d], &name.text) {
+                        Some(f) => self.call_fn(f, &[], arguments),
+                        None => Node::Fault(format!(
+                            "internal: no function {}.{}",
+                            self.interp.program.defs[d].name, name.text
+                        )),
+                    };
                 }
                 let receiver = self.expr(target);
                 let place = if is_place(target) {
@@ -851,6 +857,7 @@ impl<'a> Lowering<'a> {
                     args,
                     place,
                     cache: Cell::new((0, 0)),
+                    pin: std::cell::RefCell::new(None),
                 }))
             }
             _ => {
@@ -971,6 +978,79 @@ impl<'a> Lowering<'a> {
         self.bind(name)
     }
 
+    /// The declared type a written path names in the module: `Node`, or `trees.Node` through
+    /// a module imported under that name.
+    fn named_def(&self, path: &[Name]) -> Option<crate::types::DefId> {
+        let program = &self.interp.program;
+        let found = match path {
+            [name] => program.lookup(self.module, &name.text),
+            [module, name] => {
+                let m = program.module_alias(self.module, &module.text)?;
+                program.lookup(m, &name.text)
+            }
+            _ => None,
+        };
+        match found {
+            Some((_, Symbol::Def(d))) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The declared type that the target of `target.name` names, when it is not a value:
+    /// `Mark` or `trees.Mark`, as in `trees.Mark.Leaf` or `trees.Node.make()`.
+    fn type_target(&mut self, target: &Expr) -> Option<crate::types::DefId> {
+        let path = match &target.kind {
+            ExprKind::Name(n) if self.local(n).is_none() => vec![Name {
+                text: n.clone(),
+                span: target.span,
+            }],
+            ExprKind::Field {
+                target: inner,
+                name,
+            } => match &inner.kind {
+                ExprKind::Name(n)
+                    if self.local(n).is_none()
+                        && self.interp.program.module_alias(self.module, n).is_some() =>
+                {
+                    vec![
+                        Name {
+                            text: n.clone(),
+                            span: inner.span,
+                        },
+                        name.clone(),
+                    ]
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.named_def(&path)
+    }
+
+    /// The type of a handler (`on trees.Problem`) as the identity its errors carry.
+    fn handler_type(&self, ty: &Type) -> String {
+        match self.named_def(&ty.path) {
+            Some(d) => self.interp.def_names[d].to_string(),
+            None => ty.path.last().map(|n| n.text.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// The name a pattern compares: the identity of a struct or error type it names, otherwise
+    /// the variant, constant or binding name as written.
+    fn pattern_name(&self, path: &[Name]) -> Rc<str> {
+        let last = path.last().map(|n| n.text.as_str()).unwrap_or_default();
+        let variant = path.len() == 1 && self.interp.variant(self.module, last).is_some();
+        if !variant {
+            if let Some(d) = self.named_def(path) {
+                let program = &self.interp.program;
+                if matches!(program.defs[d].kind, DefKind::Struct(_) | DefKind::Error(_)) {
+                    return Rc::clone(&self.interp.def_names[d]);
+                }
+            }
+        }
+        self.interp.shared(last)
+    }
+
     fn pattern(&mut self, pattern: &Pattern) -> Pat {
         let start = self.frames.last().map_or(0, |f| f.scope.len());
         self.pattern_from(pattern, start)
@@ -1012,15 +1092,14 @@ impl<'a> Lowering<'a> {
                     }
                 };
                 Pat::Name {
-                    last: self.interp.shared(&last),
+                    last: self.pattern_name(names),
                     fallback,
                     known: Cell::new(0),
+                    pin: std::cell::RefCell::new(None),
                 }
             }
             PatternKind::Constructor { name, arguments } => Pat::Constructor {
-                last: self
-                    .interp
-                    .shared(name.last().map(|n| n.text.as_str()).unwrap_or_default()),
+                last: self.pattern_name(name),
                 args: arguments
                     .iter()
                     .map(|(n, p)| {
@@ -1059,10 +1138,6 @@ impl<'a> Lowering<'a> {
             }
         }
     }
-}
-
-fn type_name(ty: &Type) -> String {
-    ty.path.last().map(|n| n.text.clone()).unwrap_or_default()
 }
 
 pub(crate) fn is_place(e: &Expr) -> bool {
