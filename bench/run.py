@@ -32,6 +32,13 @@ BUILD = BENCH / "build"
 FLOOR = 0.5
 FLOOR_BENCHMARKS = ("wc", "json", "text", "loop")
 
+# RFC 0003: native executables take at most twice the time of the same algorithm in Go;
+# the target is parity. Gated for release 0.1: wc and loop; for 0.2: every benchmark.
+GO_LIMIT = 2.0
+GO_GATED = ("wc", "loop")
+# Peak resident memory: at most twice Go's peak plus 8 MB for the runtime, on the same gate.
+GO_MEMORY_ALLOWANCE = 8_000_000
+
 VOCABULARY = (
     "the quick brown fox jumps over lazy dog and then runs into forest where "
     "unio values text list map option result error test module function return "
@@ -202,17 +209,54 @@ def programs(name, languages):
     return found
 
 
-def measure(command, runs, cwd):
+_LAUNCHER = []
+
+
+def launcher():
+    """bench/build/peak_rss, built once from bench/peak_rss.c; None without a C compiler or
+    on Windows, and then memory is not measured."""
+    if not _LAUNCHER:
+        binary = BUILD / "peak_rss"
+        compiler = shutil.which("cc")
+        if os.name == "posix" and compiler:
+            BUILD.mkdir(exist_ok=True)
+            done = subprocess.run([compiler, "-O2", "-o", str(binary), str(BENCH / "peak_rss.c")])
+            _LAUNCHER.append(str(binary) if done.returncode == 0 else None)
+        else:
+            _LAUNCHER.append(None)
+    return _LAUNCHER[0]
+
+
+def run_once(command, cwd):
+    """Runs the command; returns (exit code, stdout, stderr, wall seconds, peak RSS in bytes).
+
+    The launcher adds well under a millisecond to the wall time; without it the peak is None."""
+    tool = launcher()
+    start = time.perf_counter()
+    done = subprocess.run(([tool] if tool else []) + command, capture_output=True, cwd=cwd)
+    elapsed = time.perf_counter() - start
+    stderr = done.stderr.decode("utf-8", "replace")
+    peak = None
+    if tool:
+        head, _, last = stderr.rstrip("\n").rpartition("\n")
+        if last.startswith("peak_rss "):
+            peak = int(last.split()[1])
+            stderr = head
+    return done.returncode, done.stdout.decode("utf-8", "replace"), stderr, elapsed, peak
+
+
+def measure(command, runs, cwd, memory=None):
+    """Best wall time of the runs and the output; the smallest peak RSS goes into `memory`."""
     best = None
     output = None
     for _ in range(runs):
-        start = time.perf_counter()
-        done = subprocess.run(command, capture_output=True, text=True, cwd=cwd)
-        elapsed = time.perf_counter() - start
-        if done.returncode != 0:
-            return None, (done.stderr.strip().splitlines() or ["exit " + str(done.returncode)])[-1]
-        output = done.stdout.strip()
+        code, stdout, stderr, elapsed, peak = run_once(command, cwd)
+        if code != 0:
+            return None, (stderr.strip().splitlines() or ["exit " + str(code)])[-1]
+        output = stdout.strip()
         best = elapsed if best is None else min(best, elapsed)
+        if memory is not None and peak is not None:
+            memory.append(peak)
     return best, output
 
 
@@ -271,6 +315,8 @@ def main():
     parser.add_argument("--json", default=str(BENCH / "results.json"), help="where to write JSON")
     parser.add_argument("--check-floor", action="store_true",
                         help="exit 1 if Unio is slower than 0.5x Python on wc, json, text, loop")
+    parser.add_argument("--check-go", action="store_true",
+                        help="exit 1 if Unio is above the time or memory limits against Go of RFC 0003")
     parser.add_argument("--unio", default=None, help="path to the unio binary")
     parser.add_argument("--native", action="store_true",
                         help="also build the Unio programs with unio build --release and compare those")
@@ -311,7 +357,10 @@ def main():
                 row["notes"][language] = f"build failed: {e}"
                 failures.append(f"{name}/{language}: build failed")
                 continue
-            t, out = measure(command, options.runs, ROOT)
+            peaks = []
+            t, out = measure(command, options.runs, ROOT, peaks)
+            if peaks:
+                row.setdefault("memory", {})[language] = min(peaks)
             if t is None:
                 row["notes"][language] = "failed: " + out
                 failures.append(f"{name}/{language}: {out}")
@@ -344,6 +393,30 @@ def main():
             elif p / u < FLOOR:
                 floor_failures.append(f"{row['benchmark']}: {ref} {u:.3f} s is {p / u:.2f}x Python {p:.3f} s")
 
+    go_failures = []
+    print(f"\n{reference(languages)} against Go (RFC 0003: time at most {GO_LIMIT}x, target 1x; peak memory"
+          f" at most {GO_LIMIT}x + 8 MB; gated: {', '.join(GO_GATED)}):")
+    for row in rows:
+        if row["benchmark"] in FLOOR_BENCHMARKS and row["case"] == "same algorithm":
+            ref = reference(languages)
+            u, g = row["times"].get(ref), row["times"].get("Go")
+            if u is None or g is None:
+                continue
+            gated = row["benchmark"] in GO_GATED
+            memory = row.get("memory", {})
+            um, gm = memory.get(ref), memory.get("Go")
+            memory_text = ""
+            if um is not None and gm is not None:
+                limit = GO_LIMIT * gm + GO_MEMORY_ALLOWANCE
+                memory_text = f"   memory {um / gm:5.2f}x Go ({um / 1e6:.1f} of at most {limit / 1e6:.1f} MB)"
+                if gated and um > limit:
+                    go_failures.append(f"{row['benchmark']}: {ref} peak {um / 1e6:.1f} MB is above"
+                                       f" {limit / 1e6:.1f} MB (2x Go {gm / 1e6:.1f} MB + 8 MB)")
+            print(f"  {row['benchmark']:<5} time {u / g:5.2f}x Go{memory_text}{'  (gated)' if gated else ''}")
+            if gated and u / g > GO_LIMIT:
+                go_failures.append(f"{row['benchmark']}: {ref} {u:.3f} s is {u / g:.2f}x Go {g:.3f} s")
+    print_memory(rows)
+
     report = {
         "versions": languages.versions,
         "skipped": languages.missing,
@@ -353,6 +426,9 @@ def main():
         "rows": rows,
         "failures": failures,
         "floor_failures": floor_failures,
+        "go_limit": GO_LIMIT,
+        "go_gated": list(GO_GATED),
+        "go_failures": go_failures,
     }
     Path(options.json).write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"\nJSON written to {options.json}")
@@ -361,9 +437,29 @@ def main():
     for failure in floor_failures:
         print(f"{'error' if options.check_floor else 'note'}: below the {FLOOR}x floor of 7.1: {failure}",
               file=sys.stderr)
-    if failures or (options.check_floor and floor_failures):
+    for failure in go_failures:
+        print(f"{'error' if options.check_go else 'note'}: above {GO_LIMIT}x Go (RFC 0003): {failure}",
+              file=sys.stderr)
+    if failures or (options.check_floor and floor_failures) or (options.check_go and go_failures):
         return 1
     return 0
+
+
+def print_memory(rows):
+    """Peak resident memory of each process in MB, the smallest of the runs."""
+    measured = [r for r in rows if r.get("memory")]
+    if not measured:
+        return
+    present = [l for l in ORDER if any(l in r["memory"] for r in measured)]
+    header = f"{'peak memory, MB':<34}" + "".join(f"{l:>13}" for l in present)
+    print("\n" + header)
+    print("-" * len(header))
+    for row in measured:
+        cells = []
+        for language in present:
+            m = row["memory"].get(language)
+            cells.append(f"{'—':>13}" if m is None else f"{m / 1e6:>13.1f}")
+        print(f"{row['benchmark'] + ': ' + row['case']:<34}" + "".join(cells))
 
 
 def print_table(rows, ref="Unio"):

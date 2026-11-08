@@ -23,4 +23,4 @@ RFC (request for comments) — способ изменить синтаксис,
 |---|---|---|
 | [0001](0001-language-contracts.md) | Точные контракты языка и библиотеки | accepted |
 | [0002](0002-brevity-without-implicitness.md) | Краткость без неявности: типы параметров анонимных функций, ветки в одну строку, `is` | accepted |
-| [0003](0003-native-speed-against-go.md) | Скорость нативного кода относительно Go | proposed |
+| [0003](0003-native-speed-against-go.md) | Скорость и память нативного кода относительно Go | accepted |

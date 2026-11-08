@@ -72,6 +72,11 @@ jobs:
         run: python3 bench/run.py --runs 1 --only json --check-floor --json bench/results-json.json
       - name: Native executables meet the floor (wc, json, text, loop)
         run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-floor --json bench/results-native.json
+      # RFC 0003: native time and peak memory against Go. Reported until the start-up step of
+      # the RFC lands; loop varies around the 2x limit from run to run until then.
+      - name: Native executables against Go (RFC 0003, reported)
+        continue-on-error: true
+        run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-go --json bench/results-go.json
 
   editors:
     name: editor highlighting

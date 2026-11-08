@@ -23,4 +23,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 |---|---|---|
 | [0001](0001-language-contracts.md) | Precise language and library contracts | accepted |
 | [0002](0002-brevity-without-implicitness.md) | Brevity without implicitness: lambda parameter types, one-line branches, `is` | accepted |
-| [0003](0003-native-speed-against-go.md) | Native speed measured against Go | proposed |
+| [0003](0003-native-speed-against-go.md) | Native speed and memory measured against Go | accepted |

@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.13 (draft). Changes from 0.12: L-8a, L-33, T-1a and RFC 0002; diagnostics E0049 and E0050 reserved.
+Specification version: 0.14 (draft). Changes from 0.13: section 7.1 measures native executables against Go in time and peak memory (RFC 0003).
+
+Changes from 0.12: L-8a, L-33, T-1a and RFC 0002; diagnostics E0049 and E0050 reserved.
 
 Changes from 0.11: L-27–L-32, C-11b, S-13–S-20, T-12–T-15 and RFC 0001; refined L-22 and S-5.
 
@@ -317,6 +319,8 @@ Measured with the reference utilities (section 9) on Linux x86-64; results are p
 | Full `--release` build of a 10,000-line package | at most 30 s |
 | Startup time of an empty program | at most 5 ms |
 | Text and JSON processing | no more than 0.5x slower than CPython 3.13; target 3x faster |
+| Native executables (`unio build --release`) on the benchmarks of `bench/` (RFC 0003) | each at most 2x the time of the same algorithm in Go; target parity. Gated for 0.1: wc and loop; for 0.2: all |
+| Peak resident memory of the same native executables (RFC 0003) | at most 2x Go's peak plus 8 MB; target parity; gated like the row above |
 | GC pause at a 100 MB heap | at most 10 ms (95th percentile) |
 
 Universal C-level speed is not promised and is not measured as a requirement.
