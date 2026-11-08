@@ -176,7 +176,9 @@ fn find_stdlib(start: &Path) -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("UNIO_STDLIB") {
         let dir = PathBuf::from(dir);
         if dir.join("core/prelude.unio").is_file() {
-            return Some(dir);
+            // Canonical, like the paths of the modules it is compared with: on macOS the
+            // temporary directory /var is a link to /private/var.
+            return Some(std::fs::canonicalize(&dir).unwrap_or(dir));
         }
     }
     let absolute = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
