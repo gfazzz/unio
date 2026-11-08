@@ -50,14 +50,14 @@ A program that reaches the runtime has passed `unio check`: names resolve, types
 
 ## 7. External functions
 
-1. The standard library declares 70 external functions, all in `unsafe module` files (S-7, S-10). Each is bound by its full name, such as `std.files.system_rename` or the method `Text.slice`, to a function of the runtime. The documentation comment of the declaration is its specification.
+1. The standard library declares 83 external functions, all in `unsafe module` files (S-7, S-10). Each is bound by its full name, such as `std.files.system_rename` or the method `Text.slice`, to a function of the runtime. The documentation comment of the declaration is its specification.
 2. A test of the runtime checks that every external declaration has a binding and every binding has a declaration, so that the library and the runtime cannot drift apart.
 3. The groups and the layer each needs:
 
 | Group | Externals | Layer |
 |---|---|---|
 | Faults, identity, checked arithmetic, `Float` classification and total order | `assert_fail`, `expect_fault`, `is_same`, `Int.checked_*`, `Int.to_float`, `Float.is_nan`, `Float.is_finite`, `total_order_key` | core |
-| Text, bytes, lists, maps, sets, numbers as text, code points | 29 methods and constructors in `alloc/builtin/*`, and `std.text.from_code_point` | alloc |
+| Text, bytes, lists, maps, sets, numbers as text, code points | 40 methods and constructors in `alloc/builtin/*`, and 3 functions of `std.text`, among them `from_code_point` | alloc |
 | JSON conversions generated for each type | `std.json.to_value`, `std.json.from_value` (implemented by the compiler, not by hand) | alloc |
 | Standard output, arguments, environment, paths | `write_output`, `write_error`, `std.args.list`, `std.env.*`, `Path`, `Path.to_text`, `separator` | std |
 | Files and the atomic commit protocol | 19 functions of `std.files` | std |

@@ -332,3 +332,82 @@ fn types_of_one_name_in_two_modules_keep_their_own_methods() {
     assert!(out.contains("1 passed, 0 failed"), "{out}");
     assert!(output.status.success(), "{out}");
 }
+
+/// S-17: the run-time conversion never sets a private field, even in a program whose check
+/// reported E0046 and was run anyway; decoding fails with DecodeError instead (gap 16).
+#[test]
+fn decoding_never_fills_a_private_field() {
+    let dir = scratch("decode-private");
+    let file = dir.join("account.unio");
+    fs::write(
+        &file,
+        "import std.json as json\n\n\
+         struct Account:\n    public owner as Text\n    balance as Int\n\n\
+         test \"a private field is not decoded\":\n    \
+         let value = try json.parse(\"\\{\\\"owner\\\":\\\"Ann\\\",\\\"balance\\\":5\\}\") on ParseError as e:\n        \
+         assert_fail(e.to_text())\n    \
+         try:\n        \
+         let account = try json.decode[Account](value)\n        \
+         assert_fail(\"a private field was decoded\")\n    \
+         on DecodeError as e: assert e.message.contains(\"private\")\n",
+    )
+    .unwrap();
+    let results = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let program = unio::load_checked(
+                std::slice::from_ref(&file),
+                unio::effects::Profile::Application,
+            );
+            assert!(
+                program.diagnostics.iter().any(|(_, d)| d.code == "E0046"),
+                "the check reports E0046"
+            );
+            let module = program.modules.iter().position(|m| m.report).unwrap();
+            let interp = unio::interp::Interp::new(program);
+            let tests: Vec<usize> = interp.program.modules[module]
+                .analysis
+                .file
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| matches!(item, unio::ast::Item::Test(_)))
+                .map(|(i, _)| i)
+                .collect();
+            tests
+                .into_iter()
+                .map(|i| {
+                    let r = unio::interp::run_test(&interp, module, i);
+                    (r.passed, r.message)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0, "{}", results[0].1);
+}
+
+/// S-7: an external function outside the standard library stops `unio run` at the check
+/// with E0086, before anything runs; it never reaches a fault at the call (gap 17).
+#[test]
+fn an_external_function_of_a_program_is_rejected_before_it_runs() {
+    let dir = scratch("external");
+    let file = dir.join("poke.unio");
+    fs::write(
+        &file,
+        "unsafe module\n\nexternal function poke(address as Int) returns Int\n\n\
+         function main():\n    print(\"{poke(1)}\")\n",
+    )
+    .unwrap();
+    let output = run(&file, &[], &dir, &[]);
+    let err = text(&output.stderr);
+    assert_ne!(output.status.code(), Some(101), "{err}");
+    assert_ne!(output.status.code(), Some(0), "{err}");
+    assert!(err.contains("E0086"), "{err}");
+    assert!(
+        !err.contains("the runtime has no external function"),
+        "{err}"
+    );
+}

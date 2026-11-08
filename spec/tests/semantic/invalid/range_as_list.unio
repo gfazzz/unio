@@ -1,0 +1,5 @@
+# expect-error: 5 E0047
+function total(items as List[Int]) returns Int:
+    return items.length()
+
+let COUNT as Int = total(range(0, 3))

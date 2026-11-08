@@ -1,0 +1,38 @@
+## RFC 0001 contracts that pass the check: OrderedFloat keys, explicit total order, decoding a
+## public transport struct before a validating constructor, and explicit range materialization.
+
+import std.json as json
+
+struct PortData:
+    public number as Int
+
+struct Port:
+    value as Int
+
+error PortError:
+    number as Int
+
+extend Port:
+    function open(number as Int) returns Port fails with PortError:
+        if number < 1 or number > 65535: fail PortError(number = number)
+        return Port(value = number)
+
+function port_from(value as json.Value) returns Port fails with DecodeError, PortError:
+    let data = try json.decode[PortData](value)
+    return try Port.open(data.number)
+
+function counts(values as List[Float]) returns Map[OrderedFloat, Int]:
+    var result as Map[OrderedFloat, Int] = {}
+    for value in values:
+        let key = value.total_order()
+        result[key] = (result.get(key) or 0) + 1
+    return result
+
+function ordered(values as List[Float]) returns List[Float]:
+    return values.sorted_by(function (x as Float) returns OrderedFloat: x.total_order())
+
+function first_three() returns List[Int]:
+    return range(0, 3).to_list()
+
+function wrap[T](value as T) returns json.Value:
+    return json.Value.Text(json.encode(value))

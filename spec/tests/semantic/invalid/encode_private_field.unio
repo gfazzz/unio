@@ -1,0 +1,14 @@
+# expect-error: 14 E0046
+import std.json as json
+
+struct Secret:
+    token as Text
+
+struct Envelope:
+    public items as List[Secret]
+
+function save[T](value as T) returns Text:
+    return json.encode(value)
+
+function main():
+    print(save(Envelope(items = [])))

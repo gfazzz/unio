@@ -1,0 +1,9 @@
+# expect-error: 9 E0046
+import std.json as json
+
+struct Account:
+    public owner as Text
+    balance as Int
+
+function load(value as json.Value) returns Account fails with DecodeError:
+    return try json.decode[Account](value)

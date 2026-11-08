@@ -1,0 +1,4 @@
+# expect-error: 3 E0045
+function main():
+    let seen = Set[Float]()
+    print("{seen.length()}")

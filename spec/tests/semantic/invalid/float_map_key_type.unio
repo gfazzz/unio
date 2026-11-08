@@ -1,0 +1,3 @@
+# expect-error: 2 E0045
+function count(prices as Map[Float, Int]) returns Int:
+    return 0

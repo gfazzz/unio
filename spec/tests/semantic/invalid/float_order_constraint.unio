@@ -1,0 +1,3 @@
+# expect-error: 3 E0045
+function larger(a as Float, b as Float) returns Float:
+    return max(a, b)

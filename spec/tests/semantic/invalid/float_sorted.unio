@@ -1,0 +1,3 @@
+# expect-error: 3 E0045
+function smallest(values as List[Float]) returns List[Float]:
+    return values.sorted()

@@ -1,0 +1,7 @@
+# expect-error: 4 E0086
+unsafe module
+
+external function poke(address as Int) returns Int
+
+function main():
+    print("{poke(1)}")

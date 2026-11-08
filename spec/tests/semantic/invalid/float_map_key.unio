@@ -1,0 +1,4 @@
+# expect-error: 3 E0045
+function main():
+    let prices = {1.5: 2, 2.5: 3}
+    print("{prices.length()}")

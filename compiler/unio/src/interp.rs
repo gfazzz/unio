@@ -2946,6 +2946,17 @@ impl Interp {
                         _ => Err(wrong("a variant name or an object with one variant")),
                     },
                     DefKind::Struct(fs) | DefKind::Error(fs) => {
+                        // S-17: decoding never sets a private field, even where the check's
+                        // E0046 was bypassed.
+                        if let Some(f) = fs.iter().find(|f| !f.public) {
+                            return Err(self.decode_error(
+                                path,
+                                format!(
+                                    "{} has the private field '{}', which JSON never sets",
+                                    def.name, f.name
+                                ),
+                            ));
+                        }
                         let Some(Value::Map(m)) = payload.filter(|_| variant == "Object") else {
                             return Err(wrong("an object"));
                         };
@@ -3607,5 +3618,48 @@ impl Intrinsic {
             (None, "range") if module == "prelude:core/prelude" => Intrinsic::Range(range?),
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every external function the standard library declares has an implementation in the
+    /// runtime, so a checked program never reaches "the runtime has no external function"
+    /// (S-7; outside the library an external function is E0086).
+    #[test]
+    fn every_external_of_the_standard_library_is_bound() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib");
+        let mut files = Vec::new();
+        for layer in ["core", "alloc", "std"] {
+            files.extend(crate::vfs::unio_files_in(&root.join(layer)));
+            files.extend(crate::vfs::unio_files_in(&root.join(layer).join("builtin")));
+        }
+        let unbound = crate::on_front_end_stack(move || {
+            let program = crate::load_checked(&files, crate::effects::Profile::Application);
+            let interp = Interp::new(program);
+            let program = &interp.program;
+            let externals: Vec<FnId> = (0..program.funcs.len())
+                .filter(|&f| {
+                    let def = &program.funcs[f];
+                    def.body.is_none()
+                        && !matches!(def.owner, Owner::Interface(_))
+                        && program.modules[def.module].stdlib
+                })
+                .collect();
+            let unbound: Vec<String> = externals
+                .iter()
+                .filter(|&&f| interp.externs[f].is_none() && interp.externs_json[f] == 0)
+                .map(|&f| interp.external_names[f].clone())
+                .collect();
+            (externals.len(), unbound)
+        });
+        let (externals, unbound) = unbound;
+        assert!(
+            externals > 50,
+            "the library declares its externals: {externals}"
+        );
+        assert!(unbound.is_empty(), "no runtime binding: {unbound:?}");
     }
 }

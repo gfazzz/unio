@@ -1,8 +1,8 @@
 # Static semantics of Unio 0.1
 
-Version 0.1-draft. Changes in this draft: decisions recorded while implementing S3 (1.3, 1.4, 2.5, 2.7, 2.8, 4.1) and S4 (6.5, 6.6, 7.2, 8.2, 8.3), and the conservative derivation of effects through interfaces, function values and allocating expressions (8.4). Russian localization: [ru/semantics.md](ru/semantics.md). Basis: concept sections 2–6, requirements L-1 to L-33, [language-contracts.md](language-contracts.md), RFC 0001 and RFC 0002. This document is the reference that `unio check` implements in sprints S3 and S4 of the plan; where it and the requirements disagree, the requirements win and this document is corrected.
+Version 0.1-draft. Changes in this draft: decisions recorded while implementing S3 (1.3, 1.4, 2.5, 2.7, 2.8, 4.1) and S4 (6.5, 6.6, 7.2, 8.2, 8.3), the conservative derivation of effects through interfaces, function values and allocating expressions (8.4), and the cases of the RFC 0001 codes E0045 to E0048 with the new E0086 (1.9, 2.9, 3.3, 3.8, 4.2, 4.9, 8.5). Russian localization: [ru/semantics.md](ru/semantics.md). Basis: concept sections 2–6, requirements L-1 to L-33, [language-contracts.md](language-contracts.md), RFC 0001 and RFC 0002. This document is the reference that `unio check` implements in sprints S3 and S4 of the plan; where it and the requirements disagree, the requirements win and this document is corrected.
 
-`unio check` runs every check on a whole package and reports every error it finds, not only the first (C-2). Each rule below names its diagnostic. Codes E0051 to E0085 are allocated here; the column "Sprint" says when the compiler starts to report them. Name and type checks run only when every module of the program parses: syntax errors are reported first.
+`unio check` runs every check on a whole package and reports every error it finds, not only the first (C-2). Each rule below names its diagnostic. Codes E0051 to E0086 are allocated here; the column "Sprint" says when the compiler starts to report them. Name and type checks run only when every module of the program parses: syntax errors are reported first.
 
 ## 1. Packages, modules and names
 
@@ -14,6 +14,7 @@ Version 0.1-draft. Changes in this draft: decisions recorded while implementing 
 6. A name that resolves to nothing is E0056; the fix suggests the closest visible name.
 7. Visibility follows L-23 to L-23d: a private declaration, field, or method used from another module is E0057.
 8. An import cycle is E0058 and names the modules of the cycle (L-24).
+9. A module path that starts with `deps.` names a manifest dependency by its alias (T-14); `deps` is never a directory of the package. Release 0.1 installs no dependency, so such an import is E0048: the message says whether `[dependencies]` of `unio.toml` declares the alias.
 
 ## 2. Types
 
@@ -25,27 +26,30 @@ Version 0.1-draft. Changes in this draft: decisions recorded while implementing 
 6. `some(v)` and `none` have type `Option[T]`, `ok(v)` and `error(e)` have type `Result[T, E]`; the missing type argument comes from the expected type, and without one it is E0060.
 7. Every `error` declaration implements `Error`, with a generated `to_text` that names the type and its fields, and therefore `Display`: an error can be interpolated into text.
 8. An expression whose type cannot be determined because of an earlier error produces no further diagnostics: one mistake gives one message.
+9. The key of a `Map` and the element of a `Set` implement `Hash` and `Equal` (L-9). A key type that is `Float` or is built from it through type arguments, such as `Tuple[Float, Int]` or `Option[Float]`, is E0045, whether it is written (`Map[Float, Int]`, `Set[Float]`) or inferred from a map literal (`{1.5: 2}`); the fix is the key `OrderedFloat` from `value.total_order()` (L-32). The key is then taken as unknown, so that the mistake is reported once.
 
 ## 3. Declarations, calls and generics
 
 1. A struct value is built with named arguments for every field without a default; a missing or unknown field is E0063. Fields that are private to another module make the struct impossible to build there (E0057).
 2. A call matches positional arguments to the leading parameters and named arguments by name. Too many or too few arguments, an unknown name, or a name given twice is E0064. Named-only parameters and function shapes follow RFC 0001 (E0040, E0041). A default value is evaluated at each call that omits the argument.
-3. Generic arguments of a function are inferred from its arguments and from the expected result; when they cannot be, the call must write them (E0060). A type argument that does not meet a constraint `[T with I]` is E0062.
+3. Generic arguments of a function are inferred from its arguments and from the expected result; when they cannot be, the call must write them (E0060). A type argument that does not meet a constraint `[T with I]` is E0062, except that a type argument built from `Float` (2.9) for a constraint `Order` or `Hash` is E0045 (L-32). A method declared only for bounded type arguments, such as `sorted` of `List[T with Order]`, called on a receiver whose type argument is built from `Float` is E0045 as well, not E0056.
 4. A method call `x.m(...)` finds `m` in the `extend` blocks of the type of `x` that are visible, then in the interfaces the type implements, including their default methods (L-6c). A function of a type is called as `T.f(...)` (L-23d).
 5. A lambda takes the types of its parameters and result from the expected function type; where there is none, they must be written (E0049, L-8a).
 6. `extend T with I` must define every method of `I` that has no default, with the signature of `I` (with `Self` replaced by `T`); a missing method or a different signature is E0069. A second implementation of `I` for `T`, or one in a module that owns neither `T` nor `I`, is E0044.
 7. An enum variant whose short form collides with a visible name must be written with its enum name (L-6a): E0072.
+8. The conversions of `std.json` (`encode`, `encode_checked`, `decode`, and `to_value` and `from_value` that the compiler generates) never read or set a private field, even in the module that declares it (S-5, S-17). Their type parameter needs a convertible type, and so does every type parameter of a function that passes its own parameter to one that needs it. A call where such a parameter gets a type that reaches a struct or an error with a field that is not `public`, through `List`, `Set`, `Map`, `Option`, tuples, fields and variants, is E0046 at the call. The fix decodes a public transport struct and then calls the validating constructor of the domain type. At run time decoding such a struct fails with `DecodeError` and sets no field.
 
 ## 4. Operators and expressions
 
 1. `+`, `-`, `*`, `/`, `%`, `**` need the operand type to implement `Add`, `Subtract`, `Multiply`, `Divide` (L-9a); `%` and `**` are defined for `Int` and `Float`. Both operands have one type; otherwise E0065. Lists have no `+`: `append_all` joins them, so that copying a list is always visible.
-2. `==` and `!=` need `Equal`, `<` `<=` `>` `>=` need `Order`; `Float` follows L-32 (E0045). `==` on a resource is E0066 with the fix `is_same(a, b)`.
+2. `==` and `!=` need `Equal`, `<` `<=` `>` `>=` need `Order`; `Float` follows L-32: its own comparisons are the partial IEEE ones, and a type built from it (2.9) has no `Order`, so `<` on it is E0045. `==` on a resource is E0066 with the fix `is_same(a, b)`.
 3. `and`, `or`, `not` take `Bool`, except `or` with an `Option[T]` left operand, which gives `T` with a `T` right operand or `Option[T]` with an `Option[T]` one. Conditions of `if`, `while`, `assert` and guards are `Bool` (E0061).
 4. `x in c` calls `c.contains(x)`; `c` must have such a method (E0061).
 5. `a?.f` needs `a` of type `Option[T]` and gives `Option[U]` for a field `f` of type `U`.
 6. `items[i]` is defined for `List[T]` with an `Int` index and for `Map[K, V]` with a `K` key; it is a fault when the element is missing, and `get` is its safe form (L-18).
 7. Every interpolated expression must implement `Display` (E0067).
 8. `x is p` is `Bool`; its bindings follow L-33 (E0050).
+9. `range(start, end)` is a `Range`, not a `List` (S-15). A `Range` where a `List` is expected, indexed, or given a method that only `List` has is E0047, with the fix `.to_list()` after the range.
 
 ## 5. Errors
 
@@ -81,6 +85,7 @@ Version 0.1-draft. Changes in this draft: decisions recorded while implementing 
    - *Allocation.* An expression that makes a value of the `alloc` layer allocates by itself: a list literal, a map literal, a list comprehension, a text with interpolation, `+` on texts, and a lambda that captures a local name or `self`. It gives the function, constant or field default that contains it `allocates` and the layer `alloc`, so under `--profile=core` it is E0084 with the chain ending at the expression; in a module of the `core` layer it is E0084 at the expression (item 1). A text without interpolation and a lambda that captures nothing do not allocate. The grammar has no set literal: a set is made by a function of the `alloc` layer, which item 2 covers.
 
    `unio symbol` shows the effects derived this way, and E0085 is reported at the first call, use of a constant or field default, or implicit call of each module that needs an effect its manifest does not permit.
+5. An `external function` is a primitive of the runtime: in release 0.1 it is declared only in an `unsafe module` of the standard library (S-7, S-10), and every one declared there has an implementation in the runtime. An `external function` anywhere else, including an `unsafe module` of a package, is E0086 at its name, so that no program reaches a call the runtime cannot make. The list of `unsafe module` files in the manifest (T-6) and the confirmation when a dependency is installed (T-9) concern packages, which declare no external functions in 0.1.
 
 ## 9. Diagnostics of this document
 
@@ -121,5 +126,6 @@ Version 0.1-draft. Changes in this draft: decisions recorded while implementing 
 | E0083 | `break` or `continue` outside a loop | S4 |
 | E0084 | Layer or profile violation | S4 |
 | E0085 | Effect not permitted by the manifest | S4 |
+| E0086 | `external function` outside an `unsafe module` of the standard library | S6 |
 
-Codes E0040 to E0050 belong to RFC 0001 and RFC 0002 and are reported in the sprint of the rule they refine. Every code has an explanation with an example and a fix in the catalog of the compiler (C-9, R-12).
+Codes E0040 to E0050 belong to RFC 0001 and RFC 0002 and are reported in the sprint of the rule they refine; the cases of E0045 to E0048 are 2.9, 3.3, 3.8, 4.2, 4.9 and 1.9. Every code has an explanation with an example and a fix in the catalog of the compiler (C-9, R-12).

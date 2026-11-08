@@ -25,14 +25,14 @@ Counted per identifier (a grouped row counts each of its identifiers); the table
 
 | Group | Identifiers | Implemented and checked | Implemented, partly checked | Partial | Not started |
 |---|---|---|---|---|---|
-| L (language) | 48 | 34 | 10 | 4 | 0 |
+| L (language) | 48 | 36 | 9 | 3 | 0 |
 | C (compiler and runtime) | 23 | 11 | 5 | 7 | 0 |
 | SB (sandbox) | 16 | 3 | 5 | 3 | 5 |
-| S (library) | 24 | 8 | 5 | 10 | 1 |
-| T (tools) | 20 | 8 | 0 | 4 | 8 |
+| S (library) | 24 | 10 | 5 | 8 | 1 |
+| T (tools) | 20 | 8 | 0 | 5 | 7 |
 | R (non-functional) | 16 | 2 | 3 | 3 | 8 |
 | D (documentation) | 5 | 1 | 0 | 1 | 3 |
-| Total | 152 | 67 | 28 | 32 | 25 |
+| Total | 152 | 71 | 27 | 30 | 24 |
 
 Table 6.1 (commands): 8 of the 16 commands exist. Section 7.1 (7 metrics): 1 met and gated, 2 met in part and not gated, 1 not met, 3 not measured.
 
@@ -57,10 +57,10 @@ These were found by an audit of the sprints S1 to S6 and are stated here precise
 
 Found while writing this table, by probes with the release binary:
 
-15. A `Map[Float, Int]` literal passes `unio check`; only the methods of such a map are then missing (E0056). L-9 says `Float` cannot be a key. Row L-9.
-16. `std.json.decode` fills a private field of a struct (probe: a struct with a private `balance` decoded from JSON, run with `unio run`); S-5 and S-17 forbid this, and E0046 is not in the catalog. Rows S-5, S-17.
-17. A file outside the standard library may be an `unsafe module` with an `external function`: `unio check` accepts it and `unio run` faults at the call ("the runtime has no external function"). S-7 asks for a compile-time rejection; `tools/check_api.unio` checks only the repository. Row S-7.
-18. E0045 to E0048 of RFC 0001 are not in the diagnostic catalog: an IEEE `Float` where `Order` is needed is reported as E0056 or E0062, a `Range` used as a `List` as E0061; the cases themselves are rejected. Rows L-32, S-15, S-17, T-14.
+15. **`Float` as a key** (fixed in the work in progress, docs/semantics.md 2.9). A `Map` key or `Set` element type built from `Float`, written (`Map[Float, Int]`, `Set[Float]`) or inferred from a map literal, is E0045 with the fix `OrderedFloat`. Remaining: a struct with a `Float` field used as a key is rejected only at the calls that need `Hash` (E0062 or E0056), not at the type. Checked by the semantic corpus (`float_map_key`, `float_map_key_type`, `float_set_element`). Row L-9.
+16. **JSON conversion and private fields** (fixed in the work in progress, docs/semantics.md 3.8). A call of `std.json` conversion (`encode`, `encode_checked`, `decode`), directly or through a generic function that passes its type parameter on, whose type reaches a struct with a private field is E0046; at run time decoding such a struct fails with `DecodeError` and sets no field. Checked by the semantic corpus (`decode_private_field`, `encode_private_field`) and `tests/interpreter.rs` (`decoding_never_fills_a_private_field`). Rows S-5, S-17.
+17. **External functions outside the library** (fixed in the work in progress, docs/semantics.md 8.5). An `external function` outside an `unsafe module` of the standard library is E0086 (new code), so `unio run` stops at the check and never reaches the fault; every external function of the library has a runtime binding. Checked by the semantic corpus (`external_outside_stdlib`), `tests/interpreter.rs` (`an_external_function_of_a_program_is_rejected_before_it_runs`), and the unit test `every_external_of_the_standard_library_is_bound` in `interp.rs`. Row S-7.
+18. **Codes E0045 to E0048** (fixed in the work in progress). All four are in the catalog with explanations and examples (`unio explain`). E0045 replaces E0062, E0056 and E0065 where a type built from IEEE `Float` meets `Order` or `Hash`; E0047 replaces E0061, E0056 and E0065 where a `Range` is used as a `List`, with the fix `.to_list()`; E0046 is item 16; E0048 is an import under `deps.`, which release 0.1 cannot resolve (docs/semantics.md 1.9). Other unmet constraints stay E0062. Checked by `tests/catalog.rs`, the semantic corpus (`float_sorted`, `float_order_constraint`, `range_as_list`, `range_indexed`, `dependency_missing`) and `tests/semantic.rs` (`a_dependency_import_is_missing_identity`). Rows L-32, S-15, S-17, T-14.
 
 ## 3. Language (L)
 
@@ -71,7 +71,7 @@ Found while writing this table, by probes with the release binary:
 | L-4, L-5, L-7, L-8, L-8a | implemented and checked | `types.rs`, `check.rs`: built-in types, no implicit conversion, generics with constraints, local inference, lambda types from context (E0049) | semantic corpus (`wrong_type`, `cannot_infer`, `constraint_not_met`, `lambda_without_types`, ...) in `tests/semantic.rs`; every repository source passes `unio check` | Lx64, mac, Win | — |
 | L-6, L-6b, L-6c | implemented, partly checked | user types, `extend ... with`, interface values with dispatch at run time, default methods | semantic corpus (`interface_method_missing`, `interface_not_a_type`, `interfaces_and_patterns`), test blocks | Lx64, mac, Win | gap 1: methods are found by the short type name at run time |
 | L-6a | implemented and checked | short variant form with collision check (E0072) | `variant_short_collision` | Lx64, mac, Win | — |
-| L-9 | partial | content equality derived; `==` on a resource is E0066; `Float` has no `Hash` | `resource_equality`, test blocks | Lx64, mac, Win | gap 15: a `Map[Float, V]` literal type is not rejected |
+| L-9 | implemented and checked | content equality derived; `==` on a resource is E0066; `Float` has no `Hash`: a `Map` key or `Set` element built from `Float` is E0045 | `resource_equality`, `float_map_key`, `float_map_key_type`, `float_set_element`, test blocks | Lx64, mac, Win | a struct with a `Float` field as a key is rejected at the calls that need `Hash`, not at the type (gap 15) |
 | L-9a | implemented and checked | operators through the standard interfaces; one implementation per type (E0044) | `text_plus_int`, `second_implementation` | Lx64, mac, Win | — |
 | L-9b | implemented, partly checked | `effects.rs` derives effects from the call graph; `uses` reserved (E0032) | `tests/symbol.rs`, spec corpus | Lx64, mac, Win | gap 2: not through interface methods or function values |
 | L-10, L-11, L-11a | implemented and checked | E0077, E0078, E0079, E0042; values with copy-on-write in `unio-runtime/src/value.rs` | `assign_to_let`, `change_through_let`, `field_not_var`, `var_argument_*`; test blocks | Lx64, mac, Win | — |
@@ -82,7 +82,7 @@ Found while writing this table, by probes with the release binary:
 | L-18 | implemented, partly checked | safe forms in `stdlib/` (`get`, `checked_divide`, `Option` results) | test blocks | Lx64, mac, Win | no check that every faulting operation has a safe form |
 | L-19 | partial | no address of a value can be obtained | by construction | — | memory is reference-counted, not under a GC (gap 9, C-13) |
 | L-20, L-21 | implemented and checked | `using`, release in reverse order on exit, error, and fault; resource escape (E0080, E0081) | `resource_outside_using`, `resource_escapes`, `resource_parameter_*`; `tests/interpreter.rs` | Lx64, mac, Win | — |
-| L-22 | partial | modules, packages by `unio.toml`, `import`, `from ... import`, `std.` names | `module_not_found`, `imported_name_missing`, `import_collision` | Lx64, mac, Win | `deps.<alias>` names do not exist (no packages, T-14); gap 4: imports through links can leave the package |
+| L-22 | partial | modules, packages by `unio.toml`, `import`, `from ... import`, `std.` names | `module_not_found`, `imported_name_missing`, `import_collision` | Lx64, mac, Win | `deps.<alias>` is reserved and E0048 (no packages, T-14); gap 4: imports through links can leave the package |
 | L-23, L-23a, L-23b, L-23c, L-23d | implemented and checked | visibility of declarations, fields, methods, functions of a type (E0057) | `private_field`, `names_and_types`, `visibility.unio` | Lx64, mac, Win | — |
 | L-24 | implemented and checked | import cycles named (E0058) | `import_cycle_a`, `import_cycle_b` | Lx64, mac, Win | — |
 | L-25 | implemented and checked | `test` blocks, `assert`, `assert_fail`, `expect_fault`; not compiled into `unio build` output | `tests/interpreter.rs`, CI step "Unio test blocks" | Lx64, mac, Win | — |
@@ -92,7 +92,7 @@ Found while writing this table, by probes with the release binary:
 | L-29 | implemented and checked | one name to one `var` parameter (E0042); iteration over value snapshots | `var_argument_twice`; test blocks | Lx64, mac, Win | — |
 | L-30 | implemented and checked | E0043 for a dropped `Result` or `process.Output` | `discarded_result`, `result_binding_never_read`, `discarded_values` | Lx64, mac, Win | — |
 | L-31 | implemented, partly checked | one implementation per type and interface (E0044) | `second_implementation` | Lx64, mac, Win | ownership across packages is untested because packages do not exist yet |
-| L-32 | implemented, partly checked | `OrderedFloat`, `Float.total_order`; `Float` has no `Order` | test blocks of `stdlib/core/builtin/float.unio`, `runtime core.rs` unit tests | Lx64, mac, Win | gap 18: reported as E0056/E0062, not E0045 |
+| L-32 | implemented and checked | `OrderedFloat`, `Float.total_order`; `Float` has no `Order` or `Hash`: a bound, a bounded method or `<` on a type built from it is E0045 | test blocks of `stdlib/core/builtin/float.unio`, `runtime core.rs` unit tests, `float_sorted`, `float_order_constraint` | Lx64, mac, Win | — |
 | L-33 | implemented and checked | `expr is pattern` with scoped bindings (E0050) | `is_binding_outside`, spec corpus | Lx64, mac, Win | — |
 
 ## 4. Compiler and runtime (C)
@@ -148,21 +148,21 @@ Found while writing this table, by probes with the release binary:
 | S-2 | implemented, partly checked | concrete error types in every `fails with` of `stdlib/` | review only; no automated check | — | — |
 | S-3 | partial | every module and public function has a documentation comment | — | — | public functions have no examples |
 | S-4 | partial | `std.args.list()` | test blocks | Lx64, mac, Win | no flags, defaults, or automatic help |
-| S-5 | partial | `parse`, `encode`, `encode_checked`, `decode`, conversions generated from the static type | test blocks of `stdlib/alloc/json.unio`, `tests/interpreter.rs` (`json_query`) | Lx64, mac, Win | gap 16: decoding fills private fields |
+| S-5 | implemented and checked | `parse`, `encode`, `encode_checked`, `decode`, conversions generated from the static type; a type with a private field is E0046 and is never decoded | test blocks of `stdlib/alloc/json.unio`, `tests/interpreter.rs` (`json_query`, `decoding_never_fills_a_private_field`), `decode_private_field`, `encode_private_field` | Lx64, mac, Win | — |
 | S-6 | implemented, partly checked | `process.run` without a shell, captured output, status, timeout | `runtime tests/process.rs`, `tests/sandbox.rs` | Lx64, mac, Win | gap 3: environment, output size, and process tree not bounded |
-| S-7 | partial | external functions only in `unsafe module` files of `stdlib/` | `tools/check_api.unio` (repository only) | Lx64, mac, Win | gap 17: the compiler accepts `unsafe module` outside the library; the reliability review of 7.3 (R-5) not done |
+| S-7 | partial | external functions only in `unsafe module` files of `stdlib/`; elsewhere E0086; every one has a runtime binding | `tools/check_api.unio`, `external_outside_stdlib`, `tests/interpreter.rs`, unit test in `interp.rs` | Lx64, mac, Win | the reliability review of 7.3 (R-5) not done |
 | S-8 | implemented and checked | blocked operations through the declared errors; `exists`, `env.get` report absence | `tests/sandbox.rs` | Lx64, mac, Win (runtime layer) | — |
 | S-9, S-9c | implemented and checked | atomic replacement with recorded steps `Writing`, `Closed`, `Replaced`, `Durable`; repeatable `commit` | `runtime tests/files.rs`, test blocks of `stdlib/std/files.unio` | Lx64, mac, Win | guarantee 2 and 3 after power loss not tested (gap 13) |
 | S-9a | implemented, partly checked | `fsync`, `F_FULLFSYNC`, `FlushFileBuffers` and `MoveFileExW`; file-system detection; `Unsupported` for `durable` elsewhere | runtime unit tests (`durability.rs`) | Lx64, mac, Win | tested only on the file systems of the CI runners |
 | S-9b | partial | fault-injection hook `fail_point`; each `commit` step failed in turn; the same protocol in test blocks | `runtime tests/files.rs`, test blocks | Lx64, mac, Win | gap 13: no dm-log-writes, no kill or power-off tests |
-| S-10 | implemented and checked | library in Unio; 70 externals bound in `unio-runtime` | `runtime tests/bindings.rs`; CI step "Unio sources use only the standard library API" | Lx64, mac, Win | — |
+| S-10 | implemented and checked | library in Unio; 83 externals bound in `unio-runtime` | `runtime tests/bindings.rs`; CI step "Unio sources use only the standard library API" | Lx64, mac, Win | — |
 | S-11 | implemented and checked | layers by directory | `tools/check_api.unio`, E0084 (`tests/symbol.rs`) | Lx64, mac, Win | — |
 | S-12 | partial | externals grouped by layer (`externs/core.rs`, `alloc.rs`, `system.rs`, `files.rs`, `process.rs`) | — | — | no check that the `core` runtime makes no system calls; no hook interface between the runtime layers |
 | S-13 | implemented and checked | `sorted_by` with one key per element, `fold`, `partition`, `group_by`, `zip`, `chunks`, `windows` | test blocks of `stdlib/alloc/builtin/list.unio` | Lx64, mac, Win | — |
 | S-14 | partial | `try_map`, `try_filter`, `try_fold` with concrete callback errors | test blocks | Lx64, mac, Win | gap 2: effects of callbacks are not derived |
-| S-15 | implemented and checked | `Range` in `core`, independent cursors, `to_list` in `alloc` | test blocks | Lx64, mac, Win | gap 18: misuse reported as E0061, not E0047 |
+| S-15 | implemented and checked | `Range` in `core`, independent cursors, `to_list` in `alloc`; a `Range` used as a `List` is E0047 | test blocks, `range_as_list`, `range_indexed` | Lx64, mac, Win | — |
 | S-16 | implemented, partly checked | `open_reader`, bounded `read_bytes`, retained errors, release once | test blocks of `stdlib/std/files.unio`, `runtime tests/files.rs` | Lx64, mac, Win | no test with a file larger than the memory budget |
-| S-17 | partial | strict decoding: unknown fields and variants, missing fields, `Float` for `Int`, JSON Pointer paths; duplicate keys and limits in the parser | test blocks of `stdlib/alloc/json.unio` | Lx64, mac, Win | gap 16: private fields are filled; E0046 absent |
+| S-17 | implemented and checked | strict decoding: unknown fields and variants, missing fields, `Float` for `Int`, JSON Pointer paths; duplicate keys and limits in the parser; private fields never converted (E0046) | test blocks of `stdlib/alloc/json.unio`, `decode_private_field`, `encode_private_field`, `tests/interpreter.rs` | Lx64, mac, Win | — |
 | S-18 | partial | text as Unicode scalars with an index; no implicit normalization | test blocks of `stdlib/alloc/builtin/text.unio` | Lx64, mac, Win | no explicit normalization or grapheme API |
 | S-19 | implemented, partly checked | lexical `Path.normalize`; `files.resolve` through the file system | test blocks of `stdlib/std/builtin/path.unio` | Lx64, mac, Win | UNC and drive-relative cases only as far as the test blocks go |
 | S-20 | implemented and checked | `diagnostic_code` generated for every error; `std.errors.ContextError` | test blocks of `stdlib/alloc/errors.unio` | Lx64, mac, Win | — |
@@ -183,7 +183,8 @@ Table 6.1: `unio build` (without `--target`), `run`, `check`, `fmt`, `test`, `sy
 | T-10 | not started | — | — | — | — |
 | T-11 | partial | VS Code and Cursor extension with highlighting, packaged in CI | editor job `npm test` | Lx64 | no test running from the editor |
 | T-12 | partial | `std.test.check_property` with deterministic generation, shrinking, replay data | test blocks of `stdlib/alloc/test.unio` | Lx64, mac, Win | no runner integration, no JSON replay |
-| T-13, T-14, T-15 | not started | — | — | — | — |
+| T-13, T-15 | not started | — | — | — | — |
+| T-14 | partial | `deps` is reserved as a module root; an import under it is E0048, saying whether the manifest declares the alias | `dependency_missing`, `tests/semantic.rs` | Lx64, mac, Win | no resolver, lock entries, or package identity in types |
 
 ## 7. Non-functional requirements (R)
 

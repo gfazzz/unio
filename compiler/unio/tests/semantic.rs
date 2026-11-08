@@ -207,3 +207,43 @@ fn an_import_through_a_link_out_of_the_package_is_rejected() {
     assert_eq!(analysis.diagnostics.len(), 2, "{rendered}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T-14: `deps.<alias>` names a manifest dependency, never a directory of the package; with no
+/// package manager in 0.1 an import of one is E0048, which says whether the alias is declared.
+#[test]
+fn a_dependency_import_is_missing_identity() {
+    let dir = std::env::temp_dir().join(format!("unio-semantic-deps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("deps/money")).unwrap();
+    std::fs::write(
+        dir.join("unio.toml"),
+        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\n\n[dependencies]\nmoney = \"1.2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("deps/money/ledger.unio"),
+        "public let TOTAL as Int = 1\n",
+    )
+    .unwrap();
+    let main = dir.join("main.unio");
+    std::fs::write(
+        &main,
+        "import deps.money.ledger\nimport deps.tax.rates\n\nfunction main():\n    print(\"shop\")\n",
+    )
+    .unwrap();
+    let results = unio::check_files(std::slice::from_ref(&main));
+    let _ = std::fs::remove_dir_all(&dir);
+    let analysis = &results[0];
+    let found: Vec<(&str, usize, String)> = analysis
+        .diagnostics
+        .iter()
+        .map(|d| (d.code, d.line(), d.message.en.clone()))
+        .collect();
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found.iter().all(|(code, _, _)| *code == "E0048"),
+        "{found:?}"
+    );
+    assert!(found[0].2.contains("declared in unio.toml"), "{found:?}");
+    assert!(found[1].2.contains("not a dependency"), "{found:?}");
+}

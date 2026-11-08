@@ -75,6 +75,20 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// Whether the type is IEEE `Float` or is built from it through type arguments, as
+    /// `Tuple[Float, Int]` or `Option[Float]`: such a type has neither `Hash` nor a total
+    /// `Order` (L-9, L-32), and a key or a bound that needs one is E0045. A struct with a
+    /// `Float` field is not counted: the struct itself lacks the interface (E0062).
+    pub fn float_inside(&self) -> bool {
+        match self {
+            Ty::Prim(Prim::Float) => true,
+            Ty::List(t) | Ty::Set(t) => t.float_inside(),
+            Ty::Map(k, v) => k.float_inside() || v.float_inside(),
+            Ty::Tuple(ts) | Ty::Named(_, ts) => ts.iter().any(Ty::float_inside),
+            _ => false,
+        }
+    }
+
     pub fn int() -> Ty {
         Ty::Prim(Prim::Int)
     }

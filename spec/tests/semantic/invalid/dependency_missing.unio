@@ -1,0 +1,5 @@
+# expect-error: 2 E0048
+import deps.money.ledger
+
+function main():
+    print("ledger")

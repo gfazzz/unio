@@ -60,7 +60,8 @@ pub const CODES: &[&str] = &[
     "E0044", "E0049", "E0050", "E0051", "E0052", "E0053", "E0054", "E0055", "E0056", "E0057",
     "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
     "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074", "E0075", "E0076",
-    "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085",
+    "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085", "E0045",
+    "E0046", "E0047", "E0048", "E0086",
 ];
 
 /// Codes of the name and type checks (sprint S3); their examples need the whole check.
@@ -69,7 +70,7 @@ pub const SEMANTIC_CODES: &[&str] = &[
     "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
     "E0066", "E0067", "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074",
     "E0075", "E0076", "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084",
-    "E0085",
+    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -556,6 +557,19 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0066", resource_equality()),
         ("E0067", not_display("Point")),
         ("E0049", lambda_needs_types("x")),
+        ("E0045", float_key(false)),
+        ("E0045", float_key(true)),
+        ("E0045", float_constraint("Float", "Order")),
+        ("E0045", float_method("sorted", "Float")),
+        ("E0045", float_operator("<", "Tuple[Float, Int]")),
+        ("E0046", private_conversion("Account", "Account", "balance")),
+        ("E0047", range_as_list("List[Int]")),
+        ("E0047", range_method("length")),
+        ("E0047", add_to_list()),
+        ("E0048", dependency_missing("money", false)),
+        ("E0048", dependency_missing("money", true)),
+        ("E0086", external_outside_stdlib("poke", false)),
+        ("E0086", external_outside_stdlib("poke", true)),
     ]
 }
 
@@ -903,6 +917,36 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "Пакет использует функцию, эффект которой не разрешён его манифестом (И-6, раздел 6 концепции). Добавьте полномочие в `unio.toml` или уберите вызов из цепочки.",
             "import std.files\n\nfunction size(path as Path) returns Int fails with IoError:\n    return (try files.read_text(path)).length()\n",
             "function size(text as Text) returns Int:\n    return text.length()\n",
+        ),
+        "E0045" => (
+            "IEEE `Float` has no total order and no `Hash` (L-9, L-32): it cannot be a `Map` key or a `Set` element, and it does not meet `Order` or `Hash` of a generic parameter. Use its total order key `OrderedFloat`, made by `value.total_order()`, or sort with `sorted_by`.",
+            "IEEE `Float` не имеет полного порядка и `Hash` (Я-9, Я-32): он не может быть ключом `Map` или элементом `Set` и не удовлетворяет `Order` или `Hash` обобщённого параметра. Используйте ключ полного порядка `OrderedFloat`, который даёт `value.total_order()`, или сортируйте через `sorted_by`.",
+            "function counts() returns Map[Float, Int]:\n    return {1.5: 1}\n",
+            "function counts() returns Map[OrderedFloat, Int]:\n    return {(1.5).total_order(): 1}\n",
+        ),
+        "E0046" => (
+            "Automatic JSON conversion (`std.json.encode`, `encode_checked`, `decode`) never reads or sets a private field, even in the module that declares it (S-5, S-17). Decode a transport struct whose fields are all public, then build the domain value with its validating constructor.",
+            "Автоматическое преобразование JSON (`std.json.encode`, `encode_checked`, `decode`) никогда не читает и не задаёт закрытое поле, даже в модуле, который его объявляет (Б-5, Б-17). Декодируйте транспортную структуру со всеми открытыми полями, затем постройте значение предметной области её проверяющим конструктором.",
+            "import std.json as json\n\nstruct Port:\n    value as Int\n\nfunction load(v as json.Value) returns Port fails with DecodeError:\n    return try json.decode[Port](v)\n",
+            "import std.json as json\n\nstruct PortData:\n    public value as Int\n\nfunction load(v as json.Value) returns PortData fails with DecodeError:\n    return try json.decode[PortData](v)\n",
+        ),
+        "E0047" => (
+            "`range(start, end)` is a `Range`, not a `List` (S-15): it is iterated without being stored, and it has no length, index, or list methods. Write `.to_list()` where the values must be stored, or iterate the range with `for`.",
+            "`range(start, end)` — это `Range`, а не `List` (Б-15): он перебирается без хранения значений, и у него нет длины, индекса и методов списка. Напишите `.to_list()`, где значения нужно сохранить, или переберите диапазон в `for`.",
+            "let A as List[Int] = range(0, 3)\n",
+            "let A as List[Int] = range(0, 3).to_list()\n",
+        ),
+        "E0048" => (
+            "A module under `deps.` names a manifest dependency by its alias (T-14). The alias must be listed under `[dependencies]` in `unio.toml` and installed from its lock entry; release 0.1 has no package manager yet, so no dependency is installed. Declare the alias, or import a module of the package or the standard library.",
+            "Модуль под `deps.` называет зависимость манифеста по её псевдониму (И-14). Псевдоним должен быть указан в `[dependencies]` файла `unio.toml` и установлен по записи блокировки; в выпуске 0.1 менеджера пакетов ещё нет, поэтому зависимости не установлены. Объявите псевдоним или импортируйте модуль пакета либо стандартной библиотеки.",
+            "import deps.money.ledger\n\nlet A as Int = 1\n",
+            "let A as Int = 1\n",
+        ),
+        "E0086" => (
+            "An `external function` is a primitive of the runtime, so in release 0.1 it is declared only in an `unsafe module` of the standard library (S-7, S-10); elsewhere it would have no implementation to call. Write the function in Unio, or use the function of the standard library that provides it.",
+            "`external function` — примитив среды выполнения, поэтому в выпуске 0.1 он объявляется только в `unsafe module` стандартной библиотеки (Б-7, Б-10); в другом месте у него нет реализации, которую можно вызвать. Напишите функцию на Unio или используйте функцию стандартной библиотеки, которая её даёт.",
+            "unsafe module\n\nexternal function poke(address as Int) returns Int\n",
+            "function poke(address as Int) returns Int:\n    return address\n",
         ),
         _ => return None,
     })
@@ -1432,4 +1476,103 @@ pub fn effect_not_permitted(effect: &str, chain: (&str, &str)) -> Msg {
         format!("the effect '{effect}' is not permitted by unio.toml, but {en} needs it; add the permission or remove the call"),
         format!("эффект '{effect}' не разрешён в unio.toml, но он нужен {ru}; добавьте полномочие или уберите вызов"),
     )
+}
+
+/// E0045: IEEE Float as the key of a Map, or as the element of a Set when `set`.
+pub fn float_key(set: bool) -> Msg {
+    if set {
+        Msg::new(
+            "a Set element cannot be Float, which has no Hash; use OrderedFloat from value.total_order()",
+            "элемент Set не может быть Float, у которого нет Hash; используйте OrderedFloat из value.total_order()",
+        )
+    } else {
+        Msg::new(
+            "a Map key cannot be Float, which has no Hash; use OrderedFloat from value.total_order()",
+            "ключ Map не может быть Float, у которого нет Hash; используйте OrderedFloat из value.total_order()",
+        )
+    }
+}
+
+/// E0045: a generic parameter bounded by `Order` or `Hash` gets a type made of `Float`.
+pub fn float_constraint(ty: &str, interface: &str) -> Msg {
+    Msg::new(
+        format!("the function requires {interface}, which IEEE {ty} does not implement; use OrderedFloat from value.total_order()"),
+        format!("функция требует {interface}, которого не реализует IEEE {ty}; используйте OrderedFloat из value.total_order()"),
+    )
+}
+
+/// E0045: a method that exists only for elements with a total order, such as `sorted`.
+pub fn float_method(name: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' needs Order of the elements, which IEEE {ty} does not have; use sorted_by with value.total_order()"),
+        format!("'{name}' требует Order элементов, которого нет у IEEE {ty}; используйте sorted_by с value.total_order()"),
+    )
+}
+
+/// E0045: `<` and the other order operators on a type made of `Float`.
+pub fn float_operator(op: &str, ty: &str) -> Msg {
+    Msg::new(
+        format!("'{op}' needs a total Order, which {ty} does not have because of IEEE Float; compare keys from value.total_order()"),
+        format!("'{op}' требует полного Order, которого нет у {ty} из-за IEEE Float; сравнивайте ключи из value.total_order()"),
+    )
+}
+
+/// E0046: `ty` is the converted type, `owner` the struct with the private `field`.
+pub fn private_conversion(ty: &str, owner: &str, field: &str) -> Msg {
+    Msg::new(
+        format!("the JSON conversion of {ty} would bypass the private field '{field}' of '{owner}'; convert a struct with public fields"),
+        format!("преобразование JSON для {ty} обошло бы закрытое поле '{field}' структуры '{owner}'; преобразуйте структуру с открытыми полями"),
+    )
+}
+
+/// E0047: a `Range` where a `List` is expected.
+pub fn range_as_list(expected: &str) -> Msg {
+    Msg::new(
+        format!("expected {expected}, found Range; write '.to_list()' to store the values"),
+        format!(
+            "ожидался {expected}, найден Range; напишите '.to_list()', чтобы сохранить значения"
+        ),
+    )
+}
+
+/// E0047: a list method or an index on a `Range`.
+pub fn range_method(name: &str) -> Msg {
+    Msg::new(
+        format!("a Range is not a List and has no '{name}'; write '.to_list()' before it"),
+        format!("диапазон Range — не List, и у него нет '{name}'; напишите перед ним '.to_list()'"),
+    )
+}
+
+pub fn add_to_list() -> Msg {
+    Msg::new("add '.to_list()'", "добавить '.to_list()'")
+}
+
+/// E0048: `declared` tells whether `[dependencies]` of the manifest lists the alias.
+pub fn dependency_missing(alias: &str, declared: bool) -> Msg {
+    if declared {
+        Msg::new(
+            format!("the dependency '{alias}' is declared in unio.toml but not installed: release 0.1 has no package manager"),
+            format!("зависимость '{alias}' объявлена в unio.toml, но не установлена: в выпуске 0.1 нет менеджера пакетов"),
+        )
+    } else {
+        Msg::new(
+            format!("'{alias}' is not a dependency in [dependencies] of unio.toml"),
+            format!("'{alias}' нет среди зависимостей в [dependencies] файла unio.toml"),
+        )
+    }
+}
+
+/// E0086: an external function outside an unsafe module of the standard library.
+pub fn external_outside_stdlib(name: &str, stdlib: bool) -> Msg {
+    if stdlib {
+        Msg::new(
+            format!("the external function '{name}' must be in an 'unsafe module'"),
+            format!("внешняя функция '{name}' должна быть в 'unsafe module'"),
+        )
+    } else {
+        Msg::new(
+            format!("the external function '{name}' has no implementation: only the standard library declares external functions"),
+            format!("у внешней функции '{name}' нет реализации: внешние функции объявляет только стандартная библиотека"),
+        )
+    }
 }

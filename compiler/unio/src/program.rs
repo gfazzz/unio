@@ -144,6 +144,16 @@ pub struct CallEdge {
     pub span: Span,
 }
 
+/// A call of a generic function or method with its type arguments as the check inferred
+/// them, for the conversion check of `std.json` (E0046). `caller` is None in a test or a
+/// constant; a type argument may name the caller's own generic parameters.
+pub struct GenericCall {
+    pub caller: Option<FnId>,
+    pub types: HashMap<ParamId, Ty>,
+    pub module: ModId,
+    pub span: Span,
+}
+
 /// The layers of the standard library in order (S-11): each may use itself and those before it.
 pub const LAYER_NAMES: [&str; 3] = ["core", "alloc", "std"];
 
@@ -158,6 +168,8 @@ pub struct Program {
     pub diagnostics: Vec<(ModId, Diagnostic)>,
     /// Calls found by the checks: caller, callee, and the place of the call (sprint S4).
     pub calls: Vec<CallEdge>,
+    /// Calls of generic functions with their type arguments (E0046).
+    pub generic_calls: Vec<GenericCall>,
     /// Places where a function is named, for `unio symbol`.
     pub usages: Vec<(FnId, ModId, Span)>,
     /// What the effects need beyond `calls`: implicit calls through interfaces, uses of
@@ -196,6 +208,36 @@ fn find_stdlib(start: &Path) -> Option<PathBuf> {
 }
 
 const LAYERS: [&str; 3] = ["core", "alloc", "std"];
+
+/// Whether `[dependencies]` of the package's `unio.toml` lists the alias (T-6, T-14).
+fn declares_dependency(package: &Path, alias: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(package.join("unio.toml")) else {
+        return false;
+    };
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            section = line
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim()
+                .to_string();
+            continue;
+        }
+        if section == "dependencies" {
+            let key = line
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"');
+            if !line.is_empty() && key == alias {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 fn package_root(file: &Path) -> PathBuf {
     let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -277,6 +319,7 @@ impl Program {
             prelude: HashMap::new(),
             diagnostics: Vec::new(),
             calls: Vec::new(),
+            generic_calls: Vec::new(),
             usages: Vec::new(),
             effect_facts: Default::default(),
             by_path: HashMap::new(),
@@ -377,6 +420,11 @@ impl Program {
     /// `Err(true)`: an import cannot lead out of the package or the standard library through
     /// a link. A missing file is `Err(false)`.
     fn locate_module(&self, from: ModId, path: &[String]) -> Result<PathBuf, bool> {
+        // `deps` is reserved as the root of manifest dependencies (T-14), never a directory of
+        // the package.
+        if path.len() > 1 && path[0] == "deps" {
+            return Err(false);
+        }
         let (root, file) = if path.first().is_some_and(|p| p == "std") && path.len() > 1 {
             let root = self.stdlib_root.as_ref().ok_or(false)?;
             let rest = path[1..].join("/") + ".unio";
@@ -684,6 +732,15 @@ impl Program {
                         .last()
                         .unwrap()
                         .span);
+                    if path.len() > 1 && path[0] == "deps" {
+                        // `deps.<alias>.<module>` names a manifest dependency (T-14); none is
+                        // installed in release 0.1.
+                        let alias = &path[1];
+                        let declared = declares_dependency(&self.modules[module].package, alias);
+                        let message = catalog::dependency_missing(alias, declared);
+                        self.error(module, Diagnostic::error("E0048", span, message));
+                        continue;
+                    }
                     let message = if located == Err(true) {
                         catalog::module_outside(&dotted)
                     } else {
@@ -875,11 +932,13 @@ impl Program {
                 }
                 "Set" => {
                     arity(self, 1);
-                    return Ty::Set(Box::new(one(&arguments, 0)));
+                    let element = self.hashable_key(module, ty, &arguments, true);
+                    return Ty::Set(Box::new(element));
                 }
                 "Map" => {
                     arity(self, 2);
-                    return Ty::Map(Box::new(one(&arguments, 0)), Box::new(one(&arguments, 1)));
+                    let key = self.hashable_key(module, ty, &arguments, false);
+                    return Ty::Map(Box::new(key), Box::new(one(&arguments, 1)));
                 }
                 "Tuple" => return Ty::Tuple(arguments),
                 "Function" => {
@@ -966,6 +1025,25 @@ impl Program {
             }
         }
         names
+    }
+
+    /// The key of a written `Map[K, V]` or the element of a `Set[T]`: a type made of `Float`
+    /// has no `Hash` (L-9) and is E0045 at the argument; the key is then unknown, so that the
+    /// mistake is reported once.
+    fn hashable_key(&mut self, module: ModId, ty: &ast::Type, arguments: &[Ty], set: bool) -> Ty {
+        let key = arguments.first().cloned().unwrap_or(Ty::Unknown);
+        if !key.float_inside() {
+            return key;
+        }
+        let span = match ty.arguments.first() {
+            Some(ast::TypeArgument::Type(t)) => t.span,
+            _ => ty.span,
+        };
+        self.error(
+            module,
+            Diagnostic::error("E0045", span, catalog::float_key(set)),
+        );
+        Ty::Unknown
     }
 
     fn resolve_argument(

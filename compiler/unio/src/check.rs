@@ -179,6 +179,13 @@ pub fn check_program(program: &mut Program) {
         checker.function(f, &block);
     }
     defaults(program, &known, &const_types);
+    tests(program, &known, &const_types);
+    conversions(program);
+    externals(program);
+}
+
+/// The test blocks of every module.
+fn tests(program: &mut Program, known: &Known, const_types: &HashMap<ConstId, Ty>) {
     for module in 0..program.modules.len() {
         let tests: Vec<ast::Block> = program.modules[module]
             .analysis
@@ -191,11 +198,146 @@ pub fn check_program(program: &mut Program) {
             })
             .collect();
         for body in tests {
-            let mut checker = Checker::new(program, &known, &const_types, module);
+            let mut checker = Checker::new(program, known, const_types, module);
             checker.ret = Ty::Unit;
             checker.scopes.push(Vec::new());
             checker.block(&body);
         }
+    }
+}
+
+/// S-5, S-17: the conversions of `std.json` never read or set a private field (E0046). The
+/// type parameters of `to_value` and `from_value` need a convertible type; so does every type
+/// parameter of a function that passes its own parameter on to one that needs it, such as
+/// `encode` and `decode`, or a generic function of the program around them. At each call
+/// where such a parameter gets a type that reaches a struct with a private field, through
+/// containers, `Option`, tuples, fields and variants, the call is E0046.
+fn conversions(program: &mut Program) {
+    let json = program
+        .modules
+        .iter()
+        .position(|m| m.stdlib && m.name == "std.json");
+    let Some(json) = json else {
+        return;
+    };
+    let mut needed: HashSet<ParamId> = program
+        .funcs
+        .iter()
+        .filter(|f| f.module == json && matches!(f.name.as_str(), "to_value" | "from_value"))
+        .flat_map(|f| f.generics.iter().copied())
+        .collect();
+    let mut found: Vec<(ModId, Span, Ty, (String, String))> = Vec::new();
+    let mut done: HashSet<(usize, ParamId)> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (i, call) in program.generic_calls.iter().enumerate() {
+            for (param, ty) in &call.types {
+                if !needed.contains(param) || !done.insert((i, *param)) {
+                    continue;
+                }
+                let mut params = Vec::new();
+                let mut seen = HashSet::new();
+                if let Some(private) = private_field(program, ty, &mut params, &mut seen) {
+                    found.push((call.module, call.span, ty.clone(), private));
+                }
+                for q in params {
+                    grew |= needed.insert(q);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut reported = HashSet::new();
+    for (module, span, ty, (owner, field)) in found {
+        if reported.insert((module, span.start.offset)) {
+            let shown = program.show(&ty);
+            let message = catalog::private_conversion(&shown, &owner, &field);
+            program.error(module, Diagnostic::error("E0046", span, message));
+        }
+    }
+}
+
+/// The first private field a JSON conversion of `ty` would read or set, as the name of its
+/// type and the field; generic parameters met on the way are collected in `params`.
+fn private_field(
+    p: &Program,
+    ty: &Ty,
+    params: &mut Vec<ParamId>,
+    seen: &mut HashSet<DefId>,
+) -> Option<(String, String)> {
+    match ty {
+        Ty::Param(q) => {
+            params.push(*q);
+            None
+        }
+        Ty::List(t) | Ty::Set(t) => private_field(p, t, params, seen),
+        Ty::Map(k, v) => {
+            private_field(p, k, params, seen).or_else(|| private_field(p, v, params, seen))
+        }
+        Ty::Tuple(ts) => ts.iter().find_map(|t| private_field(p, t, params, seen)),
+        Ty::Named(d, args) => {
+            if !seen.insert(*d) {
+                return None;
+            }
+            let def = &p.defs[*d];
+            let map: HashMap<ParamId, Ty> =
+                def.generics.iter().copied().zip(args.clone()).collect();
+            match &def.kind {
+                DefKind::Struct(fields) | DefKind::Error(fields) => {
+                    if let Some(f) = fields.iter().find(|f| !f.public) {
+                        return Some((def.name.clone(), f.name.clone()));
+                    }
+                    fields
+                        .iter()
+                        .find_map(|f| private_field(p, &f.ty.subst(&map, None), params, seen))
+                }
+                DefKind::Enum(variants) => variants.iter().find_map(|v| {
+                    v.fields
+                        .iter()
+                        .find_map(|(_, t)| private_field(p, &t.subst(&map, None), params, seen))
+                }),
+                DefKind::Interface(_) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// S-7, S-10: an `external function` is a primitive of the runtime, declared only in an
+/// `unsafe module` of the standard library; anywhere else it is E0086, so that a program
+/// never reaches a call that the runtime cannot make.
+fn externals(program: &mut Program) {
+    let mut found = Vec::new();
+    for (m, module) in program.modules.iter().enumerate() {
+        let file = &module.analysis.file;
+        let unsafe_module = file.unsafe_module;
+        if module.stdlib && unsafe_module {
+            continue;
+        }
+        for item in &file.items {
+            let names: Vec<&ast::Name> = match item {
+                ast::Item::Declaration(d) => match &d.kind {
+                    ast::DeclarationKind::External(signature) => vec![&signature.name],
+                    _ => Vec::new(),
+                },
+                ast::Item::Extend(e) => e
+                    .members
+                    .iter()
+                    .filter(|member| member.external)
+                    .map(|member| &member.signature.name)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for name in names {
+                let message = catalog::external_outside_stdlib(&name.text, module.stdlib);
+                found.push((m, Diagnostic::error("E0086", name.span, message)));
+            }
+        }
+    }
+    for (m, diagnostic) in found {
+        program.error(m, diagnostic);
     }
 }
 
@@ -1701,9 +1843,33 @@ impl<'a> Checker<'a> {
     fn expect(&mut self, actual: &Ty, expected: &Ty, span: Span) {
         if !self.compatible(actual, expected) {
             let (a, e) = (self.resolved(actual), self.resolved(expected));
+            if self.is_range(&a) && matches!(e, Ty::List(_)) {
+                // A Range is not a List (S-15): `.to_list()` stores its values.
+                let shown = self.p.show(&e);
+                self.range_as_list(span, catalog::range_as_list(&shown));
+                return;
+            }
             let (a, e) = (self.p.show(&a), self.p.show(&e));
             self.err("E0061", span, catalog::type_mismatch(&e, &a));
         }
+    }
+
+    fn is_range(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Named(d, _) if Some(*d) == self.known.range)
+    }
+
+    /// E0047 with the fix that appends `.to_list()` to the range expression at `span`.
+    fn range_as_list(&mut self, span: Span, message: crate::diag::Msg) {
+        if self.silent > 0 {
+            return;
+        }
+        let mut diagnostic = Diagnostic::error("E0047", span, message);
+        diagnostic.fixes.push(Fix {
+            span: Span::new(span.end, span.end),
+            new_text: ".to_list()".to_string(),
+            description: catalog::add_to_list(),
+        });
+        self.p.error(self.module, diagnostic);
     }
 
     // ------------------------------------------------------------ interfaces
@@ -1842,6 +2008,26 @@ impl<'a> Checker<'a> {
             }
         }
         false
+    }
+
+    /// Whether a method named `name` is declared for the kind of `recv` but its bounds fail
+    /// only because a type argument is made of IEEE Float, as `sorted` on `List[Float]`
+    /// (L-32, E0045).
+    fn float_blocks_method(&self, recv: &Ty, name: &str) -> bool {
+        let arguments_float = match recv {
+            Ty::List(t) | Ty::Set(t) => t.float_inside(),
+            Ty::Map(k, v) => k.float_inside() || v.float_inside(),
+            Ty::Named(_, args) | Ty::Tuple(args) => args.iter().any(Ty::float_inside),
+            _ => false,
+        };
+        let Some(key) = Program::type_key(recv) else {
+            return false;
+        };
+        arguments_float
+            && self.p.impls.iter().any(|i| {
+                Program::type_key(&i.target) == Some(key.clone())
+                    && i.methods.iter().any(|m| self.p.funcs[*m].name == name)
+            })
     }
 
     fn has_float_field(&self, d: DefId) -> bool {
@@ -2191,6 +2377,15 @@ impl<'a> Checker<'a> {
         let result = self.call(params, ret, args, span, expected);
         self.record_call(f, span);
         self.fallible_call(fails, span);
+        if self.silent == 0 && !subst.is_empty() {
+            let types = subst.iter().map(|(g, t)| (*g, self.resolved(t))).collect();
+            self.p.generic_calls.push(crate::program::GenericCall {
+                caller: self.current_fn,
+                types,
+                module: self.module,
+                span,
+            });
+        }
         // Constraints of the generic parameters (E0062).
         for (g, v) in generics.iter().zip(&vars) {
             let t = self.resolved(v);
@@ -2201,7 +2396,12 @@ impl<'a> Checker<'a> {
                 if let Ty::Named(b, bargs) = bound {
                     if !self.implements(&t, b, &bargs) {
                         let (ts, bs) = (self.p.show(&t), self.p.defs[b].name.clone());
-                        self.err("E0062", span, catalog::constraint_not_met(&ts, &bs));
+                        if matches!(bs.as_str(), "Order" | "Hash") && t.float_inside() {
+                            // IEEE Float where a total order or a hash is needed (L-32).
+                            self.err("E0045", span, catalog::float_constraint(&ts, &bs));
+                        } else {
+                            self.err("E0062", span, catalog::constraint_not_met(&ts, &bs));
+                        }
                     }
                 }
             }
@@ -2638,6 +2838,10 @@ impl<'a> Checker<'a> {
                     Ty::Map(k, v) => (*k, *v),
                     _ => (Ty::Unknown, Ty::Unknown),
                 };
+                // A key type written in an annotation is checked where it is written; one
+                // inferred from the entries is checked here (L-9).
+                let inferred_key = matches!(k, Ty::Unknown | Ty::Var(_))
+                    && !matches!(self.resolved_keep(expected), Ty::Map(ref k, _) if k.is_unknown());
                 for (key, value) in entries {
                     let kt = self.expr(key, &k);
                     let vt = self.expr(value, &v);
@@ -2648,7 +2852,12 @@ impl<'a> Checker<'a> {
                         v = vt;
                     }
                 }
-                Ty::Map(Box::new(self.resolved(&k)), Box::new(self.resolved(&v)))
+                let key = self.resolved(&k);
+                if inferred_key && key.float_inside() {
+                    self.err("E0045", e.span, catalog::float_key(false));
+                    return Ty::Map(Box::new(Ty::Unknown), Box::new(self.resolved(&v)));
+                }
+                Ty::Map(Box::new(key), Box::new(self.resolved(&v)))
             }
             ExprKind::Lambda {
                 params,
@@ -2765,6 +2974,11 @@ impl<'a> Checker<'a> {
                     }
                     Ty::Unknown | Ty::Never => {
                         self.expr(index, &Ty::Unknown);
+                        Ty::Unknown
+                    }
+                    other if self.is_range(&other) => {
+                        self.expr(index, &Ty::int());
+                        self.range_as_list(target.span, catalog::range_method("[...]"));
                         Ty::Unknown
                     }
                     other => {
@@ -2998,7 +3212,11 @@ impl<'a> Checker<'a> {
                         && !self.implements(&subject, order, &[])
                     {
                         let shown = self.p.show(&subject);
-                        self.err("E0065", span, catalog::operator_not_defined(op, &shown));
+                        if subject.float_inside() {
+                            self.err("E0045", span, catalog::float_operator(op, &shown));
+                        } else {
+                            self.err("E0065", span, catalog::operator_not_defined(op, &shown));
+                        }
                     }
                 }
                 Ty::bool()
@@ -3316,7 +3534,27 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let shown = self.p.show(&recv);
-                self.err("E0056", name.span, catalog::no_method(&name.text, &shown));
+                if self.is_range(&recv)
+                    && self
+                        .find_method(&Ty::List(Box::new(Ty::int())), &name.text)
+                        .is_some()
+                {
+                    // A list method on a Range (S-15).
+                    let message = catalog::range_method(&name.text);
+                    self.range_as_list(target.span, message);
+                } else if self.float_blocks_method(&recv, &name.text) {
+                    let element = match &recv {
+                        Ty::List(t) | Ty::Set(t) => self.p.show(t),
+                        _ => shown.clone(),
+                    };
+                    self.err(
+                        "E0045",
+                        name.span,
+                        catalog::float_method(&name.text, &element),
+                    );
+                } else {
+                    self.err("E0056", name.span, catalog::no_method(&name.text, &shown));
+                }
                 for a in args {
                     self.expr(&a.value, &Ty::Unknown);
                 }

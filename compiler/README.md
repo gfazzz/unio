@@ -163,7 +163,13 @@ constraints, methods through `extend` blocks, interfaces and defaults, functions
 struct and variant construction, operators through interfaces, `or` on `Option`, `?.`, indexing,
 `in`, interpolation, lambdas typed from the expected function type, patterns, and `is`.
 
-Codes reported: E0040, E0041, E0044, E0049, E0050, E0051 to E0067, E0069, E0071, E0072. Where a
+Codes reported: E0040, E0041, E0044 to E0050, E0051 to E0067, E0069, E0071, E0072, E0086. The
+codes of RFC 0001 have their own cases: a key, a bound, a bounded method or `<` on a type built
+from IEEE `Float` is E0045 (semantics 2.9, 3.3, 4.2); a `std.json` conversion of a type with a
+private field, also through a generic function that passes its parameter on, is E0046 (3.8); a
+`Range` used as a `List` is E0047 with the fix `.to_list()` (4.9); an import under `deps.` is
+E0048 (1.9); an `external function` outside an `unsafe module` of the standard library is E0086
+(8.5). Where a
 type cannot be determined, the checker uses an unknown type that is compatible with every type,
 so that one mistake is reported once. The arguments of generic interfaces are compared in
 implementation checks, constraints and assignability (`Iterator[Int]` is not `Iterator[Text]`).
@@ -234,7 +240,7 @@ of a name, or of anything referenced does.
 ## The interpreter (sprint S5)
 
 `src/interp.rs` executes a checked program; `unio-runtime` supplies the values, faults, the
-release stack and the 70 externals. The interpreter walks the checked syntax tree with the
+release stack and the 83 externals. The interpreter walks the checked syntax tree with the
 program tables of the checker (resolved declarations, methods by type, signatures); runtime 8.1
 describes a lowered representation with slots and explicit error edges, which is left to the
 native runtime of S6, because the tree walk already gives the evaluation order of runtime 1 and
@@ -395,6 +401,11 @@ The tests were written before the code (concept, section 1.2):
   (`setsid`) or, on Windows, starts before the child joins its job is not stopped; on Unix an
   interrupt from the terminal does not reach a child in its own group. Heap exhaustion that the
   system reports late (overcommit and its out-of-memory killer) ends the process without 102.
+- Known limits of the RFC 0001 checks: a struct with a `Float` field used as a key is rejected
+  at the calls that need `Hash` (E0062, E0056), not at the type; E0048 covers only a dependency
+  that is missing, because there is no resolver, lock file or package identity yet (T-14). E0046
+  is static; at run time decoding a struct with a private field also fails with `DecodeError`,
+  while encoding has no such second guard.
 - The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object), the isolated workers
   of the tools (SB-10 to SB-13), the hostile projects of SB-15, native code for macOS, Windows and AArch64 and the rest of S6
   (docs/runtime.md 8.6), and the other commands of requirement 6.1.
