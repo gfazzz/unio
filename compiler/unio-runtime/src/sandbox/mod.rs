@@ -13,16 +13,24 @@
 //!    mechanism is missing, [`enter`] fails closed with code 103 unless the operator allows a
 //!    weaker sandbox (SB-5).
 //!
+//! On Linux and macOS the program gets no right to write files from the operating system: a
+//! writer process started before the sandbox applies does every write-class operation of
+//! `std.files` and checks the write scopes itself (`writer.rs`, docs/runtime.md 9.2).
+//!
 //! Limits of the policy: the heap through the runtime's own accounting (code 102), wall and
 //! CPU time through a watchdog thread (code 102), the number of processes through the runtime,
 //! and the size of written files through the runtime and `RLIMIT_FSIZE`.
 
 pub mod toml;
 
+#[cfg(unix)]
+mod fdio;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(unix)]
+pub mod writer;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -413,6 +421,9 @@ pub struct Sandbox {
     pub limits: Limits,
     /// The home directory, asked before the restrictions apply (std.env.home_dir).
     pub home: Option<String>,
+    /// The writer process of the write scopes, when it was started before [`enter`].
+    #[cfg(unix)]
+    writer: Option<Arc<writer::Handle>>,
 }
 
 impl Sandbox {
@@ -421,13 +432,62 @@ impl Sandbox {
             permissions,
             limits,
             home: crate::externs::system::home_dir(),
+            #[cfg(unix)]
+            writer: None,
         }
+    }
+
+    /// Starts the writer process of the write scopes now, if there are any.
+    #[cfg(unix)]
+    fn start_writer(&mut self) -> Result<(), Refused> {
+        if self.writer.is_none() && !self.permissions.write.is_empty() {
+            let handle = writer::Handle::start(&self.permissions.write).map_err(Refused)?;
+            self.writer = Some(Arc::new(handle));
+        }
+        Ok(())
+    }
+}
+
+/// Starts the writer processes of the sandboxes before any restriction applies. Seatbelt
+/// restricts the whole process once, and a writer started after it would inherit the profile of
+/// the programs, which permits no write, so on macOS every writer starts here; elsewhere each
+/// starts in [`enter`], from the thread of its program.
+pub fn start_writers(sandboxes: &mut [Sandbox]) -> Result<(), Refused> {
+    #[cfg(target_os = "macos")]
+    for sandbox in sandboxes.iter_mut() {
+        sandbox.start_writer()?;
+    }
+    let _ = sandboxes;
+    Ok(())
+}
+
+/// Applies the writer's own restrictions of the operating system, in the writer process.
+#[cfg(unix)]
+fn apply_writer_os(scopes: &[Scope]) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return linux::apply_writer(scopes);
+    #[cfg(target_os = "macos")]
+    return macos::apply_writer(scopes);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = scopes;
+        Ok(())
     }
 }
 
 struct Active {
     sandbox: Sandbox,
     processes: Cell<u64>,
+    #[cfg(unix)]
+    writer: Option<writer::Session>,
+}
+
+/// Calls `f` with the writer of the running program; `None` without a sandbox or without
+/// write scopes, and on systems without a writer process (Windows).
+#[cfg(unix)]
+pub(crate) fn with_writer<R>(f: impl FnOnce(&writer::Session) -> R) -> Option<R> {
+    let a = active()?;
+    a.writer.as_ref().map(f)
 }
 
 thread_local! {
@@ -628,15 +688,24 @@ pub fn enter(
     process_wide: &Permissions,
     allow_weaker: bool,
 ) -> Result<Guard, Refused> {
+    #[cfg(unix)]
+    let mut sandbox = sandbox;
+    // The writer starts before the restrictions apply, so that it does not inherit them.
+    #[cfg(unix)]
+    sandbox.start_writer()?;
     let missing = apply_os(&sandbox, process_wide, allow_weaker)?;
     let stop = Arc::new(AtomicBool::new(false));
     if sandbox.limits.wall_seconds.is_some() || sandbox.limits.cpu_seconds.is_some() {
         watchdog(&sandbox.limits, Arc::clone(&stop));
     }
+    #[cfg(unix)]
+    let writer = sandbox.writer.clone().map(writer::Session::new);
     ACTIVE.with(|a| {
         *a.borrow_mut() = Some(Rc::new(Active {
             sandbox,
             processes: Cell::new(0),
+            #[cfg(unix)]
+            writer,
         }))
     });
     Ok(Guard { stop, missing })
@@ -1079,6 +1148,8 @@ mod tests {
                     *a.borrow_mut() = Some(Rc::new(Active {
                         sandbox,
                         processes: Cell::new(0),
+                        #[cfg(unix)]
+                        writer: None,
                     }))
                 });
                 assert!(may_read(&text(dir.join("in"))));

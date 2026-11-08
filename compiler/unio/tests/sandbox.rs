@@ -727,3 +727,206 @@ public function main():
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Audit item 3: permission to write one file does not open its directory at the level of the
+/// operating system. A child started through `process.run` inherits the restrictions of the
+/// program, which writes no file itself: every write goes through the writer process, which
+/// permits exactly the scopes (docs/runtime.md 9.2). The child can neither change a neighbouring
+/// file nor create a new one, and the program still replaces its one file atomically, with and
+/// without `durable`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_child_cannot_change_a_neighbour_of_a_writable_file() {
+    let program = format!(
+        "{PROGRAM_HEAD}function child(name as Text, script as Text):
+    let output = try process.run(\"sh\", [\"-c\", script], timeout_seconds = 30) on ProcessError as e:
+        print(\"BREACH {{name}}: the child does not start: {{e.reason}}\")
+        return
+    if output.status != 0:
+        print(\"denied {{name}}\")
+    else:
+        print(\"BREACH {{name}}\")
+
+function write_works(name as Text, text as Text, durable as Bool):
+    try:
+        try files.write_text(Path(\"open/out.txt\"), text, durable = durable)
+    on IoError as e:
+        if durable and e.kind == IoErrorKind.Unsupported:
+            print(\"unsupported {{name}}\")
+            return
+        print(\"BREACH {{name}} does not work: {{e.reason}}\")
+        return
+    let back = try files.read_text(Path(\"open/out.txt\")) on IoError as e:
+        print(\"BREACH {{name}} cannot be read back: {{e.reason}}\")
+        return
+    granted(name, back == text)
+
+public function main():
+    child(\"a child writes a neighbour\", \"echo changed > open/neighbour.txt\")
+    child(\"a child appends to a neighbour\", \"echo changed >> open/neighbour.txt\")
+    child(\"a child creates a file next to the target\", \"echo new > open/new.txt\")
+    child(\"a child removes a neighbour\", \"rm -f open/neighbour.txt && test ! -e open/neighbour.txt\")
+    child(\"a child renames a neighbour\", \"mv open/neighbour.txt open/moved.txt\")
+    child(\"a child writes the target directly\", \"echo child > open/out.txt\")
+    write_works(\"files.write_text\", \"one\", false)
+    write_works(\"files.write_text durable\", \"two\", true)
+    report(\"files.write_text of a neighbour\", write_text_denied(Path(\"open/neighbour.txt\")))
+"
+    );
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nfiles.write = [\"$CWD/open/out.txt\"]\nprocess = [\"sh\"]\n";
+    let dir = package("neighbour", manifest, &program);
+    fs::write(dir.join("open/neighbour.txt"), "neighbour").unwrap();
+    let output = run(&dir, &[], &[]);
+    assert_denied(
+        &output,
+        &[
+            "a child writes a neighbour",
+            "a child appends to a neighbour",
+            "a child creates a file next to the target",
+            "a child removes a neighbour",
+            "a child renames a neighbour",
+            "a child writes the target directly",
+            "files.write_text",
+            "files.write_text of a neighbour",
+        ],
+    );
+    let out = text(&output.stdout);
+    let durable = unio_runtime::externs::durability::supports_durability(&dir.join("open/out.txt"));
+    if durable {
+        assert!(out.contains("granted files.write_text durable"), "{out}");
+    }
+    assert_eq!(
+        fs::read_to_string(dir.join("open/neighbour.txt")).unwrap(),
+        "neighbour"
+    );
+    assert!(!dir.join("open/new.txt").exists() && !dir.join("open/moved.txt").exists());
+    let expected = if durable { "two" } else { "one" };
+    assert_eq!(
+        fs::read_to_string(dir.join("open/out.txt")).unwrap(),
+        expected
+    );
+    let names: Vec<String> = fs::read_dir(dir.join("open"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.contains("unio-tmp")),
+        "temporary files are left: {names:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The writer process itself, started from `unio` and driven through its protocol as a program
+/// whose runtime checks were bypassed would drive it: it refuses every path outside the scopes
+/// it was given, and it runs under its own restrictions (no new privileges, seccomp) with an
+/// empty environment.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_writer_process_checks_the_scopes_itself() {
+    use std::io::Write;
+    use unio_runtime::sandbox::writer::{Failure, Handle};
+    use unio_runtime::sandbox::Scope;
+    let dir = package("writer-process", "[package]\nname = \"w\"\n", "");
+    let target = dir.join("open/out.txt");
+    let writer = Handle::start_with(
+        Path::new(env!("CARGO_BIN_EXE_unio")),
+        &[Scope {
+            root: target.clone(),
+            subtree: false,
+        }],
+    )
+    .unwrap();
+    let refused = |result: Result<(), Failure>| matches!(result, Err(Failure::Refused(_)));
+    assert!(refused(writer.open(&dir.join("open/a.txt")).map(drop)));
+    assert!(refused(writer.open(&dir.join("closed/x.txt")).map(drop)));
+    assert!(refused(writer.make_directory(&dir.join("open/dir"))));
+    assert!(refused(writer.rename(&dir.join("open/a.txt"), &target)));
+    assert!(refused(writer.commit(1, &target)));
+    let (id, _, mut file) = writer.open(&target).unwrap();
+    file.write_all(b"written").unwrap();
+    drop(file);
+    writer.commit(id, &target).unwrap();
+    assert_eq!(fs::read_to_string(&target).unwrap(), "written");
+    assert_eq!(fs::read_to_string(dir.join("open/a.txt")).unwrap(), "alpha");
+    let pid = writer.pid().unwrap();
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    assert!(status.contains("NoNewPrivs:\t1"), "{status}");
+    if status.contains("Seccomp:") {
+        assert!(status.contains("Seccomp:\t2"), "{status}");
+    }
+    let environ = fs::read(format!("/proc/{pid}/environ")).unwrap();
+    let names: Vec<String> = environ
+        .split(|b| *b == 0)
+        .filter(|v| !v.is_empty())
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    drop(writer);
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The writer ends with its program, even when the program is killed.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_writer_ends_with_its_program() {
+    let program = "import std.files
+
+public function main():
+    try files.write_text(Path(\"open/out.txt\"), \"started\") on IoError as e:
+        print(\"error {e.reason}\")
+        return
+    while true:
+        pass
+";
+    let manifest = "[permissions]\nfiles.write = [\"$CWD/open/out.txt\"]\n";
+    let dir = package("writer-ends", manifest, program);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_unio"))
+        .current_dir(&dir)
+        .env_remove("UNIO_POLICY")
+        .args(["run", "main.unio"])
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !dir.join("open/out.txt").exists() {
+        assert!(
+            started.elapsed().as_secs() < 60 && child.try_wait().unwrap().is_none(),
+            "the program did not write"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let parent = child.id().to_string();
+    let writers: Vec<String> = fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let stat = fs::read_to_string(e.path().join("stat")).ok()?;
+            let after = stat.rsplit_once(") ")?.1;
+            let ppid = after.split(' ').nth(1)?;
+            let environ = fs::read(e.path().join("environ")).ok()?;
+            (ppid == parent && String::from_utf8_lossy(&environ).contains("UNIO_SANDBOX_WRITER"))
+                .then(|| e.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    assert_eq!(
+        writers.len(),
+        1,
+        "one writer runs for the program: {writers:?}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let started = std::time::Instant::now();
+    while Path::new(&format!("/proc/{}/stat", writers[0])).exists()
+        && !fs::read_to_string(format!("/proc/{}/stat", writers[0]))
+            .unwrap_or_default()
+            .contains(") Z ")
+    {
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "the writer outlived its program"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

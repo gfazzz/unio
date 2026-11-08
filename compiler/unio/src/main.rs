@@ -20,6 +20,9 @@ const USAGE: &str = "Usage:
 The language of messages is taken from --lang, then from UNIO_LANG, and is English otherwise.";
 
 fn main() -> ExitCode {
+    // Started as the writer process of a sandbox, this serves and ends here (docs/runtime.md 9.2).
+    #[cfg(unix)]
+    unio_runtime::sandbox::writer::serve_if_requested();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("run") {
         return run(&arguments[1..]);

@@ -1616,6 +1616,9 @@ pub unsafe extern "C" fn unio_native_main(
     argv: *const *const i8,
     image: *const Image,
 ) -> i32 {
+    // Started as the writer process of a sandbox, this serves and ends here (docs/runtime.md 9.2).
+    #[cfg(unix)]
+    unio_runtime::sandbox::writer::serve_if_requested();
     // As in a Rust program: writing to a closed pipe is an error, not a signal.
     #[cfg(unix)]
     signal(13, 1);

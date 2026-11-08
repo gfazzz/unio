@@ -108,28 +108,40 @@ pub fn missing() -> Vec<String> {
 /// Applies every restriction the kernel supports to the current thread.
 pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
     apply_rlimits(limits)?;
+    restrict(&rules(permissions), &[])
+}
+
+/// The restrictions of the writer process (docs/runtime.md 9.2): it may write only in the
+/// write scopes and their directories, read no file, run nothing, start no process or thread,
+/// and open no socket.
+pub fn apply_writer(scopes: &[Scope]) -> Result<(), String> {
+    apply_rlimits(&Limits::default())?;
+    let rules: Vec<(PathBuf, u64)> = scopes.iter().map(|s| (write_root(s), WRITE)).collect();
+    restrict(&rules, nr::WRITER_DENIED)
+}
+
+fn restrict(rules: &[(PathBuf, u64)], denied: &[u32]) -> Result<(), String> {
     // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments only.
     if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(format!("no_new_privs: {}", std::io::Error::last_os_error()));
     }
     let abi = landlock_abi();
     if abi > 0 {
-        landlock(abi, &rules(permissions))?;
+        landlock(abi, rules)?;
     }
     if seccomp_available() {
-        seccomp()?;
+        seccomp(denied)?;
     }
     Ok(())
 }
 
-/// The paths and rights of the Landlock rules.
+/// The paths and rights of the Landlock rules of a program. The write scopes grant nothing
+/// here: the program and its children write no file; the writer process writes for the program
+/// and checks the scopes itself (docs/runtime.md 9.2).
 fn rules(permissions: &Permissions) -> Vec<(PathBuf, u64)> {
     let mut rules = Vec::new();
     for scope in &permissions.read {
         rules.push((scope.root.clone(), READ));
-    }
-    for scope in &permissions.write {
-        rules.push((write_root(scope), WRITE));
     }
     // A child of the sandbox can only start: it inherits the rules, so the programs, their
     // libraries and the files of the dynamic linker must be readable and executable. What a
@@ -177,9 +189,9 @@ fn rules(permissions: &Permissions) -> Vec<(PathBuf, u64)> {
     rules
 }
 
-/// Landlock rules apply to a directory and everything below it: a write scope of one file is
-/// granted on its directory, since the atomic commit protocol creates a temporary file next to
-/// the target and renames it. The runtime still permits only the file itself.
+/// Landlock rules apply to a directory and everything below it: the writer process gets a
+/// write scope of one file on its directory, since the atomic commit creates a temporary file
+/// next to the target and renames it; the writer itself permits only the file.
 fn write_root(scope: &Scope) -> PathBuf {
     if scope.subtree {
         scope.root.clone()
@@ -330,6 +342,13 @@ mod nr {
     pub const SOCKET: u32 = 41;
     pub const CLONE: u32 = 56;
     pub const IOCTL: u32 = 16;
+    /// What the writer process does not need besides [`DENIED`]: exec, new processes and
+    /// threads, and sockets of any kind.
+    pub const WRITER_DENIED: &[u32] = &[
+        59, 322, // execve, execveat
+        56, 57, 58, // clone, fork, vfork
+        53, 42, 43, 288, 49, 50, // socketpair, connect, accept, accept4, bind, listen
+    ];
     /// System calls a Unio program never needs and a sandboxed one must not make.
     pub const DENIED: &[u32] = &[
         101, // ptrace
@@ -356,6 +375,11 @@ mod nr {
     pub const SOCKET: u32 = 198;
     pub const CLONE: u32 = 220;
     pub const IOCTL: u32 = 29;
+    pub const WRITER_DENIED: &[u32] = &[
+        221, 281, // execve, execveat
+        220, // clone
+        199, 203, 202, 242, 200, 201, // socketpair, connect, accept, accept4, bind, listen
+    ];
     pub const DENIED: &[u32] = &[
         117, // ptrace
         270, 271, // process_vm_readv, process_vm_writev
@@ -392,7 +416,7 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
 /// The filter: the native architecture only; no sockets at all (the network is never
 /// permitted and a Unix socket could reach a privileged service); no new namespaces; no
 /// terminal injection; and none of the calls of [`nr::DENIED`].
-fn filter() -> Vec<SockFilter> {
+fn filter(extra: &[u32]) -> Vec<SockFilter> {
     let mut f = vec![
         stmt(LD_W_ABS, OFFSET_ARCH),
         jump(JEQ_K, nr::ARCH, 1, 0),
@@ -404,7 +428,7 @@ fn filter() -> Vec<SockFilter> {
         f.push(jump(JGE_K, 0x4000_0000, 0, 1));
         f.push(stmt(RET_K, RET_ERRNO | EPERM));
     }
-    for &number in nr::DENIED.iter().chain([nr::SOCKET].iter()) {
+    for &number in nr::DENIED.iter().chain([nr::SOCKET].iter()).chain(extra) {
         f.push(jump(JEQ_K, number, 0, 1));
         f.push(stmt(RET_K, RET_ERRNO | EPERM));
     }
@@ -428,8 +452,8 @@ fn filter() -> Vec<SockFilter> {
     f
 }
 
-fn seccomp() -> Result<(), String> {
-    let filter = filter();
+fn seccomp(extra: &[u32]) -> Result<(), String> {
+    let filter = filter(extra);
     let program = SockFprog {
         len: filter.len() as u16,
         filter: filter.as_ptr(),
@@ -459,7 +483,7 @@ mod tests {
 
     #[test]
     fn the_filter_ends_with_allow_and_has_no_jump_out_of_it() {
-        let f = filter();
+        let f = filter(nr::WRITER_DENIED);
         assert!(f.len() < 200);
         assert_eq!(f.last().map(|s| (s.code, s.k)), Some((RET_K, RET_ALLOW)));
         for (i, s) in f.iter().enumerate() {
@@ -511,9 +535,49 @@ mod tests {
         let denied = Err(std::io::ErrorKind::PermissionDenied);
         assert!(results.0, "a granted file can be read");
         assert_eq!(results.1.map(|_| ()), denied);
-        assert!(results.2, "a granted file can be written");
+        assert!(
+            !results.2,
+            "the program writes no file itself: the writer process does (docs/runtime.md 9.2)"
+        );
         assert_eq!(results.3, denied);
         assert_eq!(results.4.map(|_| ()), denied);
         assert!(results.5);
+    }
+
+    /// The writer process may create and replace files only in the directories of its scopes,
+    /// reads nothing else, and can neither run a program nor open a socket.
+    #[test]
+    fn the_writer_is_confined_to_its_write_scopes() {
+        if landlock_abi() == 0 || !seccomp_available() {
+            eprintln!("skipped: Landlock or seccomp is not available");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("unio-landlock-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("open")).unwrap();
+        std::fs::create_dir_all(dir.join("closed")).unwrap();
+        std::fs::write(dir.join("closed/b.txt"), "b").unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let results = on_thread(move || {
+            apply_writer(&[Scope {
+                root: root.join("open/out.txt"),
+                subtree: false,
+            }])
+            .unwrap();
+            (
+                std::fs::write(root.join("open/.out.txt.unio-tmp-1"), "x").is_ok(),
+                std::fs::rename(
+                    root.join("open/.out.txt.unio-tmp-1"),
+                    root.join("open/out.txt"),
+                )
+                .is_ok(),
+                std::fs::write(root.join("closed/c.txt"), "x").is_err(),
+                std::fs::read_to_string(root.join("closed/b.txt")).is_err(),
+                std::process::Command::new("/bin/true").status().is_err(),
+                std::net::UdpSocket::bind("127.0.0.1:0").is_err(),
+            )
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(results, (true, true, true, true, true, true));
     }
 }

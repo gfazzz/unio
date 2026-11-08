@@ -525,9 +525,10 @@ public function main() returns Int:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The effects of a function value count where the value is made (semantics 8.4); a constant
-/// counts for every function that uses it, so a call through a function value kept in a
-/// constant of another module needs what the value's body needs.
+/// A call through a function value has the effects of the values it may be (RFC 0005): a
+/// call through a constant that holds a lambda needs what the body of the lambda needs, and a
+/// call through a parameter whose default is that constant counts for the caller that relies
+/// on the default, not for the function with the parameter.
 #[test]
 fn a_call_through_a_function_value_has_the_effects_of_the_value() {
     let actions = "\
@@ -566,18 +567,238 @@ public function main() returns Int:
     assert_eq!(in_app.len(), 1, "{found:?}");
     assert_eq!((in_app[0].0.as_str(), in_app[0].1), ("E0085", 5));
     assert!(
-        in_app[0]
-            .2
-            .contains("app.save -> actions.SAVE -> std.files.write_text"),
+        in_app[0].2.contains(
+            "app.save -> actions.SAVE -> the lambda on line 4 in actions.SAVE -> std.files.write_text"
+        ),
         "{}",
         in_app[0].2
     );
-    // The default of a parameter counts for its function.
-    let keep = unio::symbol("app.keep", &dir);
+    // The default of the parameter counts where the call relies on it.
+    let keep = &unio::symbol("app.keep", &dir)[0];
+    assert!(!keep.effects.contains(&"files.write"), "{:?}", keep.effects);
+    assert_eq!(keep.argument_effects, ["write"]);
+    let main = &unio::symbol("app.main", &dir)[0];
+    assert!(main.effects.contains(&"files.write"), "{:?}", main.effects);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const MANIFEST_NOTHING: &str = "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[permissions]\n";
+
+/// RFC 0005: making a function value does not run it. A function that only keeps a
+/// reference to `files.read_text` has no `files.read`, and a package without the permission
+/// that never calls the value is not E0085.
+#[test]
+fn a_stored_function_value_has_no_effect_until_it_is_called() {
+    let app = "\
+import std.files as files
+
+function store() returns Int:
+    let reader = files.read_text
+    let kept = [reader]
+    return kept.length()
+";
+    let dir = package(
+        "stored_value",
+        &[("app.unio", app), ("unio.toml", MANIFEST_NOTHING)],
+    );
+    let found = codes(&dir, "app.unio", Profile::Application);
+    assert!(found.is_empty(), "{found:?}");
+    let store = unio::symbol("app.store", &dir);
+    assert_eq!(store[0].effects, ["allocates"], "{:?}", store[0].effects);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const APPLY: &str = "\
+import std.files as files
+
+function apply(f as Function[(Path) -> Text fails with IoError], p as Path) returns Text fails with IoError:
+    return try f(p)
+
+function constant(p as Path) returns Text fails with IoError:
+    return \"x\"
+
+function plain() returns Text fails with IoError:
+    return try apply(constant, Path(\"a\"))
+
+function reading() returns Text fails with IoError:
+    return try apply(files.read_text, Path(\"a\"))
+";
+
+/// RFC 0005: a call through a parameter is a latent effect of the function. Each call of the
+/// function carries the effects of the value it passes: `reading` passes `files.read_text`
+/// and needs `files.read`, `plain` passes a pure function and needs nothing, and `apply`
+/// itself has no effect. E0085 shows the path through the argument.
+#[test]
+fn a_call_through_a_parameter_carries_the_effects_of_the_argument_to_the_caller() {
+    let dir = package(
+        "apply",
+        &[("app.unio", APPLY), ("unio.toml", MANIFEST_NOTHING)],
+    );
+    let found = codes(&dir, "app.unio", Profile::Application);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].0.as_str(), found[0].1), ("E0085", 13));
     assert!(
-        keep[0].effects.contains(&"files.write"),
+        found[0]
+            .2
+            .contains("app.reading -> app.apply (argument f) -> std.files.read_text"),
+        "{}",
+        found[0].2
+    );
+    let effects = |name: &str| unio::symbol(name, &dir)[0].effects.clone();
+    assert!(
+        effects("app.apply").is_empty(),
         "{:?}",
-        keep[0].effects
+        effects("app.apply")
+    );
+    assert!(
+        effects("app.plain").is_empty(),
+        "{:?}",
+        effects("app.plain")
+    );
+    assert!(effects("app.reading").contains(&"files.read"));
+    let apply = &unio::symbol("app.apply", &dir)[0];
+    assert_eq!(apply.argument_effects, ["f"]);
+    assert!(
+        apply.text().contains("  argument effects: f\n"),
+        "{}",
+        apply.text()
+    );
+    assert!(
+        apply.json().contains("\"argument_effects\":[\"f\"]"),
+        "{}",
+        apply.json()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC 0005: the higher-order functions of the library carry the effects of the function
+/// they get to their caller, not to themselves.
+#[test]
+fn library_higher_order_functions_carry_the_effects_of_their_argument_to_the_caller() {
+    let app = "\
+import std.files as files
+
+function size(p as Path) returns Int:
+    let text = try files.read_text(p) on IoError as e:
+        return 0
+    return text.length()
+
+function sizes(paths as List[Path]) returns List[Int]:
+    return paths.map(size)
+
+function longest_first(paths as List[Path]) returns List[Path]:
+    return paths.sorted_by(function (p as Path) returns Int: 0 - size(p))
+
+function texts(paths as List[Path]) returns List[Text] fails with IoError:
+    return try paths.try_map(files.read_text)
+
+function lengths(words as List[Text]) returns List[Int]:
+    return words.map(function (w as Text) returns Int: w.length())
+";
+    let dir = package("higher_order", &[("app.unio", app)]);
+    assert!(codes(&dir, "app.unio", Profile::Application).is_empty());
+    for name in ["app.sizes", "app.longest_first", "app.texts"] {
+        let r = &unio::symbol(name, &dir)[0];
+        assert!(r.effects.contains(&"files.read"), "{name}: {:?}", r.effects);
+    }
+    let lengths = &unio::symbol("app.lengths", &dir)[0];
+    assert!(
+        !lengths.effects.contains(&"files.read"),
+        "{:?}",
+        lengths.effects
+    );
+    for (name, parameter) in [
+        ("List.map", "change"),
+        ("List.sorted_by", "key"),
+        ("List.try_map", "change"),
+    ] {
+        let r = &unio::symbol(name, &dir)[0];
+        assert!(
+            !r.effects.contains(&"files.read"),
+            "{name}: {:?}",
+            r.effects
+        );
+        assert_eq!(r.argument_effects, [parameter], "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC 0005: a function value kept in a field is called with every value stored in that field
+/// anywhere in the program. Under the core profile such a call whose possible values need more
+/// than core is E0087 at the call; a field that only ever holds core functions is accepted.
+#[test]
+fn a_call_through_a_field_has_the_values_stored_in_the_field() {
+    let pure = "\
+struct Handler:
+    run as Function[(Int) -> Int]
+
+function double(x as Int) returns Int:
+    return x * 2
+
+function call(h as Handler) returns Int:
+    return h.run(1)
+
+function make() returns Handler:
+    return Handler(run = double)
+";
+    let dir = package("field_pure", &[("core.unio", pure)]);
+    let found = codes(&dir, "core.unio", Profile::Core);
+    assert!(found.is_empty(), "{found:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mixed = format!(
+        "{pure}
+function label(x as Int) returns Int:
+    return \"{{x}}\".length()
+
+function make_label() returns Handler:
+    return Handler(run = label)
+"
+    );
+    let dir = package("field_mixed", &[("core.unio", &mixed)]);
+    assert!(codes(&dir, "core.unio", Profile::Application).is_empty());
+    let found = codes(&dir, "core.unio", Profile::Core);
+    let lines: Vec<(&str, usize)> = found.iter().map(|f| (f.0.as_str(), f.1)).collect();
+    assert_eq!(lines, [("E0087", 8), ("E0084", 13)], "{found:?}");
+    assert!(
+        found[0].2.contains("core.Handler.run") && found[0].2.contains("core.label"),
+        "{}",
+        found[0].2
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC 0005: making a lambda that captures a value allocates where it is made; the body of
+/// a lambda counts where the lambda is called, so a function that only returns a lambda whose
+/// body allocates does not allocate, and the function that calls the result does.
+#[test]
+fn a_lambda_body_counts_where_it_is_called_and_a_capture_where_it_is_made() {
+    let source = "\
+function maker() returns Function[(Int) -> List[Int]]:
+    return function (x as Int) returns List[Int]: [x]
+
+function user() returns Int:
+    return maker()(1)[0]
+
+function adder(n as Int) returns Function[(Int) -> Int]:
+    return function (x as Int) returns Int: x + n
+";
+    let dir = package("lambda_body", &[("core.unio", source)]);
+    let found = codes(&dir, "core.unio", Profile::Core);
+    let lines: Vec<(&str, usize)> = found.iter().map(|f| (f.0.as_str(), f.1)).collect();
+    assert_eq!(lines, [("E0084", 4), ("E0084", 7)], "{found:?}");
+    assert!(
+        found[0]
+            .2
+            .contains("core.user -> the values core.maker returns -> the lambda on line 2 in core.maker -> a list literal on line 2"),
+        "{}",
+        found[0].2
+    );
+    assert!(
+        found[1]
+            .2
+            .contains("a lambda that captures values on line 8"),
+        "{}",
+        found[1].2
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

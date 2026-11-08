@@ -169,8 +169,10 @@ pub fn prepare_embedded(manifest: Option<&(String, PathBuf)>) -> Result<Plan, i3
     }
     let mut process_wide = Permissions::default();
     process_wide.add(&permissions);
+    let mut sandboxes = vec![Sandbox::new(permissions, policy.limits.clone())];
+    start_writers(&mut sandboxes)?;
     Ok(Plan {
-        sandboxes: vec![Sandbox::new(permissions, policy.limits.clone())],
+        sandboxes,
         process_wide,
         allow_weaker: policy.allow_weaker,
     })
@@ -235,10 +237,20 @@ pub fn prepare(files: &[PathBuf], options: &Options, loads_later: bool) -> Resul
     for warning in warnings {
         eprintln!("unio: warning: {warning}");
     }
+    start_writers(&mut sandboxes)?;
     Ok(Plan {
         sandboxes,
         process_wide,
         allow_weaker: options.allow_weaker || policy.allow_weaker,
+    })
+}
+
+/// Starts the writer processes that must start before any restriction applies (macOS, where
+/// Seatbelt restricts the whole process once), or stops with code 103.
+fn start_writers(sandboxes: &mut [Sandbox]) -> Result<(), i32> {
+    sandbox::start_writers(sandboxes).map_err(|refused| {
+        eprintln!("unio: {}", refused.0);
+        EXIT_SANDBOX
     })
 }
 

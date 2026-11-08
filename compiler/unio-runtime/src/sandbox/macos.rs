@@ -82,7 +82,7 @@ fn filter(scope: &Scope) -> String {
     }
 }
 
-/// The profile: everything is denied except what the permissions grant. Metadata stays
+/// The profile of a program: everything is denied except what the permissions grant. Metadata stays
 /// readable, because resolving a path reads the metadata of its parents; the runtime hides
 /// files outside the read scopes from `exists` and `is_directory`.
 pub fn profile(permissions: &Permissions) -> String {
@@ -95,25 +95,8 @@ pub fn profile(permissions: &Permissions) -> String {
     for scope in &permissions.read {
         p.push_str(&format!("(allow file-read* {})\n", filter(scope)));
     }
-    for scope in &permissions.write {
-        p.push_str(&format!("(allow file-write* {})\n", filter(scope)));
-        if !scope.subtree {
-            // The temporary files of the atomic commit protocol next to the target, and the
-            // directory itself, which is opened to sync it.
-            if let (Some(dir), Some(name)) = (scope.root.parent(), scope.root.file_name()) {
-                let pattern = format!(
-                    "^{}/\\.{}\\.unio-tmp-",
-                    regex_literal(&dir.to_string_lossy()),
-                    regex_literal(&name.to_string_lossy())
-                );
-                p.push_str(&format!("(allow file-write* (regex #\"{pattern}\"))\n"));
-                p.push_str(&format!(
-                    "(allow file-read-data (literal {}))\n",
-                    quoted(dir)
-                ));
-            }
-        }
-    }
+    // The write scopes grant nothing here: the program and its children write no file; the
+    // writer process writes for the program (docs/runtime.md 9.2, writer_profile).
     if !permissions.process.is_empty() {
         p.push_str("(allow process-fork)\n(allow signal (target same-sandbox))\n");
         p.push_str(
@@ -132,6 +115,55 @@ pub fn profile(permissions: &Permissions) -> String {
                 ));
             }
         }
+    }
+    p
+}
+
+/// Applies the profile of the writer process to it; it is a process of its own, so the profile
+/// of the program has not been applied to it.
+pub fn apply_writer(scopes: &[Scope]) -> Result<(), String> {
+    apply_rlimits(&Limits::default())?;
+    init(&writer_profile(scopes))
+}
+
+/// The profile of the writer process: it may write the write scopes, the temporary files of
+/// the atomic commit next to a scope of one file, and open the directories on the way to them,
+/// which it walks one component at a time; it reads no file, runs nothing, and has no network.
+pub fn writer_profile(scopes: &[Scope]) -> String {
+    let mut p = String::from(
+        "(version 1)\n(deny default)\n(allow file-read-metadata)\n(allow sysctl-read)\n",
+    );
+    let mut ancestors: Vec<&Path> = Vec::new();
+    for scope in scopes {
+        p.push_str(&format!(
+            "(allow file-read* file-write* {})\n",
+            filter(scope)
+        ));
+        let mut dir = scope.root.parent();
+        while let Some(d) = dir {
+            if !ancestors.contains(&d) {
+                ancestors.push(d);
+            }
+            dir = d.parent();
+        }
+        if !scope.subtree {
+            if let (Some(dir), Some(name)) = (scope.root.parent(), scope.root.file_name()) {
+                let pattern = format!(
+                    "^{}/\\.{}\\.unio-tmp-",
+                    regex_literal(&dir.to_string_lossy()),
+                    regex_literal(&name.to_string_lossy())
+                );
+                p.push_str(&format!(
+                    "(allow file-read* file-write* (regex #\"{pattern}\"))\n"
+                ));
+            }
+        }
+    }
+    for dir in ancestors {
+        p.push_str(&format!(
+            "(allow file-read-data (literal {}))\n",
+            quoted(dir)
+        ));
     }
     p
 }
@@ -159,9 +191,17 @@ mod tests {
         let p = profile(&permissions);
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read* (subpath \"/w\"))"));
-        assert!(p.contains("(allow file-write* (literal \"/h/a.json\"))"));
-        assert!(p.contains("\\.a\\.json\\.unio-tmp-"), "{p}");
+        assert!(
+            !p.contains("file-write"),
+            "the program writes no file itself: {p}"
+        );
         assert!(!p.contains("process-fork"));
+        let w = writer_profile(&permissions.write);
+        assert!(w.contains("(deny default)"));
+        assert!(w.contains("(allow file-read* file-write* (literal \"/h/a.json\"))"));
+        assert!(w.contains("\\.a\\.json\\.unio-tmp-"), "{w}");
+        assert!(w.contains("(allow file-read-data (literal \"/h\"))"), "{w}");
+        assert!(!w.contains("process-exec") && !w.contains("network"));
     }
 
     /// Seatbelt applies to the whole process, so it is tried in a child process: the test
@@ -208,7 +248,8 @@ mod tests {
         apply(&permissions, &Limits::default()).unwrap();
         assert!(std::fs::read_to_string(root.join("open/a.txt")).is_ok());
         assert!(std::fs::read_to_string(root.join("closed/b.txt")).is_err());
-        assert!(std::fs::write(root.join("open/out.txt"), "x").is_ok());
+        // The program writes no file itself; the writer process does (docs/runtime.md 9.2).
+        assert!(std::fs::write(root.join("open/out.txt"), "x").is_err());
         assert!(std::fs::write(root.join("closed/c.txt"), "x").is_err());
         assert!(std::net::TcpStream::connect("127.0.0.1:9").is_err());
         println!("seatbelt checks passed");

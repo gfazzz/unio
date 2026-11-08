@@ -61,7 +61,7 @@ pub const CODES: &[&str] = &[
     "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
     "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074", "E0075", "E0076",
     "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085", "E0045",
-    "E0046", "E0047", "E0048", "E0086",
+    "E0046", "E0047", "E0048", "E0086", "E0087",
 ];
 
 /// Codes of the name and type checks (sprint S3); their examples need the whole check.
@@ -70,7 +70,7 @@ pub const SEMANTIC_CODES: &[&str] = &[
     "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
     "E0066", "E0067", "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074",
     "E0075", "E0076", "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084",
-    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086",
+    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -549,6 +549,17 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
             "E0085",
             effect_not_permitted("files.read", ("main -> read_text", "main -> read_text")),
         ),
+        (
+            "E0087",
+            unproven_value_call(
+                "call",
+                "alloc",
+                (
+                    "call -> the values stored in the field Handler.run -> label",
+                    "call -> значения, записанные в поле Handler.run -> label",
+                ),
+            ),
+        ),
         ("E0050", is_name_not_bound("x")),
         ("E0065", operator_not_defined("+", "Point")),
         ("E0065", operands_differ("==", "Int", "Text")),
@@ -918,6 +929,12 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "import std.files\n\nfunction size(path as Path) returns Int fails with IoError:\n    return (try files.read_text(path)).length()\n",
             "function size(text as Text) returns Int:\n    return text.length()\n",
         ),
+        "E0087" => (
+            "A call through a function value whose possible values are only estimated, because the value was read from a field, a collection or a pattern, or came through a parameter that is kept or passed on, has the effects of every value the program may put there (RFC 0005). Under `--profile=core`, and in a module of the `core` layer, such a call must be shown to stay in core: one of its possible values needs a higher layer. Call a named function or a parameter instead, or keep only core functions in that place.",
+            "Вызов через значение-функцию, возможные значения которого известны лишь приближённо, потому что оно прочитано из поля, коллекции или образца или пришло через параметр, который сохраняют или передают дальше, имеет эффекты всех значений, которые программа может туда поместить (RFC 0005). При `--profile=core` и в модуле слоя `core` такой вызов должен оставаться в core: одно из его возможных значений требует более высокого слоя. Вызовите именованную функцию или параметр или храните в этом месте только функции core.",
+            "struct Handler:\n    run as Function[(Int) -> Int]\n\nfunction label(x as Int) returns Int:\n    return \"{x}\".length()\n\nfunction call(h as Handler) returns Int:\n    return h.run(1)\n\nfunction make() returns Handler:\n    return Handler(run = label)\n",
+            "struct Handler:\n    run as Function[(Int) -> Int]\n\nfunction double(x as Int) returns Int:\n    return x * 2\n\nfunction call(h as Handler) returns Int:\n    return h.run(1)\n\nfunction make() returns Handler:\n    return Handler(run = double)\n",
+        ),
         "E0045" => (
             "IEEE `Float` has no total order and no `Hash` (L-9, L-32): it cannot be a `Map` key or a `Set` element, and it does not meet `Order` or `Hash` of a generic parameter. Use its total order key `OrderedFloat`, made by `value.total_order()`, or sort with `sorted_by`.",
             "IEEE `Float` не имеет полного порядка и `Hash` (Я-9, Я-32): он не может быть ключом `Map` или элементом `Set` и не удовлетворяет `Order` или `Hash` обобщённого параметра. Используйте ключ полного порядка `OrderedFloat`, который даёт `value.total_order()`, или сортируйте через `sorted_by`.",
@@ -943,8 +960,8 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "let A as Int = 1\n",
         ),
         "E0086" => (
-            "An `external function` is a primitive of the runtime, so in release 0.1 it is declared only in an `unsafe module` of the standard library (S-7, S-10); elsewhere it would have no implementation to call. Write the function in Unio, or use the function of the standard library that provides it.",
-            "`external function` — примитив среды выполнения, поэтому в выпуске 0.1 он объявляется только в `unsafe module` стандартной библиотеки (Б-7, Б-10); в другом месте у него нет реализации, которую можно вызвать. Напишите функцию на Unio или используйте функцию стандартной библиотеки, которая её даёт.",
+            "An `external function` binds an implementation that is not written in Unio. In release 0.1 only the trusted standard library declares one, in its `unsafe module` files (S-7, RFC 0004); the library is trusted because the toolchain or its operator supplies it, not because of a name or a directory. The `unsafe module` marker of a package grants no right to external functions and no wider permissions. Write the function in Unio, or call the function of the standard library that provides it.",
+            "`external function` привязывает реализацию, написанную не на Unio. В выпуске 0.1 её объявляет только доверенная стандартная библиотека, в своих файлах `unsafe module` (Б-7, RFC 0004); библиотеке доверяют потому, что её поставляет инструментарий или его оператор, а не из-за имени или каталога. Пометка `unsafe module` в пакете не даёт права на внешние функции и не расширяет полномочия. Напишите функцию на Unio или вызовите функцию стандартной библиотеки, которая её даёт.",
             "unsafe module\n\nexternal function poke(address as Int) returns Int\n",
             "function poke(address as Int) returns Int:\n    return address\n",
         ),
@@ -1470,6 +1487,15 @@ pub fn layer_allocation(what: crate::effects::Allocation, here: &str) -> Msg {
     )
 }
 
+/// E0087: a call through a function value whose possible values are estimated (RFC 0005).
+pub fn unproven_value_call(name: &str, needed: &str, chain: (&str, &str)) -> Msg {
+    let (en, ru) = chain;
+    Msg::new(
+        format!("'{name}' calls a value that may be a function needing the layer {needed}: {en}; call a known function or keep only core functions there"),
+        format!("'{name}' вызывает значение, которое может быть функцией, требующей слоя {needed}: {ru}; вызовите известную функцию или храните там только функции core"),
+    )
+}
+
 pub fn effect_not_permitted(effect: &str, chain: (&str, &str)) -> Msg {
     let (en, ru) = chain;
     Msg::new(
@@ -1562,7 +1588,8 @@ pub fn dependency_missing(alias: &str, declared: bool) -> Msg {
     }
 }
 
-/// E0086: an external function outside an unsafe module of the standard library.
+/// E0086: an external function outside an unsafe module of the trusted standard library
+/// (S-7, RFC 0004).
 pub fn external_outside_stdlib(name: &str, stdlib: bool) -> Msg {
     if stdlib {
         Msg::new(
@@ -1571,8 +1598,8 @@ pub fn external_outside_stdlib(name: &str, stdlib: bool) -> Msg {
         )
     } else {
         Msg::new(
-            format!("the external function '{name}' has no implementation: only the standard library declares external functions"),
-            format!("у внешней функции '{name}' нет реализации: внешние функции объявляет только стандартная библиотека"),
+            format!("the external function '{name}' is not allowed here: in release 0.1 only the trusted standard library declares external functions"),
+            format!("внешняя функция '{name}' здесь не допускается: в выпуске 0.1 внешние функции объявляет только доверенная стандартная библиотека"),
         )
     }
 }

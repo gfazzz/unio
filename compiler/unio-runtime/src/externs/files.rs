@@ -2,6 +2,12 @@
 //! renaming without replacing, and the system calls of the atomic commit protocol of
 //! `AtomicFile`, which `stdlib/std/files.unio` drives step by step.
 //!
+//! In a sandbox on Linux and macOS every write-class operation goes to the writer process of
+//! the sandbox (`sandbox/writer.rs`, docs/runtime.md 9.2), which checks the write scopes again
+//! and works relative to a directory it opened without following links: the program itself has
+//! no right to write files. The runtime check comes first in both cases, so a denied operation
+//! reports the same error. Without a sandbox, and on Windows, the operations run here.
+//!
 //! Descriptors are numbers in a table of the runtime. `system_close` removes the descriptor
 //! from the table before the operating system reports the result of closing it, so a released
 //! descriptor is never closed again even when closing fails.
@@ -79,6 +85,33 @@ fn permit_write(p: &Text) -> Result<(), Unwind> {
         "files.write",
         p.as_str(),
     )
+}
+
+/// The error of an operation the writer did not do, reported for the path of the program.
+#[cfg(unix)]
+fn writer_error(p: &str, failure: crate::sandbox::writer::Failure) -> Unwind {
+    use crate::sandbox::writer::Failure;
+    match failure {
+        Failure::Refused(reason) => io_error(p, "PermissionDenied", reason),
+        Failure::Os(0, reason) => io_error(p, "Other", reason),
+        Failure::Os(errno, _) => os_error(p, &std::io::Error::from_raw_os_error(errno)),
+        other => io_error(p, "Other", other.to_string()),
+    }
+}
+
+/// The path the writer is asked about (see [`crate::sandbox::writer::target_path`]).
+#[cfg(unix)]
+fn writer_path(p: &str) -> Result<PathBuf, Unwind> {
+    crate::sandbox::writer::target_path(p)
+        .ok_or_else(|| io_error(p, "InvalidInput", "the path does not name a file"))
+}
+
+/// Runs `f` with the writer of the sandbox, if the program has one.
+#[cfg(unix)]
+fn through_writer<R>(
+    f: impl FnOnce(&crate::sandbox::writer::Session) -> Result<R, Unwind>,
+) -> Option<Result<R, Unwind>> {
+    crate::sandbox::with_writer(f)
 }
 
 /// Whether the path exists and is accessible.
@@ -243,6 +276,15 @@ fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let target = path(runtime, arguments, 1)?;
     permit_write(&source)?;
     permit_write(&target)?;
+    #[cfg(unix)]
+    if let Some(done) = through_writer(|w| {
+        let (from, to) = (writer_path(source.as_str())?, writer_path(target.as_str())?);
+        w.handle()
+            .rename(&from, &to)
+            .map_err(|f| writer_error(target.as_str(), f))
+    }) {
+        return done.map(|()| Value::Unit);
+    }
     rename_without_replacing(&native(&source), &native(&target))
         .map_err(|e| os_error(target.as_str(), &e))?;
     Ok(Value::Unit)
@@ -389,13 +431,32 @@ fn no_exclusive_rename(error: &std::io::Error) -> bool {
 fn create_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     permit_write(&p)?;
+    #[cfg(unix)]
+    if let Some(done) = through_writer(|w| {
+        w.handle()
+            .make_directory(&writer_path(p.as_str())?)
+            .map_err(|f| writer_error(p.as_str(), f))
+    }) {
+        return done.map(|()| Value::Unit);
+    }
     fs::create_dir(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::Unit)
 }
 
-/// Whether the file system that holds the path keeps the guarantees of S-9 (S-9a).
+/// Whether the file system that holds the path keeps the guarantees of S-9 (S-9a). In a
+/// sandbox the writer answers for a target it may write, since it is the one that writes it and
+/// the program may not read the table of mounts.
 fn system_supports_durability(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    #[cfg(unix)]
+    if crate::sandbox::may_write(p.as_str()) {
+        if let Some(answer) = through_writer(|w| {
+            let target = writer_path(p.as_str())?;
+            Ok(w.handle().durable(&target).unwrap_or(false))
+        }) {
+            return answer.map(Value::Bool);
+        }
+    }
     Ok(Value::Bool(super::durability::supports_durability(
         &native(&p),
     )))
@@ -405,6 +466,21 @@ fn system_supports_durability(runtime: &mut Runtime, arguments: &mut [Value]) ->
 fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let target = path(runtime, arguments, 0)?;
     permit_write(&target)?;
+    #[cfg(unix)]
+    if let Some(opened) = through_writer(|w| {
+        w.open(&writer_path(target.as_str())?)
+            .map_err(|f| writer_error(target.as_str(), f))
+    }) {
+        let (temporary, file) = opened?;
+        let descriptor = runtime.add_descriptor(file);
+        return Ok(Value::record(
+            "TemporaryFile",
+            vec![
+                ("descriptor", Value::Int(descriptor)),
+                ("path", Value::path(path_text(&temporary))),
+            ],
+        ));
+    }
     let target_path = native(&target);
     let directory = match target_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -531,6 +607,13 @@ fn system_rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     if runtime.fails_at(FailPoint::Rename) {
         return Err(injected(target.as_str()));
     }
+    #[cfg(unix)]
+    if let Some(done) = through_writer(|w| {
+        w.commit(temporary.as_str(), &writer_path(target.as_str())?)
+            .map_err(|f| writer_error(target.as_str(), f))
+    }) {
+        return done.map(|()| Value::Unit);
+    }
     replace(&native(&temporary), &native(&target)).map_err(|e| os_error(target.as_str(), &e))?;
     Ok(Value::Unit)
 }
@@ -570,6 +653,14 @@ fn system_sync_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
     )?;
     if runtime.fails_at(FailPoint::SyncDirectory) {
         return Err(injected(directory.as_str()));
+    }
+    #[cfg(unix)]
+    if let Some(done) = through_writer(|w| {
+        let dir = crate::sandbox::resolve(&crate::sandbox::absolute(&native(&directory)));
+        w.sync_directory(&dir)
+            .map_err(|f| writer_error(directory.as_str(), f))
+    }) {
+        return done.map(|()| Value::Unit);
     }
     sync_directory(&native(&directory)).map_err(|e| os_error(directory.as_str(), &e))?;
     Ok(Value::Unit)
@@ -613,6 +704,15 @@ fn sync_directory(_: &Path) -> std::io::Result<()> {
 /// Removes the file; errors are ignored.
 fn system_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
+    #[cfg(unix)]
+    if through_writer(|w| {
+        w.abort(p.as_str());
+        Ok(())
+    })
+    .is_some()
+    {
+        return Ok(Value::Unit);
+    }
     if crate::sandbox::may_write_temporary(p.as_str()) {
         let _ = fs::remove_file(native(&p));
     }

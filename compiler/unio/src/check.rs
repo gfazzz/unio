@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{self, ExprKind, PatternKind, StatementKind};
 use crate::catalog;
 use crate::diag::{Diagnostic, Fix, Span};
-use crate::effects::{Allocation, Link, Site};
+use crate::effects::{self, Allocation, Atom, Callee, Flow, Holder, LambdaFact, Site, Use};
 use crate::program::{
     closest, CallEdge, ConstId, DefKind, FnId, ModId, Owner, Program, Symbol, LAYER_NAMES,
 };
@@ -55,6 +55,9 @@ struct Local {
     /// Set when an expression names the local; a `let` of a required result that is never
     /// read is E0043 (L-30).
     read: std::cell::Cell<bool>,
+    /// The values the local may hold, an index into `Facts::locals` (RFC 0005); None for a
+    /// name bound by a pattern or a loop, whose value is not followed.
+    flow: Option<usize>,
 }
 
 /// Where a place that is changed starts (L-11).
@@ -114,6 +117,18 @@ fn has_break(block: &ast::Block) -> bool {
     })
 }
 
+/// Whether a condition binds names with `is`, which its branches see and an expression read
+/// after it does not (RFC 0005).
+fn mentions_is(e: &ast::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Is { .. } => true,
+        ExprKind::Paren(inner) => mentions_is(inner),
+        ExprKind::Binary { left, right, .. } => mentions_is(left) || mentions_is(right),
+        ExprKind::Unary { operand, .. } => mentions_is(operand),
+        _ => false,
+    }
+}
+
 /// Whether an expression statement is a call, whose result must not be dropped (E0043).
 fn is_call(e: &ast::Expr) -> bool {
     match &strip(e).kind {
@@ -147,8 +162,12 @@ pub fn check_program(program: &mut Program) {
         let value = c.value.clone();
         let annotated = program.consts[id].annotated.clone();
         let mut checker = Checker::new(program, &known, &const_types, module);
-        checker.holder = Some(Node::Const(id));
+        checker.holder = Some(Holder::Const(id));
         let ty = checker.expr(&value, annotated.as_ref().unwrap_or(&Ty::Unknown));
+        let flow = checker.value_of(&value, annotated.as_ref().unwrap_or(&ty));
+        if !flow.is_empty() {
+            checker.p.effect_facts.consts.insert(id, flow);
+        }
         if let Some(expected) = &annotated {
             checker.expect(&ty, expected, value.span);
         } else if is_undetermined(&value) {
@@ -346,7 +365,9 @@ fn externals(program: &mut Program) {
 /// (semantics 8.4). Their diagnostics are left out: the checks of defaults are not part of
 /// docs/semantics.md yet.
 fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId, Ty>) {
-    let mut work: Vec<(ModId, Node, Vec<ast::Expr>)> = Vec::new();
+    // Each default with the parameter or the field it is for.
+    type Defaults = Vec<(Slot, ast::Expr)>;
+    let mut work: Vec<(ModId, Node, Defaults)> = Vec::new();
     // The signatures of each module by the place of their names, as functions record them.
     let mut signatures: HashMap<(ModId, usize), &ast::Signature> = HashMap::new();
     for (m, module) in program.modules.iter().enumerate() {
@@ -381,15 +402,17 @@ fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId,
         let Some(sig) = signatures.get(&(def.module, def.span.start.offset)) else {
             continue;
         };
-        let exprs: Vec<ast::Expr> = sig
+        let exprs: Vec<(Slot, ast::Expr)> = sig
             .params
             .iter()
             .filter_map(|p| match p {
                 ast::Param::Named { default, .. } | ast::Param::Plain { default, .. } => {
-                    default.clone()
+                    Some(default.clone())
                 }
                 ast::Param::SelfParam { .. } => None,
             })
+            .enumerate()
+            .filter_map(|(i, default)| Some((Slot::Param(f, i), default?)))
             .collect();
         if !exprs.is_empty() {
             work.push((def.module, Node::Func(f), exprs));
@@ -397,7 +420,7 @@ fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId,
     }
     for (d, def) in program.defs.iter().enumerate() {
         let module = def.module;
-        let exprs: Vec<ast::Expr> = program.modules[module]
+        let exprs: Vec<(Slot, ast::Expr)> = program.modules[module]
             .analysis
             .file
             .items
@@ -411,7 +434,10 @@ fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId,
                 _ => None,
             })
             .flatten()
-            .filter_map(|field| field.default.clone())
+            .filter_map(|field| {
+                let slot = Slot::Field(d, field.name.text.clone());
+                Some((slot, field.default.clone()?))
+            })
             .collect();
         if !exprs.is_empty() {
             work.push((module, Node::Def(d), exprs));
@@ -420,13 +446,35 @@ fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId,
     for (module, holder, exprs) in work {
         let before = program.diagnostics.len();
         let mut checker = Checker::new(program, known, const_types, module);
-        checker.holder = Some(holder);
+        checker.holder = Some(Holder::from(holder));
         checker.scopes.push(Vec::new());
-        for e in &exprs {
-            checker.expr(e, &Ty::Unknown);
+        for (slot, e) in &exprs {
+            let ty = checker.expr(e, &Ty::Unknown);
+            let flow = checker.value_of(e, &ty);
+            if flow.is_empty() {
+                continue;
+            }
+            match slot {
+                Slot::Param(f, i) => {
+                    checker.p.effect_facts.defaults.insert((*f, *i), flow);
+                }
+                Slot::Field(d, name) => checker
+                    .p
+                    .effect_facts
+                    .stores
+                    .entry((*d, name.clone()))
+                    .or_default()
+                    .extend(flow),
+            }
         }
         program.diagnostics.truncate(before);
     }
+}
+
+/// What a default is for: a parameter of a function, or a field of a type.
+enum Slot {
+    Param(FnId, usize),
+    Field(DefId, String),
 }
 
 fn prelude_def(program: &Program, name: &str) -> Option<DefId> {
@@ -485,7 +533,15 @@ struct Checker<'a> {
     captures: Vec<(usize, bool)>,
     /// What has the effects of the code checked outside a function: a constant or the field
     /// defaults of a type.
-    holder: Option<Node>,
+    holder: Option<Holder>,
+    /// The lambdas being checked, innermost last, as indexes into `Facts::lambdas`.
+    lambda_stack: Vec<usize>,
+    /// Each lambda checked, by its place, for the flows of function values (RFC 0005).
+    lambda_ids: HashMap<(usize, usize), usize>,
+    /// The struct or error of each field read, by the place of the read.
+    field_owner: HashMap<(usize, usize), DefId>,
+    /// The flows of the arguments of the last call checked, by parameter.
+    last_args: Vec<(usize, Flow)>,
     self_var: bool,
     /// Expressions where a resource may be created (E0080).
     creation_ok: HashSet<(usize, usize)>,
@@ -532,6 +588,10 @@ impl<'a> Checker<'a> {
             lambda_floor: 0,
             captures: Vec::new(),
             holder: None,
+            lambda_stack: Vec::new(),
+            lambda_ids: HashMap::new(),
+            field_owner: HashMap::new(),
+            last_args: Vec::new(),
             self_var: false,
             creation_ok: HashSet::new(),
             use_ok: HashSet::new(),
@@ -590,19 +650,22 @@ impl<'a> Checker<'a> {
         self.ret = subst(&ret);
         self.fn_fails = fails.iter().map(&subst).collect();
         self.scopes.push(Vec::new());
-        for (name, ty, _, var) in params {
+        for (i, (name, ty, _, var)) in params.into_iter().enumerate() {
             let ty = subst(&ty);
             let kind = if var {
                 LocalKind::VarParam
             } else {
                 LocalKind::Param
             };
+            // A parameter holds what each call passes (RFC 0005).
+            let flow = self.new_flow(vec![Atom::Param(Holder::Func(f), i)]);
             self.scopes.last_mut().unwrap().push(Local {
                 name,
                 ty,
                 kind,
                 span: Span::default(),
                 read: std::cell::Cell::new(true),
+                flow: Some(flow),
             });
         }
         let completes = self.block(block);
@@ -648,6 +711,11 @@ impl<'a> Checker<'a> {
     }
 
     fn bind_kind(&mut self, name: &str, ty: Ty, span: Span, kind: LocalKind) {
+        self.bind_flow(name, ty, span, kind, None);
+    }
+
+    /// Binds a local name whose values are followed when `flow` is given (RFC 0005).
+    fn bind_flow(&mut self, name: &str, ty: Ty, span: Span, kind: LocalKind, flow: Option<usize>) {
         if name == "_" {
             return;
         }
@@ -661,6 +729,7 @@ impl<'a> Checker<'a> {
             kind,
             span,
             read: std::cell::Cell::new(false),
+            flow,
         });
     }
 
@@ -908,7 +977,9 @@ impl<'a> Checker<'a> {
                 } else {
                     LocalKind::Let
                 };
-                self.bind_kind(&name.text, ty, name.span, kind);
+                let values = self.value_of(value, &ty);
+                let flow = self.new_flow(values);
+                self.bind_flow(&name.text, ty, name.span, kind, Some(flow));
                 !never
             }
             ast::Simple::Assign { target, value } => {
@@ -917,6 +988,7 @@ impl<'a> Checker<'a> {
                 let found = self.expr(value, &expected);
                 self.inline_handler(value, handler, span);
                 self.expect(&found, &expected, value.span);
+                self.assigned(target, value, &expected);
                 !self.is_never(&found)
             }
             ast::Simple::Return(value) => {
@@ -928,6 +1000,7 @@ impl<'a> Checker<'a> {
                         }
                         let found = self.expr(v, &ret);
                         self.inline_handler(v, handler, span);
+                        self.returned(v, &found);
                         if ret == Ty::Unit {
                             self.err("E0061", v.span, catalog::returns_nothing());
                         } else {
@@ -1482,8 +1555,19 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ calls, layers and effects
 
-    /// Records a call for the call graph, `unio symbol`, and the layer rule (E0084).
-    fn record_call(&mut self, f: FnId, span: Span) {
+    /// Records a call for the call graph, `unio symbol`, the effects with the flows of its
+    /// arguments (RFC 0005), and the layer rule (E0084).
+    fn record_call(&mut self, f: FnId, span: Span, args: Vec<(usize, Flow)>) {
+        if self.silent > 0 {
+            return;
+        }
+        self.record_reference(f, span);
+        self.add_use(Callee::Holder(Holder::Func(f)), args, span);
+    }
+
+    /// Records that a function is named, called or not: `unio symbol`, the content hashes and
+    /// the layer rule. Naming a function as a value has none of its effects (RFC 0005).
+    fn record_reference(&mut self, f: FnId, span: Span) {
         if self.silent > 0 {
             return;
         }
@@ -1495,8 +1579,6 @@ impl<'a> Checker<'a> {
                 module: self.module,
                 span,
             });
-        } else if self.holder.is_some() {
-            self.link(Node::Func(f), span);
         }
         let callee_module = self.p.funcs[f].module;
         if let (Some(here), Some(there)) = (
@@ -1514,28 +1596,186 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// What has the effects of the code being checked: the function, or the constant or type
-    /// whose initializer or field defaults are checked. A test has none.
-    fn effect_holder(&self) -> Option<Node> {
-        self.current_fn.map(Node::Func).or(self.holder)
+    /// What has the effects of the code being checked: the innermost lambda, the function, or
+    /// the constant or type whose initializer or field defaults are checked. A test has none,
+    /// but a lambda in a test has its own.
+    fn effect_holder(&self) -> Option<Holder> {
+        if let Some(&l) = self.lambda_stack.last() {
+            return Some(Holder::Lambda(l));
+        }
+        self.current_fn.map(Holder::Func).or(self.holder)
+    }
+
+    fn add_use(&mut self, callee: Callee, args: Vec<(usize, Flow)>, span: Span) {
+        if self.silent > 0 {
+            return;
+        }
+        let Some(from) = self.effect_holder() else {
+            return;
+        };
+        if matches!(&callee, Callee::Holder(h) if *h == from) && args.is_empty() {
+            return;
+        }
+        self.p.effect_facts.uses.push(Use {
+            from,
+            callee,
+            args,
+            module: self.module,
+            span,
+        });
     }
 
     /// A use that is not a recorded call: an implicit call through an interface, or a use of
     /// a constant or of field defaults (semantics 8.4).
     fn link(&mut self, to: Node, span: Span) {
+        self.add_use(Callee::Holder(Holder::from(to)), Vec::new(), span);
+    }
+
+    /// A local whose values are followed, holding the given values first (RFC 0005).
+    fn new_flow(&mut self, flow: Flow) -> usize {
+        self.p.effect_facts.locals.push(flow);
+        self.p.effect_facts.locals.len() - 1
+    }
+
+    /// The local a name refers to, with the index of its values if they are followed.
+    fn local_flow(&self, name: &str) -> Option<Option<usize>> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(local) = scope.iter().rev().find(|l| l.name == name) {
+                return Some(local.flow);
+            }
+        }
+        None
+    }
+
+    /// The function values an expression of type `ty` may be, as far as its form shows them
+    /// (RFC 0005). An expression whose values are not followed is any value of its type.
+    fn value_of(&mut self, e: &ast::Expr, ty: &Ty) -> Flow {
+        let ty = self.resolved(ty);
+        if !effects::may_hold_function(&ty) {
+            return Vec::new();
+        }
+        let unknown = vec![Atom::Top(ty.clone())];
+        match &e.kind {
+            ExprKind::Paren(inner) => self.value_of(inner, &ty),
+            ExprKind::Try { operand, .. } => self.value_of(operand, &ty),
+            ExprKind::Name(n) => match self.local_flow(n) {
+                Some(Some(id)) => vec![Atom::Local(id)],
+                Some(None) => unknown,
+                None => match self.p.lookup(self.module, n) {
+                    Some((_, Symbol::Func(f))) => vec![Atom::Fn(f)],
+                    Some((_, Symbol::Const(c))) => vec![Atom::Const(c)],
+                    _ => unknown,
+                },
+            },
+            ExprKind::Field { target, name } => {
+                if let Some(m) = self.module_ref(target) {
+                    return match self.p.modules[m].symbols.get(&name.text) {
+                        Some(Symbol::Func(f)) => vec![Atom::Fn(*f)],
+                        Some(Symbol::Const(c)) => vec![Atom::Const(*c)],
+                        _ => unknown,
+                    };
+                }
+                match self.field_owner.get(&span_key(e.span)) {
+                    Some(&d) => vec![Atom::Field(d, name.text.clone())],
+                    None => unknown,
+                }
+            }
+            ExprKind::Lambda { .. } => match self.lambda_ids.get(&span_key(e.span)) {
+                Some(&l) => vec![Atom::Lambda(l)],
+                None => unknown,
+            },
+            ExprKind::Conditional {
+                then,
+                condition,
+                otherwise,
+            } if !mentions_is(condition) => {
+                let mut flow = self.value_of(then, &ty);
+                flow.extend(self.value_of(otherwise, &ty));
+                flow
+            }
+            ExprKind::Call { callee, .. } | ExprKind::GenericCall { callee, .. } => {
+                match self.named_function(callee) {
+                    Some(f) if matches!(self.p.funcs[f].ret, Ty::Func(_)) => vec![Atom::Ret(f)],
+                    _ => unknown,
+                }
+            }
+            _ => unknown,
+        }
+    }
+
+    /// The function a callee names, if it names one: `f` or `alias.f`.
+    fn named_function(&mut self, callee: &ast::Expr) -> Option<FnId> {
+        match &callee.kind {
+            ExprKind::Name(n) if self.local_flow(n).is_none() => {
+                match self.p.lookup(self.module, n) {
+                    Some((_, Symbol::Func(f))) => Some(f),
+                    _ => None,
+                }
+            }
+            ExprKind::Field { target, name } => {
+                let m = self.module_ref(target)?;
+                match self.p.modules[m].symbols.get(&name.text) {
+                    Some(Symbol::Func(f)) => Some(*f),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// An assignment: the local or the field gets the values of the expression (RFC 0005).
+    fn assigned(&mut self, target: &ast::Expr, value: &ast::Expr, ty: &Ty) {
         if self.silent > 0 {
             return;
         }
-        if let Some(from) = self.effect_holder() {
-            if from != to {
-                self.p.effect_facts.links.push(Link {
-                    from,
-                    to,
-                    module: self.module,
-                    span,
-                });
-            }
+        let flow = self.value_of(value, ty);
+        if flow.is_empty() {
+            return;
         }
+        match &strip(target).kind {
+            ExprKind::Name(n) => {
+                if let Some(Some(id)) = self.local_flow(n) {
+                    self.p.effect_facts.locals[id].extend(flow);
+                }
+            }
+            ExprKind::Field { name, .. } => {
+                if let Some(&d) = self.field_owner.get(&span_key(strip(target).span)) {
+                    self.store(d, &name.text, flow);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A value stored in a field of a struct or error (RFC 0005).
+    fn store(&mut self, d: DefId, field: &str, flow: Flow) {
+        if self.silent > 0 || flow.is_empty() {
+            return;
+        }
+        self.p
+            .effect_facts
+            .stores
+            .entry((d, field.to_string()))
+            .or_default()
+            .extend(flow);
+    }
+
+    /// A value a function returns (RFC 0005).
+    fn returned(&mut self, value: &ast::Expr, ty: &Ty) {
+        if self.silent > 0 || !self.lambda_stack.is_empty() {
+            return;
+        }
+        let Some(f) = self.current_fn else { return };
+        if !matches!(self.p.funcs[f].ret, Ty::Func(_)) {
+            return;
+        }
+        let flow = self.value_of(value, ty);
+        self.p
+            .effect_facts
+            .returns
+            .entry(f)
+            .or_default()
+            .extend(flow);
     }
 
     /// An expression that allocates: `allocates` and the layer `alloc` for what holds it, and
@@ -2295,13 +2535,29 @@ impl<'a> Checker<'a> {
                 self.use_ok.insert(span_key(arg.value.span));
             }
         }
+        let mut flows = Vec::new();
         for i in order {
             let Some(arg) = assigned[i] else { continue };
             let expected_arg = self.resolved_keep(&params[i].ty);
             let found = self.expr(&arg.value, &expected_arg);
             self.unify(&found, &params[i].ty);
             self.expect(&found, &params[i].ty, arg.value.span);
+            // The values an argument may be, for the latent effects of the callee (RFC 0005).
+            let flow = self.value_of(&arg.value, &found);
+            if !flow.is_empty() {
+                if params[i].var {
+                    // A var parameter may give the caller's name any value of its type.
+                    if let ExprKind::Name(n) = &strip(&arg.value).kind {
+                        if let Some(Some(id)) = self.local_flow(n) {
+                            let ty = self.resolved(&found);
+                            self.p.effect_facts.locals[id].push(Atom::Top(ty));
+                        }
+                    }
+                }
+                flows.push((i, flow));
+            }
         }
+        self.last_args = flows;
         self.resolved(&ret)
     }
 
@@ -2375,7 +2631,8 @@ impl<'a> Checker<'a> {
             .map(|t| t.subst(&subst, self_ty.as_ref()))
             .collect();
         let result = self.call(params, ret, args, span, expected);
-        self.record_call(f, span);
+        let flows = std::mem::take(&mut self.last_args);
+        self.record_call(f, span, flows);
         self.fallible_call(fails, span);
         if self.silent == 0 && !subst.is_empty() {
             let types = subst.iter().map(|(g, t)| (*g, self.resolved(t))).collect();
@@ -2483,6 +2740,8 @@ impl<'a> Checker<'a> {
                     let found = self.expr(&arg.value, &expected_field);
                     self.unify(&found, &ty);
                     self.expect(&found, &ty, arg.value.span);
+                    let flow = self.value_of(&arg.value, &found);
+                    self.store(def, &name.text, flow);
                 }
                 None => {
                     self.err(
@@ -2618,7 +2877,11 @@ impl<'a> Checker<'a> {
     fn symbol_type(&mut self, owner: ModId, symbol: Symbol, span: Span) -> Ty {
         match symbol {
             Symbol::Func(f) => {
-                self.record_call(f, span);
+                // Naming a function makes a value; its body runs where the value is called.
+                self.record_reference(f, span);
+                if self.silent == 0 {
+                    self.p.effect_facts.named.push(f);
+                }
                 let def = &self.p.funcs[f];
                 let generics = def.generics.clone();
                 let subst: HashMap<ParamId, Ty> =
@@ -3088,19 +3351,44 @@ impl<'a> Checker<'a> {
         let saved_loops = std::mem::replace(&mut self.loops, 0);
         let saved_floor = std::mem::replace(&mut self.lambda_floor, self.scopes.len());
         self.captures.push((self.scopes.len(), false));
+        // The body is a holder of its own: its effects count where the lambda is called
+        // (RFC 0005).
+        let id = (self.silent == 0).then(|| {
+            let parent = self.effect_holder();
+            let lambda_params = params
+                .iter()
+                .zip(&types)
+                .map(|(p, (_, t))| (p.name.text.clone(), self.resolved(t)))
+                .collect();
+            self.p.effect_facts.lambdas.push(LambdaFact {
+                parent,
+                module: self.module,
+                span,
+                params: lambda_params,
+                ty: Ty::Unknown,
+            });
+            let id = self.p.effect_facts.lambdas.len() - 1;
+            self.lambda_ids.insert(span_key(span), id);
+            self.lambda_stack.push(id);
+            id
+        });
         self.push();
-        for (p, (_, t)) in params.iter().zip(&types) {
+        for (i, (p, (_, t))) in params.iter().zip(&types).enumerate() {
             let t = if matches!(t, Ty::Var(_)) {
                 Ty::Unknown
             } else {
                 t.clone()
             };
-            self.bind(&p.name.text, t, p.name.span);
+            let flow = id.map(|l| self.new_flow(vec![Atom::Param(Holder::Lambda(l), i)]));
+            self.bind_flow(&p.name.text, t, p.name.span, LocalKind::Let, flow);
         }
         let saved = std::mem::replace(&mut self.ret, ret.clone());
         let found = self.expr(body, &ret);
         self.ret = saved;
         self.pop();
+        if id.is_some() {
+            self.lambda_stack.pop();
+        }
         self.fn_fails = saved_fails;
         self.try_frames = saved_frames;
         self.handlers = saved_handlers;
@@ -3120,11 +3408,15 @@ impl<'a> Checker<'a> {
         } else {
             found
         };
-        Ty::Func(Box::new(FnTy {
+        let ty = Ty::Func(Box::new(FnTy {
             params: types,
             ret,
             fails: lambda_fails,
-        }))
+        }));
+        if let Some(l) = id {
+            self.p.effect_facts.lambdas[l].ty = self.resolved(&ty);
+        }
+        ty
     }
 
     fn binary(
@@ -3365,6 +3657,9 @@ impl<'a> Checker<'a> {
         }
         self.use_ok.insert(span_key(target.span));
         let t = self.expr(target, &Ty::Unknown);
+        if let Ty::Named(d, _) = self.resolved(&t) {
+            self.field_owner.insert(span_key(span), d);
+        }
         self.field_of(&t, name)
     }
 
@@ -3406,7 +3701,8 @@ impl<'a> Checker<'a> {
                     }
                     _ => {
                         let t = self.expr(callee, &Ty::Unknown);
-                        self.call_value(&t, args, span, expected, callee.span)
+                        let flow = self.value_of(callee, &t);
+                        self.call_value(&t, flow, args, span, expected, callee.span)
                     }
                 }
             }
@@ -3438,7 +3734,8 @@ impl<'a> Checker<'a> {
                         }
                         _ => {
                             let t = self.field(target, name, span, &Ty::Unknown);
-                            self.call_value(&t, args, span, expected, callee.span)
+                            let flow = self.value_of(callee, &t);
+                            self.call_value(&t, flow, args, span, expected, callee.span)
                         }
                     };
                 }
@@ -3530,7 +3827,8 @@ impl<'a> Checker<'a> {
                     };
                     if has_field {
                         let t = self.field_of(&recv, name);
-                        return self.call_value(&t, args, span, expected, callee.span);
+                        let flow = vec![Atom::Field(*d, name.text.clone())];
+                        return self.call_value(&t, flow, args, span, expected, callee.span);
                     }
                 }
                 let shown = self.p.show(&recv);
@@ -3593,14 +3891,18 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 let t = self.expr(callee, &Ty::Unknown);
-                self.call_value(&t, args, span, expected, callee.span)
+                let flow = self.value_of(callee, &t);
+                self.call_value(&t, flow, args, span, expected, callee.span)
             }
         }
     }
 
+    /// A call through a function value: it has the effects of the values `flow` may be
+    /// (RFC 0005).
     fn call_value(
         &mut self,
         t: &Ty,
+        flow: Flow,
         args: &[ast::Argument],
         span: Span,
         expected: &Ty,
@@ -3610,6 +3912,8 @@ impl<'a> Checker<'a> {
             Ty::Func(f) => {
                 let params = Checker::value_params(&f);
                 let result = self.call(params, f.ret.clone(), args, span, expected);
+                let flows = std::mem::take(&mut self.last_args);
+                self.add_use(Callee::Value(flow), flows, span);
                 self.fallible_call(f.fails.clone(), span);
                 result
             }

@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.15 (draft). Changes from 0.14: section 10 keeps the Python checkers as the reference for parity and benchmarks, as concept section 1.1 and plan section 12 already say; the status of every requirement is tracked in `docs/status.md`. No requirement changes.
+Specification version: 0.16 (draft). Changes from 0.15: RFC 0004 separates the `unsafe module` marker from the `external function`, which binds an implementation not written in Unio. S-7 allows external functions in 0.1 only in the trusted standard library, trusted by its origin rather than by a name or a directory; T-6 and T-9 state that the marker of a package lists the module for review and grants neither external functions nor permissions. Diagnostic E0086 has this meaning; E0070 stays reserved.
+
+Changes from 0.14: section 10 keeps the Python checkers as the reference for parity and benchmarks, as concept section 1.1 and plan section 12 already say; the status of every requirement is tracked in `docs/status.md`. No requirement changes.
 
 Changes from 0.13: section 7.1 measures native executables against Go in time and peak memory (RFC 0003).
 
@@ -224,7 +226,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-4. `std.args`: positional arguments, flags, defaults, automatic help.
 - S-5. `std.json`: parse to a value, convert public transport structs from declarations without annotations; never bypass private fields. Strict rules and limits are in S-17.
 - S-6. `std.process`: run a program with arguments, capture output, exit code, timeout.
-- S-7. Unsafe code (`external function`) is allowed only in the standard library and passes a separate reliability review (section 7.3).
+- S-7. Unsafe code is the `external function`, which binds an implementation not written in Unio. In release 0.1 it is allowed only in `unsafe module` files of the trusted standard library and passes a separate reliability review (section 7.3). The trusted standard library is the one the toolchain selects by its origin: the copy embedded in an executable by `unio build`, the directory in `UNIO_STDLIB` set by the operator, or the library shipped with the toolchain. A directory, a module path, or the name of a package never makes its modules part of it, nor does the marker (RFC 0004). An `external function` anywhere else, including an `unsafe module` of a package, is E0086. Foreign functions in user code need a separate RFC; E0070 stays reserved.
 - S-8. Every standard-library operation blocked by the sandbox reports it through its declared error type (SB-6). A function that reports absence instead of an error (`files.exists`, `env.get`) reports a blocked object as absent.
 - S-9. Writing in `std.files` replaces the target through a temporary file in the same directory. Three guarantees are stated separately:
   1. Atomic replacement: a reader sees either the old or the new complete content, never a partly written file, however the program ends (normally, by fault, by memory exhaustion, or by a kill signal).
@@ -283,7 +285,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 6.4 Packages
 
-- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions, list of `unsafe module`. Permissions are scoped: `files.read` and `files.write` are lists of paths with the placeholders `$HOME`, `$CWD`, `$TEMP` and the suffix `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. Example:
+- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions, list of `unsafe module`. Permissions are scoped: `files.read` and `files.write` are lists of paths with the placeholders `$HOME`, `$CWD`, `$TEMP` and the suffix `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. The list of `unsafe module` names exactly the modules of the package that carry the marker. In a package the marker only lists the module for review: it grants no right to `external function` (S-7, E0086), no permission beyond `[permissions]`, and changes no check and no rule of the sandbox (RFC 0004). Example:
 - T-6a. Relative paths in the permissions of a manifest or a policy are relative to the directory of that file; links and `..` are resolved before comparison; a program name without a path matches only that name.
 
 ```toml
@@ -295,7 +297,7 @@ env = ["TODO_FILE", "HOME"]
 - T-7. `unio.lock` contains versions and content hashes of all dependencies. A build with a lock file does not touch the network.
 - T-8. Registry: signed publishing, signature verification on install, no deletion of published versions.
 - T-8a. Package manifests, payload digests, and trust metadata are authenticated according to [the cryptography policy](cryptography.md). Verify the required post-quantum signatures before extraction or installation, independently of transport security. A classical signature alone is insufficient; test tampering, missing signatures, trust-root provisioning, key rotation and revocation, and unauthorized rollback.
-- T-9. Installing a dependency with `unsafe module` or with permissions wider than the package's own requires explicit confirmation.
+- T-9. Installing a dependency with `unsafe module` or with permissions wider than the package's own requires explicit confirmation. The confirmation names the marked modules and says that in 0.1 they contain no external functions and receive no wider permissions (RFC 0004): it asks for their review and grants nothing.
 
 ### 6.5 Editor
 

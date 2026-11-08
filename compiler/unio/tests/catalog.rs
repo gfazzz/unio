@@ -28,7 +28,7 @@ fn every_code_has_an_explanation_with_an_example_and_its_fix() {
 
 /// Checks an example as a whole file: syntax only for syntax codes, names and types too for
 /// the codes of docs/semantics.md. Each semantic example gets its own directory, so that the
-/// example of E0058 can import itself. E0084 is checked with the core profile, and E0085 in a
+/// example of E0058 can import itself. E0084 and E0087 are checked with the core profile, and E0085 in a
 /// package whose manifest permits nothing.
 fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
     if !catalog::SEMANTIC_CODES.contains(&code) {
@@ -48,7 +48,7 @@ fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
         )
         .unwrap();
     }
-    let profile = if code == "E0084" {
+    let profile = if matches!(code, "E0084" | "E0087") {
         unio::effects::Profile::Core
     } else {
         unio::effects::Profile::Application

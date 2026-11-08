@@ -422,6 +422,9 @@ pub struct Report {
     pub usages: Vec<String>,
     pub errors: Vec<String>,
     pub effects: Vec<&'static str>,
+    /// The parameters whose calls count for the caller, with the effects of the argument
+    /// (RFC 0005).
+    pub argument_effects: Vec<String>,
     pub layer: &'static str,
     pub calls: Vec<String>,
     pub hash: String,
@@ -430,6 +433,7 @@ pub struct Report {
 pub fn report(p: &Program, derived: &Derived, hashes: &Hashes, n: Node) -> Report {
     let module = node_module(p, n);
     let mut usages: Vec<String> = Vec::new();
+    let mut argument_effects = Vec::new();
     let (kind, errors, effects, layer, calls) = match n {
         Node::Func(f) => {
             let mut seen = Vec::new();
@@ -445,6 +449,7 @@ pub fn report(p: &Program, derived: &Derived, hashes: &Hashes, n: Node) -> Repor
                 .filter(|c| c.caller == f)
                 .map(|c| qualified_name(p, c.callee))
                 .collect();
+            argument_effects = derived.argument_effects(p, f);
             (
                 "function",
                 p.funcs[f].fails.iter().map(|t| p.show(t)).collect(),
@@ -479,6 +484,7 @@ pub fn report(p: &Program, derived: &Derived, hashes: &Hashes, n: Node) -> Repor
         usages,
         errors,
         effects,
+        argument_effects,
         layer,
         calls,
         hash: hashes.hash.get(&n).cloned().unwrap_or_default(),
@@ -508,6 +514,14 @@ impl Report {
             out.push_str(&format!("  errors: {}\n", list(&self.errors)));
             let effects: Vec<String> = self.effects.iter().map(|e| e.to_string()).collect();
             out.push_str(&format!("  effects: {}\n", list(&effects)));
+            if !self.argument_effects.is_empty() {
+                // Calls through these parameters count for the caller, with the effects of the
+                // value it passes (RFC 0005).
+                out.push_str(&format!(
+                    "  argument effects: {}\n",
+                    self.argument_effects.join(", ")
+                ));
+            }
             out.push_str(&format!("  layer: {}\n", self.layer));
             out.push_str(&format!("  calls: {}\n", list(&self.calls)));
         }
@@ -526,7 +540,7 @@ impl Report {
         };
         let effects: Vec<String> = self.effects.iter().map(|e| e.to_string()).collect();
         format!(
-            "{{\"name\":{},\"kind\":{},\"signature\":{},\"documentation\":{},\"declared\":{},\"usages\":{},\"errors\":{},\"effects\":{},\"layer\":{},\"calls\":{},\"hash\":{}}}",
+            "{{\"name\":{},\"kind\":{},\"signature\":{},\"documentation\":{},\"declared\":{},\"usages\":{},\"errors\":{},\"effects\":{},\"argument_effects\":{},\"layer\":{},\"calls\":{},\"hash\":{}}}",
             json_string(&self.name),
             json_string(self.kind),
             json_string(&self.signature),
@@ -535,6 +549,7 @@ impl Report {
             strings(&self.usages),
             strings(&self.errors),
             strings(&effects),
+            strings(&self.argument_effects),
             json_string(self.layer),
             strings(&self.calls),
             json_string(&self.hash),

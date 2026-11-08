@@ -216,8 +216,14 @@ external of `std.files`), every function of the `alloc` layer has `allocates`, a
 the union of what it calls. The derivation is conservative (semantics 8.4): a call through an
 interface method, written or implicit (operators, `==`, comparisons, interpolation, `for`, the end
 of `using`, `in`), has the union of every implementation of the method in the program, or the
-method of the value's type when it is known; a lambda's body belongs to the function that makes
-it and a function named as a value counts as called there; a constant counts for the functions
+method of the value's type when it is known; the effects of a function value are carried by the
+calls of the value (RFC 0005): a lambda's body is a holder of its own and naming a function as a
+value has no effect, a call through a value has the effects of the values a flow analysis finds
+for it (named functions, lambdas, locals, constants, the values stored in a field, the returns of
+a named function), a call through a parameter is a latent effect replaced at each call by the
+argument (`unio symbol` shows it as `argument effects`), and any other value has every function
+value of the program of a matching type, which under `--profile=core` or in a `core` module is
+E0087 when one of them needs more than core; a constant counts for the functions
 that use it, a parameter default for its function, and field defaults for the functions that
 build the type; list, map and comprehension literals, interpolation, `+` on texts and lambdas that
 capture values give `allocates` and the layer `alloc`. A library module that calls a higher
@@ -348,7 +354,11 @@ The tests were written before the code (concept, section 1.2):
   and order and follow changes through references and mutual recursion, the core profile and
   the permissions of the manifest, allocating expressions under the core profile and in a
   `core` module of the library, and effects that reach a manifest through an interface method
-  and through a function value kept in a constant or a parameter default (semantics 8.4).
+  and through a function value kept in a constant or a parameter default (semantics 8.4), and
+  the rules of RFC 0005: a stored value has no effect, a parameter carries the effects of the
+  argument to the caller, the library's higher-order functions do the same, a call through a
+  field has the stored values and is E0087 under the core profile, a returned lambda counts where
+  it is called.
 - `tests/semantic.rs`: the semantic corpus in `spec/tests/semantic` (one focused file per code in
   `invalid/`, with `# expect-error: LINE CODE`, and programs in `valid/` that must be clean), the
   exit criterion of S3 and S4 that every `.unio` source of the repository passes `unio check`, and
@@ -392,9 +402,15 @@ The tests were written before the code (concept, section 1.2):
 ## Not done yet
 
 - Known limits of the effects: a call through an interface counts every implementation in the
-  program, not only those whose values can reach it, and a call through a function value is
-  charged where the value is made, so `unio symbol` shows the value's effects for the function
-  that makes it, not for one like `List.map` that only calls it (semantics 8.4); the checks of
+  program when the type of the value is not known, not only those whose values can reach it. A
+  call through a function value is exact for named functions, lambdas, locals, constants, returns
+  and parameters (RFC 0005), but estimated elsewhere: a field has every value stored in it in the
+  whole program; an element of a collection, a pattern binding, a lambda parameter and the result
+  of a call through a value have every function value of a matching type (parameter count and
+  types; results and errors are not compared); a parameter that a function keeps has every
+  argument passed for it anywhere; a lambda returned from a function does not keep the arguments
+  of that call. These estimates can reject a call no run makes: under `--profile=core` it is
+  E0087, in a package with a manifest it can be E0085 (semantics 8.4); the checks of
   parameter and field defaults record their effects but report no type errors yet; usages of
   types are listed per referencing declaration.
 - Known limits of `process.run` (docs/runtime.md 9.5): a process that leaves the process group
