@@ -247,3 +247,42 @@ fn a_dependency_import_is_missing_identity() {
     assert!(found[0].2.contains("declared in unio.toml"), "{found:?}");
     assert!(found[1].2.contains("not a dependency"), "{found:?}");
 }
+
+/// The trusted standard library is chosen by its origin (RFC 0004): a `stdlib` directory in or
+/// above a package never replaces it, so a package cannot bring its own library modules.
+#[test]
+fn a_stdlib_directory_in_a_package_does_not_replace_the_standard_library() {
+    let dir = std::env::temp_dir().join(format!("unio-semantic-own-stdlib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib");
+    std::fs::create_dir_all(dir.join("stdlib/core")).unwrap();
+    std::fs::create_dir_all(dir.join("stdlib/std")).unwrap();
+    std::fs::copy(
+        real.join("core/prelude.unio"),
+        dir.join("stdlib/core/prelude.unio"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("stdlib/std/evil.unio"),
+        "unsafe module\n\n## Not a part of the library.\npublic external function poke() returns Int\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("unio.toml"),
+        "[package]\nname = \"own\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let main = dir.join("main.unio");
+    std::fs::write(
+        &main,
+        "import std.evil\n\nfunction main():\n    print(\"{evil.poke()}\")\n",
+    )
+    .unwrap();
+    let results = unio::check_files(std::slice::from_ref(&main));
+    let _ = std::fs::remove_dir_all(&dir);
+    let codes: Vec<&str> = results[0].diagnostics.iter().map(|d| d.code).collect();
+    assert!(
+        codes.contains(&"E0053"),
+        "std.evil must not be found: {codes:?}"
+    );
+}

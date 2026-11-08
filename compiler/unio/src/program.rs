@@ -179,9 +179,11 @@ pub struct Program {
     stdlib_root: Option<PathBuf>,
 }
 
-/// The directory of the standard library: `UNIO_STDLIB`, an ancestor of the first file that
-/// holds `stdlib/core/prelude.unio`, or the repository of the compiler.
-fn find_stdlib(start: &Path) -> Option<PathBuf> {
+/// The directory of the trusted standard library, chosen by its origin only (RFC 0004): the
+/// copy embedded by `unio build`, `UNIO_STDLIB` set by the operator, or the library of the
+/// compiler's build. A `stdlib` directory in or above a package is never used, so a package
+/// cannot replace library modules, their effects, or their layers.
+pub fn trusted_stdlib() -> Option<PathBuf> {
     if let Some(embedded) = crate::vfs::embedded_stdlib() {
         return embedded;
     }
@@ -192,19 +194,17 @@ fn find_stdlib(start: &Path) -> Option<PathBuf> {
             // temporary directory /var is a link to /private/var.
             return Some(std::fs::canonicalize(&dir).unwrap_or(dir));
         }
-    }
-    let absolute = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
-    for ancestor in absolute.ancestors() {
-        let candidate = ancestor.join("stdlib");
-        if candidate.join("core/prelude.unio").is_file() {
-            return Some(candidate);
-        }
+        return None;
     }
     let built_in = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib");
     if built_in.join("core/prelude.unio").is_file() {
         return std::fs::canonicalize(built_in).ok();
     }
     None
+}
+
+fn find_stdlib(_start: &Path) -> Option<PathBuf> {
+    trusted_stdlib()
 }
 
 const LAYERS: [&str; 3] = ["core", "alloc", "std"];

@@ -178,18 +178,9 @@ pub fn prepare_embedded(manifest: Option<&(String, PathBuf)>) -> Result<Plan, i3
 
 /// The directory of the standard library, which `unio test` still reads after the first file
 /// (see `program.rs`).
-fn stdlib_dir(start: &Path) -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("UNIO_STDLIB") {
-        return Some(PathBuf::from(dir));
-    }
-    let absolute = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
-    absolute
-        .ancestors()
-        .map(|a| a.join("stdlib"))
-        .find(|c| c.join("core/prelude.unio").is_file())
-        .or_else(|| {
-            std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib")).ok()
-        })
+/// The library the checker reads, so that the sandbox grants exactly that directory.
+fn stdlib_dir(_start: &Path) -> Option<PathBuf> {
+    crate::program::trusted_stdlib()
 }
 
 fn tree(root: PathBuf) -> Scope {
