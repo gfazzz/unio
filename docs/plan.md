@@ -6,6 +6,8 @@ Changes from the initial 0.1 draft: UniOS requires human- and AI-accessible admi
 
 Changes from the initial 0.1 draft: post-quantum signing is required for 0.1 distribution; network and UniOS profiles follow `docs/cryptography.md` (requirements T-8a, R-6a to R-6c, OS-7).
 
+Changes from the initial 0.1 draft: the status of the sprints in section 12 follows the requirement-level table of `docs/status.md`, lists the gaps found by the audit in the sprints they belong to, and records the order of the remaining work.
+
 ## 1. Project principles
 
 - **Specification before code.** A construct enters the compiler only after its syntax and semantics are written in the reference.
@@ -292,7 +294,25 @@ The stages of section 3 stay the acceptance criteria; this section orders the wo
 | S7 Packages and library | `unio.toml`, `unio.lock`, the registry with post-quantum signatures, `add`, `remove`, `update`, `unio doc`, the remaining modules of S-1 | Stage 5 exit criterion | 5 |
 | S8 Editor, trials, release | Language server and the VS Code extension on top of the existing highlighting, the R-10 and readability trials, 24 hours of fuzzing, the guide with the chapter on classes, reproducible signed release | Acceptance of requirements section 9.2 | 6, 7 |
 
-Status of S6: the sandbox on Linux and macOS, and native code for Linux on x86-64 (`unio build`, [runtime.md](runtime.md) section 8), which gives the output of the interpreter for every reference program and meets the floor of 7.1 on all four benchmarks; the other targets, the SB-15 suite, and the power-loss tests remain.
+Status of the sprints. A sprint is done when its exit criterion holds without known exceptions; the requirement-level facts, with the test or CI step that checks each one and the platforms it runs on, are in [status.md](status.md), which is updated with each change. The gaps below are numbered as there.
+
+| Sprint | Status | Open in this sprint |
+|---|---|---|
+| S1, S2 | Done | Long coverage-guided fuzzing belongs to S8 (R-1); now 2,000 deterministic mutations |
+| S3 | Exit criterion met, with exceptions | Type identity at run time by short name (gap 1); a `Map[Float, V]` type is not rejected (gap 15) |
+| S4 | Exit criterion of stage 2 not met | Effects through interface methods and function values, allocation by literals under `--profile=core` (gap 2); E0045–E0048 not in the catalog (gap 18); the R-10 control set of 200 programs does not exist (57 semantic corpus files) |
+| S5 | Exit criterion met, with exceptions | Runtime boundaries: children of `process.run` inherit the whole environment and their output, tree, and timeout are not bounded (gap 3), imports through links can leave the package (gap 4); memory: approximate heap accounting after allocation, no controlled path on allocator failure, no reserve for `release` (gap 5); reference counting instead of the tracing GC of C-13, which needs an RFC after measurements (gap 9); `std.json` fills private fields (gap 16) |
+| S6 | In progress | Sandbox precision: Linux rules wider than the manifest, children checked only by the operating system (gap 6); tool isolation SB-10 to SB-13 with the SB-15 suite (gap 8); reproducibility across directories, the image stores absolute paths (gap 10); start-up about 14 ms against 5 ms (gap 11); the other three native targets; the Windows sandbox (gap 7); power-loss tests of atomic writes, fault injection is not one (gap 13) |
+| S7, S8 | Not started | Packages, registry, signing (gap 12), remaining modules of S-1, editor, trials, release |
+
+Order of the remaining work, agreed after the audit. Each step starts with checks that fail and ends when [status.md](status.md) shows its rows as implemented and checked:
+
+1. Semantics: type identity at run time, indirect effects (interfaces, function values, literals), and the `core` check.
+2. Runtime boundaries: the environment and process tree of children, bounded output, memory accounting and the allocator-failure path, precision of the operating-system permissions.
+3. Tool isolation (SB-10 to SB-13) with the SB-15 tests.
+4. Strict performance checks in CI, then start-up time and a program image that does not depend on the build directory.
+5. The other native targets, the Windows sandbox, and trials of the file guarantees (power loss, killed processes).
+6. S7, with stable package identity, safe installation, and signature verification.
 
 Streams that run beside the critical path: the standard library and the reference programs grow with each sprint; documentation and its Russian localization follow every change; editor support started early, the syntax highlighting of `editors/` exists already and is tested against `spec/grammar.ebnf`.
 

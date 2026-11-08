@@ -1,4 +1,4 @@
-## Executable acceptance examples for RFC 0001, awaiting the stage-3 interpreter.
+## Executable acceptance examples for RFC 0001; `unio test` runs them.
 ## Public transport data is validated before constructing a private domain value.
 
 import std.json as json

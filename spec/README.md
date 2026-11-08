@@ -11,7 +11,7 @@ Version 0.1-draft. Russian localization: [docs/ru/spec.md](../docs/ru/spec.md).
 
 The reference programs are [docs/examples/todo.unio](../docs/examples/todo.unio) and the utilities in [examples/](../examples). They, the standard library in [stdlib/](../stdlib), and the tools in [tools/](../tools) are checked with the same grammar; [check_api.py](check_api.py) checks that they call only what the standard library declares.
 
-The Python scripts are temporary. Their Unio versions are in [tools/](../tools); once the stage 3 interpreter runs them and they give the same results, CI switches to them and the Python scripts are deleted.
+CI runs the Unio versions of these scripts, in [tools/](../tools), with the interpreter of sprint S5. The Python scripts stay in the repository as the reference: the CI job "Unio tools agree with the Python checkers" (`compiler/unio/tests/tools.rs`) checks that both give the same output and exit code, and they serve in performance comparisons ([bench/README.md](../bench/README.md)). A change to checker behavior changes both.
 
 ## Using the checker
 
@@ -38,11 +38,11 @@ The grammar decides whether a file is syntactically correct. Rules that the EBNF
 - positional arguments come before named ones (E0023);
 - at most one rest element in a list pattern, in the last position (E0034).
 
-Name resolution, types, error sets, exhaustiveness, mutability, and resources belong to stage 2 of the plan.
+Name resolution, types, error sets, exhaustiveness, mutability, and resources are checked by `unio check` ([docs/semantics.md](../docs/semantics.md)); their corpus is [tests/semantic/](tests/semantic), which only the compiler checks.
 
 ## Syntax-level diagnostic codes
 
-These codes are fixed by the grammar. The full list of the first 50 codes, with explanations and fixes, is a separate stage-0 deliverable.
+These codes are fixed by the grammar. Every code of the compiler, with its explanation, an example of the error, and the example fixed, is in the diagnostic catalog (`compiler/unio/src/catalog.rs`, shown by `unio explain CODE`); the semantic codes are listed in [docs/semantics.md](../docs/semantics.md).
 
 | Code | Meaning |
 |---|---|
@@ -75,4 +75,4 @@ E0004 is not used: because indentation grows one level at a time, a dedent alway
 
 ## RFC 0001
 
-The EBNF supports contextual `named` and labels in function shapes; `named_parameters.unio` and negative fixtures are in the corpus. Both API checkers extract the actual parameter binding. Group/default ordering, required labels at calls and E0040–E0048 belong to the future compiler, not these scripts. Normative rules: [contracts](../docs/language-contracts.md), [RFC](../docs/rfcs/0001-language-contracts.md).
+The EBNF supports contextual `named` and labels in function shapes; `named_parameters.unio` and negative fixtures are in the corpus. Both API checkers extract the actual parameter binding. Group/default ordering, required labels at calls and the diagnostics E0040–E0044 are checked by the compiler, not by these scripts; E0045–E0048 are not in the compiler's catalog yet ([docs/status.md](../docs/status.md)). Normative rules: [contracts](../docs/language-contracts.md), [RFC](../docs/rfcs/0001-language-contracts.md).

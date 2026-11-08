@@ -4,6 +4,8 @@ Version: 0.1 (draft). Initial policy: post-quantum protection by default, with e
 
 This policy refines [concept section 6](concept.md), requirements T-8a and R-6a to R-6c in [the 0.1 specification](requirements.md), and OS-7 in [UniOS](os.md). It is a design requirement, not a claim that cryptography is implemented or audited. It does not change language syntax or require quantum hardware.
 
+Implementation status: nothing in this policy is implemented. The repository has no signing, verification, trust-anchor, rotation, revocation, or rollback-protection code, and no component claims post-quantum protection ([status.md](status.md), rows T-8, T-8a, R-6 to R-6c). The SHA-384 content hashes of `unio symbol` (C-11a) identify declarations for caches; they authenticate nothing.
+
 ## 1. Scope and threat model
 
 Protection covers recorded traffic that could be decrypted later by a quantum adversary, and future forgery of identities, packages, releases, updates, and trust metadata. It applies to project-controlled cryptographic interfaces and delivery paths as they are introduced: distribution in 0.1, networking in 0.2, and the UniOS track. External Git hosting and CI infrastructure have their own security properties; this policy does not certify them.

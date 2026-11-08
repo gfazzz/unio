@@ -79,8 +79,8 @@ Report which checks actually ran and distinguish static validation from executio
   when changing checker behavior; the parity test in CI compares them. Do not
   delete the Python checkers: they are the reference for parity and benchmarks.
 - Write library, utility, and project tool code in Unio according to the plan.
-  Put behavioral `test` blocks alongside that code even while execution awaits
-  the interpreter; do not describe those tests as passing based on parsing alone.
+  Put behavioral `test` blocks alongside that code and run them with `unio test`;
+  do not describe tests as passing based on parsing or `unio check` alone.
 - Respect the standard library layers: `core` may use only `core`, `alloc` may use
   `core` and `alloc`, and `std` may use all three. Place external function
   declarations in `unsafe module` files. Reference programs use the API declared

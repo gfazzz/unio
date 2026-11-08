@@ -5,6 +5,7 @@
 | [concept.md](concept.md) | Refined language concept: syntax, types, errors, memory, modules, security, working with AI; settled decisions and their rationale |
 | [requirements.md](requirements.md) | Requirements specification for release 0.1 "Core": scope, language, compiler, library, tooling, acceptance |
 | [plan.md](plan.md) | Work plan: stages, exit criteria, roles, risks, metrics, later releases |
+| [status.md](status.md) | Implementation status: every requirement of 0.1 with its implementation, check, platforms, and known limits; updated with each change |
 | [cryptography.md](cryptography.md) | Post-quantum policy: algorithms, trust, compatibility, and acceptance |
 | [examples/todo.unio](examples/todo.unio) | Complete example utility written in the language core |
 | [../spec/README.md](../spec/README.md) | EBNF grammar, its reference checker, and the specification test corpus |

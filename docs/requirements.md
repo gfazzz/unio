@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.14 (draft). Changes from 0.13: section 7.1 measures native executables against Go in time and peak memory (RFC 0003).
+Specification version: 0.15 (draft). Changes from 0.14: section 10 keeps the Python checkers as the reference for parity and benchmarks, as concept section 1.1 and plan section 12 already say; the status of every requirement is tracked in `docs/status.md`. No requirement changes.
+
+Changes from 0.13: section 7.1 measures native executables against Go in time and peak memory (RFC 0003).
 
 Changes from 0.12: L-8a, L-33, T-1a and RFC 0002; diagnostics E0049 and E0050 reserved.
 
@@ -389,6 +391,6 @@ Ten programs covering the core and the standard library; stored in the repositor
 ## 10. Constraints and assumptions
 
 - The implementation language of the 0.1 compiler is Rust; code generation through Cranelift. Moving to LLVM or a self-hosted implementation is considered after 0.1.
-- Everything that does not have to exist before the language runs is written in Unio: the standard library (S-10), the reference utilities, and the project tools in `tools/`. The Python checkers in `spec/` and `.github/scripts/` are temporary support for CI and are removed once the stage 3 interpreter runs their Unio versions.
+- Everything that does not have to exist before the language runs is written in Unio: the standard library (S-10), the reference utilities, and the project tools in `tools/`. Since the interpreter of sprint S5 runs the Unio versions, CI uses them; the Python checkers in `spec/` and `.github/scripts/` stay as the reference that the Unio tools must agree with and for performance comparisons.
 - Language decisions are made through RFCs in `docs/rfcs/`; the specification is updated when an RFC is accepted.
 - The questions left open in the first version of the concept are settled in `docs/concept.md`, sections 10–11. Revisiting them is possible only through an RFC.

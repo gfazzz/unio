@@ -24,7 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The checks are the Unio tools of tools/, run by the interpreter of sprint S5
-      # (docs/runtime.md 8.3); they replaced the temporary Python checkers.
+      # (docs/runtime.md 8.3). The Python checkers stay as the reference: the job
+      # python-parity compares them, and bench/ uses them in performance comparisons.
       - name: Build the interpreter
         run: cargo build --release --manifest-path compiler/Cargo.toml -p unio
       - name: Documentation formatting and links
@@ -39,8 +40,8 @@ jobs:
         run: compiler/target/release/unio test $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
 
   python-parity:
-    # Until the Python checkers are deleted, the Unio tools must give their results
-    # (AGENTS.md); this job and compiler/unio/tests/tools.rs go away with them.
+    # The Python checkers are kept as the reference for parity and benchmarks (AGENTS.md,
+    # plan section 12): the Unio tools must give their results on every change.
     name: Unio tools agree with the Python checkers
     runs-on: ubuntu-latest
     steps:

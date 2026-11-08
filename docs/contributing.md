@@ -68,8 +68,8 @@ Each layer catches what the previous one misses. No single layer is trusted alon
 The same rules the language imposes on packages apply to this repository:
 
 - `unsafe module` only in the standard library, reviewed by two people and tested with sanitizers (R-5); a pull request that adds one outside `stdlib/std/` is rejected.
-- Library layers are enforced by `check_api.py`: `core` cannot reach the allocator or the operating system, so a back door has fewer places to hide.
-- Once the compiler exists, every contributed Unio program and test runs in the sandbox (SB-1) with the permissions of its manifest; a contributed test cannot read the runner's files or reach the network.
+- Library layers are enforced by `tools/check_api.unio` in CI (with `spec/check_api.py` as its reference) and by the compiler (E0084): `core` cannot reach the allocator or the operating system, so a back door has fewer places to hide.
+- Every contributed Unio program and test that CI runs goes through `unio run` or `unio test`, in the sandbox (SB-1) with the permissions of its manifest; a contributed test cannot read the runner's files or reach the network. This holds on the Linux and macOS runners; Windows has no operating-system sandbox yet, so CI allows the weaker sandbox there, and the limits of the Linux rules are in [runtime.md](runtime.md) section 9 and [status.md](status.md).
 - The compiler never runs user code at build time (SB-14, R-7), so a pull request cannot smuggle execution into `unio check` or `unio build`.
 
 ### 3.5 Dependencies and releases (from the Rust compiler on)

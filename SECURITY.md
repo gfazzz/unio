@@ -10,9 +10,9 @@ You will get an acknowledgement within 7 days and a decision on severity and a f
 
 ## Scope
 
-In scope now: the checkers in `spec/` and `.github/scripts/`, the CI workflows, and anything in the repository that could run code on a contributor's or maintainer's machine or on a CI runner.
+In scope now: the compiler and the runtime in `compiler/` (`unio check`, `fmt`, `run`, `test`, `build`, and the executables it makes), the sandbox as implemented (requirements SB-1 to SB-9 on Linux and macOS; its documented limits are in [docs/runtime.md](docs/runtime.md) section 9 and [docs/status.md](docs/status.md)), the standard library and its `unsafe module` files, the project tools in `tools/`, the checkers in `spec/` and `.github/scripts/`, the CI workflows, the editor extension in `editors/`, and anything in the repository that could run code on a contributor's or maintainer's machine or on a CI runner.
 
-In scope later, once they exist: the compiler and runtime, the sandbox (requirements SB-1 to SB-15), the standard library's `unsafe module` files, the package registry, and release artifacts.
+Not implemented yet, and in scope once they exist: the Windows sandbox, the isolated tool workers and hostile-project suite (SB-10 to SB-15), the package manager and registry, signing, and release artifacts.
 
 ## What happens after a report
 

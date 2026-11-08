@@ -37,6 +37,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Refined concept](docs/concept.md)
 - [Requirements specification for release 0.1](docs/requirements.md)
 - [Work plan](docs/plan.md)
+- [Implementation status](docs/status.md): every requirement with its implementation, check, platforms, and known limits
 - [Cryptography policy](docs/cryptography.md): post-quantum defaults, trust, compatibility, and acceptance
 - [Example program](docs/examples/todo.unio)
 - [Grammar and specification tests](spec/README.md)

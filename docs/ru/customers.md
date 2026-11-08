@@ -60,4 +60,4 @@ RC-1, RC-3, RC-7 и RC-8 — дополнения библиотеки в рам
 
 ## 5. Что проверено
 
-Обе программы разбираются по [../../spec/grammar.ebnf](../../spec/grammar.ebnf) и вызывают только объявленную стандартную библиотеку (`spec/check_grammar.py`, `spec/check_api.py`). Они проходят фронтенд на Rust: `unio check` не сообщает ошибок (`compiler/unio/tests/sources.rs`), а `unio fmt --check` подтверждает единый стиль — и то и другое в CI. Их тесты выполняются и проходят под `unio test` в интерпретаторе спринта S5, в CI.
+Обе программы разбираются по [../../spec/grammar.ebnf](../../spec/grammar.ebnf) и вызывают только объявленную стандартную библиотеку (`spec/check_grammar.py`, `spec/check_api.py`). Они проходят фронтенд на Rust: `unio check` не сообщает ошибок (`compiler/unio/tests/semantic.rs`), а `unio fmt --check` подтверждает единый стиль — и то и другое в CI. Их тесты выполняются и проходят под `unio test` в интерпретаторе спринта S5, в CI.
