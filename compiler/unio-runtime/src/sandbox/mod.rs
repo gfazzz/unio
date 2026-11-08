@@ -141,6 +141,17 @@ pub fn resolve(path: &Path) -> PathBuf {
     resolve_in(path, working_directory())
 }
 
+/// The path made absolute against the remembered working directory, without touching the file
+/// system. `canonicalize` of a relative path calls `getcwd`, which Seatbelt refuses when the
+/// working directory itself is not readable, so callers resolve the absolute path instead.
+pub fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_directory().join(path)
+    }
+}
+
 /// The working directory of the process, read once. Unio programs cannot change it, and under
 /// Seatbelt `getcwd` fails when the directory itself is not readable, so it is read before the
 /// sandbox is applied; otherwise relative paths would not resolve into their scopes.

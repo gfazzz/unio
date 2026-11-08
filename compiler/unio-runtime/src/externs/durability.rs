@@ -21,7 +21,7 @@ fn directory_of(path: &Path) -> PathBuf {
 
 /// Whether the file system that holds the path keeps the guarantees of S-9.
 pub fn supports_durability(path: &Path) -> bool {
-    let directory = match std::fs::canonicalize(directory_of(path)) {
+    let directory = match std::fs::canonicalize(crate::sandbox::absolute(&directory_of(path))) {
         Ok(d) => d,
         Err(_) => return false,
     };

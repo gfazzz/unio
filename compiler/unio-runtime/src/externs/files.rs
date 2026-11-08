@@ -207,7 +207,8 @@ fn system_read_chunk(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome 
 fn resolve(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     permit_read(&p)?;
-    let resolved = fs::canonicalize(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
+    let resolved = fs::canonicalize(crate::sandbox::absolute(&native(&p)))
+        .map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::path(path_text(&resolved)))
 }
 
