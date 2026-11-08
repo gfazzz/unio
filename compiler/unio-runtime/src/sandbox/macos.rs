@@ -89,6 +89,7 @@ pub fn profile(permissions: &Permissions) -> String {
     let mut p = String::from(
         "(version 1)\n(deny default)\n(allow file-read-metadata)\n(allow sysctl-read)\n\
          (allow signal (target self))\n\
+         (allow signal (target children))\n\
          (allow file-read* file-write-data (literal \"/dev/null\"))\n\
          (allow file-read* (literal \"/dev/urandom\") (literal \"/dev/random\"))\n",
     );
@@ -191,10 +192,13 @@ mod tests {
         let p = profile(&permissions);
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read* (subpath \"/w\"))"));
+        // Only /dev/null may be written; every file write goes through the writer process.
+        let writes: Vec<&str> = p.lines().filter(|l| l.contains("file-write")).collect();
         assert!(
-            !p.contains("file-write"),
+            writes.iter().all(|l| l.contains("\"/dev/null\"")),
             "the program writes no file itself: {p}"
         );
+        assert!(p.contains("(allow signal (target children))"), "{p}");
         assert!(!p.contains("process-fork"));
         let w = writer_profile(&permissions.write);
         assert!(w.contains("(deny default)"));
