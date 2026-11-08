@@ -1,6 +1,8 @@
 # UniOS: a site about Unio, in Unio, on an operating system written in Unio
 
-Version: 0.5 (draft). Changes from 0.4: service supervision and recovery acceptance (OS-8).
+Version: 0.6 (draft). Changes from 0.5: a built-in management model in a system service, its authority, and two hardware profiles (OS-9).
+
+Changes from 0.4: service supervision and recovery acceptance (OS-8).
 
 Changes from 0.3: post-quantum transport, identity, and update requirements (OS-7; `docs/cryptography.md`).
 
@@ -107,7 +109,8 @@ Design rules:
 
 | Resource | Proof-of-concept need | Headroom |
 |---|---|---|
-| RAM 8 GB | kernel under 64 MB; site, TLS, and services under 512 MB | leaves room for an inference service in U-4 |
+| RAM 8 GB | kernel under 64 MB; site, TLS, and services under 512 MB | leaves room for the base profile of the management model in U-4 (OS-9) |
+| VRAM 8 GB or more (optional) | not needed for the proof of concept | the full profile of the management model in U-4 (OS-9) |
 | 4 cores | 1 core until U-3, then one scheduler per core | |
 | 80 GB storage | site, logs, and package cache under 2 GB | leaves room for models and datasets |
 
@@ -121,7 +124,7 @@ The track starts together with release 0.5 "System", whose prototype kernel (boo
 | U-1 Kernel | 6–16 | Virtio transport, interrupts, memory regions for processes, process creation and capabilities, serial console, driver processes | A driver process receives interrupts and reads a virtio device; memory and timer tests green under QEMU |
 | U-2 Network and site | 14–28 | virtio-net driver, TCP/IP and DNS service, `std` over UniOS system calls, HTTP/1.1 server, web framework, the site over HTTP on a local VM | Site serves from a local VM; the network stack survives 24 h of fuzzing |
 | U-3 Storage, TLS, deployment | 26–44 | virtio-blk driver, file store service with the atomic-write guarantees of S-9, TLS 1.3 subset on `std.crypto`, an ACME client in Unio that obtains and renews the certificate, preemptive scheduling on 4 cores, deployment on a VDS | Site reachable from the internet over HTTPS for 30 days with uptime recorded |
-| U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator device model, model-serving service, QPU device model, broader hardware | Own specification, outside the language roadmap |
+| U-4 Beyond the proof of concept | separate project | Shell, package installation, accelerator device model, model-serving service, the built-in management model on both hardware profiles (OS-9), QPU device model, broader hardware | Own specification, outside the language roadmap |
 
 Stages overlap where the next one can start on finished parts; the weeks are the same as in plan section 9.1. The current draft estimates 44 weeks for U-0 to U-3, which deliver the proof of concept, the UniOS 0.1 milestone, announced on the site it serves. U-0 must reassess these estimates against the base-system inventory and management requirements of sections 1.1–1.2. U-2 acceptance includes local management scenarios; U-3 acceptance also includes the SSH scenarios and the site's update and recovery path before public deployment.
 
@@ -134,6 +137,7 @@ Stages overlap where the next one can start on finished parts; the weeks are the
 | TLS implemented from scratch has protocol defects | medium | TLS 1.3 with explicitly selected profiles under `docs/cryptography.md`, test vectors from the RFCs, interoperability tests against three existing clients, external review before public exposure |
 | `std` over UniOS diverges from `std` over Linux | medium | One `std` interface, two backends; the specification test corpus and the reference utilities run on both |
 | Kernel-level AI support stays a slogan | medium | U-4 ships a measurable service: model inference with memory and latency visible in the profiler |
+| The management model takes a harmful action | medium | OS-9: the model runs outside the kernel, acts only through granted capabilities and documented interfaces, a deterministic policy checks every action, actions outside the rules wait for a person, and the system stays manageable without the model |
 | Expectation that UniOS runs on quantum hardware | medium | The QPU is a coprocessor device model; stated plainly in section 2 |
 | Timing side channels in cryptography written in Unio | medium | Constant-time primitives in reviewed `unsafe module` files without allocation or GC; statistical timing tests in CI; external review before public exposure |
 
@@ -144,3 +148,11 @@ The track is accepted as "UniOS" and scheduled in the work plan (section 9) alon
 ## Service supervision
 
 **OS-8.** Supervision trees define restart strategy, rate budget/backoff, dependencies, shutdown deadline and escalation; state and causes are available as JSON locally and over SSH. A service fault is observed through an isolated process; restarting a task neither isolates memory nor makes external actions idempotent. U-0 fixes the protocol, U-2 tests crash loops/failures/limits locally, U-3 also over SSH with disconnection and authority checks. Detailed contracts: [language-contracts.md](language-contracts.md), section 7.
+
+## Built-in management model
+
+**OS-9.** UniOS ships a language model that manages the system it runs on: it watches service health, resource use, logs, and audit events, diagnoses failures, and plans and carries out routine administration.
+- **Placement.** The model runs in a system service process, not in the kernel. The kernel stays the small, strictly checked part of section 4; a model is large and probabilistic, and its failure or hang must cost a service restart under OS-8, not the system. Kernel-level support means what section 2 lists: the accelerator is a scheduled device, model memory, VRAM, and queues are kernel objects with budgets, inference latency is visible to the scheduler, and the kernel delivers system events to the service.
+- **Authority.** The model is an agent under OS-5: its own identity, only the capabilities granted to it, and only the documented interfaces of OS-1 to OS-4 that a person uses. It follows the cycle "inspect, plan, validate, apply, verify". The model proposes; a deterministic policy service checks every action against rules the operator writes, and actions outside those rules wait for a person. Every action is in the audit log with its reason, and the operator can stop the model and revoke its access at any time; the system stays fully manageable without it.
+- **Hardware profiles.** Base: 8 GB RAM, no accelerator; a model of 1 to 3 billion parameters quantized to 4 bits takes 0.7 to 2 GB, next to the kernel under 64 MB and services under 512 MB, and answers at roughly 5 to 20 tokens per second on 4 cores, enough for administration that does not need an immediate answer. Full: an accelerator with 8 GB of VRAM or more, which holds a model of 7 to 8 billion parameters in 4 bits (about 5 GB) with room for its context. The service picks the model that fits the machine it finds.
+- **Acceptance.** The scenarios of OS-6 run with the built-in model as the agent on both profiles, with completion, human interventions, denied operations, inference latency, and memory recorded. Delivered in U-4; U-0 fixes the policy interface and the event format so that the earlier stages leave room for it.
