@@ -73,8 +73,14 @@ jobs:
         run: python3 bench/run.py --runs 1 --only json --check-floor --json bench/results-json.json
       - name: Native executables meet the floor (wc, json, text, loop)
         run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-floor --json bench/results-native.json
-      # RFC 0003: native time and peak memory against Go. Reported until the start-up step of
-      # the RFC lands; loop varies around the 2x limit from run to run until then.
+      # Requirement 7.1: the native executable of an empty program starts within 5 ms. A start
+      # takes a few milliseconds and shared runners are noisy, so the check compares the median
+      # of 101 runs, timed by the launcher from its fork to the end of the program.
+      - name: Native start-up of an empty program at most 5 ms (7.1)
+        run: python3 bench/run.py --only empty --native --check-startup --json bench/results-startup.json
+      # RFC 0003: native time and peak memory against Go. The start-up step of the RFC has
+      # landed (2.6 ms of loop's 30 ms), but on a fast machine the computation of loop alone is
+      # about 2x Go's, so the check is still reported without failing.
       - name: Native executables against Go (RFC 0003, reported)
         continue-on-error: true
         run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-go --json bench/results-go.json

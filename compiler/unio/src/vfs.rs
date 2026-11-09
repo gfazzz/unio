@@ -1,7 +1,7 @@
-//! The files a program is loaded from. Normally the file system; in an executable made by
-//! `unio build`, the sources embedded in it (docs/runtime.md 8.4), so that the executable
-//! rebuilds the same declarations without reading its sources or the standard library at run
-//! time, and the paths in fault traces are those of the build.
+//! The files a program is loaded from. Normally the file system; for `unio run` and `unio test`,
+//! the files the worker of the tool read, kept in memory (docs/runtime.md 9.7), so that the
+//! program is loaded again in its sandbox without reading its sources or the standard library.
+//! An executable made by `unio build` loads nothing: it reads its program image (8.4).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

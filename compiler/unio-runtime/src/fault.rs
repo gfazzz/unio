@@ -11,6 +11,10 @@ pub const EXIT_FAULT: i32 = 101;
 pub const EXIT_EXHAUSTED: i32 = 102;
 /// Exit code when the sandbox or the policy cannot be applied (C-15, SB-5).
 pub const EXIT_SANDBOX: i32 = 103;
+/// Exit code of an executable made by `unio build` whose program image this runtime cannot run:
+/// of another format, made by another compiler, or damaged (one of the codes C-15 reserves for
+/// the runtime; docs/runtime.md 8.4).
+pub const EXIT_IMAGE: i32 = 104;
 
 /// The result of evaluating something: a value, or the way evaluation stopped.
 pub type Outcome = Result<Value, Unwind>;

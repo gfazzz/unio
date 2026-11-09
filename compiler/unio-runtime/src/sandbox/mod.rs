@@ -268,8 +268,57 @@ fn texts(table: &Table, key: &str) -> Result<Vec<String>, String> {
     }
 }
 
-/// Reads the `permissions.` keys of a manifest or a policy.
-fn read_permissions(table: &Table, places: &Places) -> Result<Option<Permissions>, String> {
+/// The `[permissions]` of a manifest or a policy as written, before the placeholders and
+/// relative entries are expanded: what an executable made by `unio build` keeps of its
+/// manifest (docs/runtime.md 8.4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Declared {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub env: Vec<String>,
+    pub process: Vec<String>,
+}
+
+impl Declared {
+    /// The permissions with the placeholders and relative entries of `places`.
+    pub fn expand(&self, places: &Places) -> Result<Permissions, String> {
+        let mut permissions = Permissions::default();
+        for (entries, scopes) in [
+            (&self.read, &mut permissions.read),
+            (&self.write, &mut permissions.write),
+        ] {
+            for entry in entries {
+                if let Some(scope) = Scope::expand(entry, places)? {
+                    if !scopes.contains(&scope) {
+                        scopes.push(scope);
+                    }
+                }
+            }
+        }
+        permissions.env = self.env.iter().cloned().collect();
+        permissions.process = self.process.iter().cloned().collect();
+        Ok(permissions)
+    }
+
+    /// The entries of `files.read` and `files.write` that are relative paths, which have a
+    /// meaning only next to the file that declares them (T-6a).
+    pub fn relative_entries(&self) -> Vec<(&'static str, &str)> {
+        let relative = |entry: &str| {
+            let body = entry.strip_suffix("/**").unwrap_or(entry);
+            !body.is_empty() && !body.starts_with('$') && !Path::new(body).is_absolute()
+        };
+        let mut found = Vec::new();
+        for (key, entries) in [("files.read", &self.read), ("files.write", &self.write)] {
+            for entry in entries.iter().filter(|e| relative(e)) {
+                found.push((key, entry.as_str()));
+            }
+        }
+        found
+    }
+}
+
+/// Reads the `permissions.` keys of a manifest or a policy, without expanding them.
+fn read_declared(table: &Table) -> Result<Option<Declared>, String> {
     let mut found = false;
     for (key, value) in table {
         let Some(name) = key.strip_prefix("permissions.") else {
@@ -293,22 +342,26 @@ fn read_permissions(table: &Table, places: &Places) -> Result<Option<Permissions
     if !found {
         return Ok(None);
     }
-    let mut permissions = Permissions::default();
-    for (key, scopes) in [
-        ("permissions.files.read", &mut permissions.read),
-        ("permissions.files.write", &mut permissions.write),
-    ] {
-        for entry in texts(table, key)? {
-            if let Some(scope) = Scope::expand(&entry, places)? {
-                if !scopes.contains(&scope) {
-                    scopes.push(scope);
-                }
-            }
-        }
+    Ok(Some(Declared {
+        read: texts(table, "permissions.files.read")?,
+        write: texts(table, "permissions.files.write")?,
+        env: texts(table, "permissions.env")?,
+        process: texts(table, "permissions.process")?,
+    }))
+}
+
+/// Reads the `permissions.` keys of a manifest or a policy.
+fn read_permissions(table: &Table, places: &Places) -> Result<Option<Permissions>, String> {
+    match read_declared(table)? {
+        Some(declared) => declared.expand(places).map(Some),
+        None => Ok(None),
     }
-    permissions.env = texts(table, "permissions.env")?.into_iter().collect();
-    permissions.process = texts(table, "permissions.process")?.into_iter().collect();
-    Ok(Some(permissions))
+}
+
+/// The `[permissions]` of a manifest as written; none declared permits nothing (SB-2).
+pub fn declared_in_manifest(source: &str) -> Result<Declared, String> {
+    let table = toml::parse(source)?;
+    Ok(read_declared(&table)?.unwrap_or_default())
 }
 
 /// The permissions of a manifest; a manifest without `[permissions]` permits nothing (SB-2).

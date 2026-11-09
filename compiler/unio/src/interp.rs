@@ -13,7 +13,8 @@
 use crate::ast::*;
 use crate::lower::{
     Block, CallCode, Code, ConstructCode, ExprCode, LambdaCode, ListPat, Lowering, MethodArg,
-    MethodCode, NameFallback, Node, Op, PStep, ParamCode, Part, Pat, Place, Slot, S,
+    MethodCode, NameFallback, Node, Op, PStep, ParamCode, Part, Pat, Place, Slot, TypeBase,
+    TypeCode, S,
 };
 use crate::program::{DefKind, Owner, Program, Symbol};
 use crate::types::Ty;
@@ -232,10 +233,99 @@ pub struct Interp {
     /// The native code of every lowered body, in an executable made by `unio build`; the
     /// interpreter then only dispatches and never evaluates lowered code (runtime 8.4).
     pub(crate) native: std::cell::OnceCell<crate::native::support::Hooks>,
+    /// The front end that lowers bodies at their first use; none in an executable.
+    front: Option<&'static FrontEnd>,
+}
+
+/// What the interpreter needs of the front end: the declarations in the syntax trees, and
+/// the lowering of a body at its first use. An executable made by `unio build` has neither,
+/// since the build lowered every body (docs/runtime.md 8.4), so that it does not link them.
+pub(crate) struct FrontEnd {
+    declarations: fn(&Program) -> Declarations,
+    code: fn(&Interp, FnId) -> Option<Rc<Code>>,
+    constant: fn(&Interp, usize) -> Option<Rc<ExprCode>>,
+    field_default: fn(&Interp, DefId, usize) -> Option<Rc<ExprCode>>,
+    extern_default: fn(&Interp, FnId, usize) -> Option<Rc<ExprCode>>,
+}
+
+/// The item and member that declare each function, and the item of each struct or error.
+type Declarations = (Vec<Option<(usize, Option<usize>)>>, Vec<Option<usize>>);
+
+static FRONT_END: FrontEnd = FrontEnd {
+    declarations,
+    code: Interp::lower_code,
+    constant: Interp::lower_const,
+    field_default: Interp::lower_field_default,
+    extern_default: Interp::lower_extern_default,
+};
+
+/// Where the syntax trees declare the functions and the structs and errors of the program.
+fn declarations(program: &Program) -> Declarations {
+    let mut signatures = FxMap::default();
+    let mut decls = FxMap::default();
+    for (m, module) in program.modules.iter().enumerate() {
+        for (i, item) in module.analysis.file.items.iter().enumerate() {
+            match item {
+                Item::Declaration(d) => match &d.kind {
+                    DeclarationKind::Function(f) => {
+                        signatures.insert((m, f.signature.name.span.start.offset), (i, None));
+                    }
+                    DeclarationKind::External(s) => {
+                        signatures.insert((m, s.name.span.start.offset), (i, None));
+                    }
+                    DeclarationKind::Struct(s) => {
+                        decls.insert((m, s.name.text.clone()), i);
+                    }
+                    DeclarationKind::Error(e) => {
+                        decls.insert((m, e.name.text.clone()), i);
+                    }
+                    DeclarationKind::Interface(x) => {
+                        for (j, (s, _)) in x.members.iter().enumerate() {
+                            signatures.insert((m, s.name.span.start.offset), (i, Some(j)));
+                        }
+                    }
+                    _ => {}
+                },
+                Item::Extend(e) => {
+                    for (j, member) in e.members.iter().enumerate() {
+                        signatures
+                            .insert((m, member.signature.name.span.start.offset), (i, Some(j)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let sig_of = program
+        .funcs
+        .iter()
+        .map(|def| {
+            signatures
+                .get(&(def.module, def.span.start.offset))
+                .copied()
+        })
+        .collect();
+    let decl_of = program
+        .defs
+        .iter()
+        .map(|def| decls.get(&(def.module, def.name.clone())).copied())
+        .collect();
+    (sig_of, decl_of)
 }
 
 impl Interp {
+    /// The interpreter of a checked program, which lowers each body at its first use.
     pub fn new(program: Program) -> Rc<Interp> {
+        Interp::with(program, Some(&FRONT_END))
+    }
+
+    /// The interpreter of a program read from the image of an executable, whose bodies are all
+    /// lowered and installed before it runs.
+    pub(crate) fn prepared(program: Program) -> Rc<Interp> {
+        Interp::with(program, None)
+    }
+
+    fn with(program: Program, front: Option<&'static FrontEnd>) -> Rc<Interp> {
         let mut methods: FxMap<String, FxMap<String, FnId>> = FxMap::default();
         for imp in &program.impls {
             let Some(key) = ty_key(&program, &imp.target) else {
@@ -266,41 +356,13 @@ impl Interp {
                 }
             }
         }
-        let mut signatures = FxMap::default();
-        let mut decls = FxMap::default();
-        for (m, module) in program.modules.iter().enumerate() {
-            for (i, item) in module.analysis.file.items.iter().enumerate() {
-                match item {
-                    Item::Declaration(d) => match &d.kind {
-                        DeclarationKind::Function(f) => {
-                            signatures.insert((m, f.signature.name.span.start.offset), (i, None));
-                        }
-                        DeclarationKind::External(s) => {
-                            signatures.insert((m, s.name.span.start.offset), (i, None));
-                        }
-                        DeclarationKind::Struct(s) => {
-                            decls.insert((m, s.name.text.clone()), i);
-                        }
-                        DeclarationKind::Error(e) => {
-                            decls.insert((m, e.name.text.clone()), i);
-                        }
-                        DeclarationKind::Interface(x) => {
-                            for (j, (s, _)) in x.members.iter().enumerate() {
-                                signatures.insert((m, s.name.span.start.offset), (i, Some(j)));
-                            }
-                        }
-                        _ => {}
-                    },
-                    Item::Extend(e) => {
-                        for (j, member) in e.members.iter().enumerate() {
-                            signatures
-                                .insert((m, member.signature.name.span.start.offset), (i, Some(j)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let (sig_of, decl_of) = match front {
+            Some(front) => (front.declarations)(&program),
+            None => (
+                vec![None; program.funcs.len()],
+                vec![None; program.defs.len()],
+            ),
+        };
         let mut variants: FxMap<String, Vec<DefId>> = FxMap::default();
         for (d, def) in program.defs.iter().enumerate() {
             if let DefKind::Enum(vs) = &def.kind {
@@ -309,10 +371,8 @@ impl Interp {
                 }
             }
         }
-        let files = program
-            .modules
-            .iter()
-            .map(|m| Rc::from(m.path.display().to_string()))
+        let files = (0..program.modules.len())
+            .map(|m| Rc::from(program.trace_path(m)))
             .collect();
         let labels: Vec<Rc<str>> = program
             .funcs
@@ -322,15 +382,6 @@ impl Interp {
         let external_names: Vec<String> = (0..program.funcs.len())
             .map(|f| Interp::external_name(&program, f))
             .collect();
-        let sig_of = program
-            .funcs
-            .iter()
-            .map(|def| {
-                signatures
-                    .get(&(def.module, def.span.start.offset))
-                    .copied()
-            })
-            .collect();
         let externs = program
             .funcs
             .iter()
@@ -339,11 +390,6 @@ impl Interp {
                 Some(_) => None,
                 None => unio_runtime::externs::lookup(name),
             })
-            .collect();
-        let decl_of = program
-            .defs
-            .iter()
-            .map(|def| decls.get(&(def.module, def.name.clone())).copied())
             .collect();
         let mut names: FxMap<String, Rc<str>> = FxMap::default();
         let mut shared = |name: &str| -> Rc<str> {
@@ -420,6 +466,7 @@ impl Interp {
             .map(|_| std::cell::OnceCell::new())
             .collect();
         Rc::new_cyclic(|me| Interp {
+            front,
             var_params,
             intrinsics,
             sig_of,
@@ -587,6 +634,12 @@ impl Interp {
         if let Some(code) = self.codes[f].get() {
             return Some(code);
         }
+        let code = (self.front?.code)(self, f)?;
+        let _ = self.codes[f].set(code);
+        self.codes[f].get().map(|c| &**c)
+    }
+
+    fn lower_code(&self, f: FnId) -> Option<Rc<Code>> {
         let (sig, body) = self.signature(f)?;
         let body = body?;
         let mut lower = Lowering::new(self, self.program.funcs[f].module);
@@ -605,13 +658,12 @@ impl Interp {
             params.push(ParamCode { var, default });
         }
         let body = lower.block(body);
-        let _ = self.codes[f].set(Rc::new(Code {
+        Some(Rc::new(Code {
             slots: lower.slots(),
             defaults: params.iter().any(|p| p.default.is_some()),
             params,
             body,
-        }));
-        self.codes[f].get().map(|c| &**c)
+        }))
     }
 
     /// A lowered expression evaluated alone in the module: a constant or a default of an
@@ -814,28 +866,19 @@ impl Interp {
                 return function(rt, args);
             }
         }
-        let Some((sig, _)) = self.signature(f) else {
-            return Err(internal(
-                rt,
-                format_args!("no declaration for {}", def.name),
-            ));
-        };
         // Defaults of externals are evaluated here, in the declaring module.
         let offset = usize::from(def.self_param.is_some());
-        for (i, param) in sig
-            .params
-            .iter()
-            .filter(|p| !matches!(p, Param::SelfParam { .. }))
-            .enumerate()
-        {
-            let default = match param {
-                Param::Named { default, .. } | Param::Plain { default, .. } => default.as_ref(),
-                Param::SelfParam { .. } => None,
-            };
-            if let (Some(Value::Unit), Some(e)) = (args.get(offset + i), default) {
-                let code = self.expr_code(&self.default_codes, (f, i), def.module, e);
-                args[offset + i] = self.eval_code(rt, def.module, &code)?;
+        for (i, param) in def.params.iter().enumerate() {
+            if !param.has_default || !matches!(args.get(offset + i), Some(Value::Unit)) {
+                continue;
             }
+            let Some(code) = self.extern_default_code(f, i) else {
+                return Err(internal(
+                    rt,
+                    format_args!("no declaration for {}", def.name),
+                ));
+            };
+            args[offset + i] = self.eval_code(rt, def.module, &code)?;
         }
         if self.externs_json[f] == 0 {
             return match self.externs[f] {
@@ -864,19 +907,18 @@ impl Interp {
         &self,
         env: &Env,
         f: FnId,
-        types: &[Type],
+        types: &[TypeCode],
     ) -> Result<Types, Unwind> {
-        self.generic_types_in(&env.types, env.module, f, types)
+        self.generic_types_in(&env.types, f, types)
     }
 
     /// The type arguments of a call to `f`, with the names of the caller's type parameters
-    /// (`env_types`) and of its module.
+    /// (`env_types`).
     pub(crate) fn generic_types_in(
         &self,
         env_types: &Types,
-        module: ModId,
         f: FnId,
-        types: &[Type],
+        types: &[TypeCode],
     ) -> Result<Types, Unwind> {
         if types.is_empty() || self.program.funcs[f].generics.is_empty() {
             return Ok(Rc::clone(&self.empty_types));
@@ -885,7 +927,7 @@ impl Interp {
         for (p, t) in self.program.funcs[f].generics.iter().zip(types) {
             map.insert(
                 self.program.params[*p].name.clone(),
-                self.rt_type(env_types, module, t)?,
+                self.rt_type(env_types, t)?,
             );
         }
         Ok(Rc::new(map))
@@ -2139,8 +2181,24 @@ impl Interp {
         Ok(out)
     }
 
+    /// A lowered expression already made: by the interpreter at its first use, or read from
+    /// the program image of an executable (docs/runtime.md 8.4).
+    fn lowered(
+        cache: &RefCell<FxMap<(usize, usize), Rc<ExprCode>>>,
+        key: (usize, usize),
+    ) -> Option<Rc<ExprCode>> {
+        cache.borrow().get(&key).cloned()
+    }
+
     /// The lowered value of a constant.
     pub(crate) fn const_code(&self, c: usize) -> Option<Rc<ExprCode>> {
+        if let Some(code) = Self::lowered(&self.default_codes, (usize::MAX, c)) {
+            return Some(code);
+        }
+        (self.front?.constant)(self, c)
+    }
+
+    fn lower_const(&self, c: usize) -> Option<Rc<ExprCode>> {
         let def = &self.program.consts[c];
         let expr = match &self.program.modules[def.module].analysis.file.items[def.item] {
             Item::Declaration(d) => match &d.kind {
@@ -2154,6 +2212,13 @@ impl Interp {
 
     /// The lowered default of field `i` of a struct or an error.
     pub(crate) fn field_default_code(&self, d: DefId, i: usize) -> Option<Rc<ExprCode>> {
+        if let Some(code) = Self::lowered(&self.field_codes, (d, i)) {
+            return Some(code);
+        }
+        (self.front?.field_default)(self, d, i)
+    }
+
+    fn lower_field_default(&self, d: DefId, i: usize) -> Option<Rc<ExprCode>> {
         let def = &self.program.defs[d];
         let fields = match &def.kind {
             DefKind::Struct(f) | DefKind::Error(f) => f,
@@ -2171,6 +2236,13 @@ impl Interp {
 
     /// The lowered default of parameter `i` (after `self`) of an external function.
     pub(crate) fn extern_default_code(&self, f: FnId, i: usize) -> Option<Rc<ExprCode>> {
+        if let Some(code) = Self::lowered(&self.default_codes, (f, i)) {
+            return Some(code);
+        }
+        (self.front?.extern_default)(self, f, i)
+    }
+
+    fn lower_extern_default(&self, f: FnId, i: usize) -> Option<Rc<ExprCode>> {
         let def = &self.program.funcs[f];
         let (sig, _) = self.signature(f)?;
         let param = sig
@@ -2301,23 +2373,18 @@ impl Interp {
             DefKind::Struct(f) | DefKind::Error(f) => f,
             _ => return Err(internal(rt, "struct")),
         };
-        let ast = self.fields_of(d);
         let mut out = Vec::with_capacity(fields.len());
         for (i, field) in fields.iter().enumerate() {
             let value = match values[i].take() {
                 Some(v) => v,
-                None => {
-                    let default = ast
-                        .and_then(|a| a.iter().find(|f| f.name.text == field.name))
-                        .and_then(|f| f.default.as_ref());
-                    match default {
-                        Some(e) => {
-                            let code = self.expr_code(&self.field_codes, (d, i), def.module, e);
-                            self.eval_code(rt, def.module, &code)?
-                        }
-                        None => Value::Unit,
-                    }
-                }
+                None => match field
+                    .has_default
+                    .then(|| self.field_default_code(d, i))
+                    .flatten()
+                {
+                    Some(code) => self.eval_code(rt, def.module, &code)?,
+                    None => Value::Unit,
+                },
             };
             out.push((Rc::clone(&self.field_names[d][i]), value));
         }
@@ -2644,51 +2711,30 @@ impl Interp {
 
     // ---------------------------------------------------------------- JSON (S-5, S-17)
 
-    pub(crate) fn rt_type(
-        &self,
-        env_types: &Types,
-        module: ModId,
-        ty: &Type,
-    ) -> Result<RtTy, Unwind> {
-        let name = ty.path.last().map(|n| n.text.as_str()).unwrap_or("");
+    pub(crate) fn rt_type(&self, env_types: &Types, ty: &TypeCode) -> Result<RtTy, Unwind> {
         let args: Vec<RtTy> = ty
-            .arguments
+            .args
             .iter()
-            .map(|a| match a {
-                TypeArgument::Type(t) => self.rt_type(env_types, module, t),
-                _ => Ok(RtTy::Unknown),
-            })
+            .map(|a| self.rt_type(env_types, a))
             .collect::<Result<_, _>>()?;
+        if let Some(t) = ty.generic.as_ref().and_then(|name| env_types.get(name)) {
+            return Ok(t.clone());
+        }
         let arg = |i: usize| Box::new(args.get(i).cloned().unwrap_or(RtTy::Unknown));
-        if ty.path.len() == 1 {
-            if let Some(t) = env_types.get(name) {
-                return Ok(t.clone());
-            }
-            match name {
-                "Int" => return Ok(RtTy::Int),
-                "Float" => return Ok(RtTy::Float),
-                "Bool" => return Ok(RtTy::Bool),
-                "Text" => return Ok(RtTy::Text),
-                "Bytes" => return Ok(RtTy::Bytes),
-                "Path" => return Ok(RtTy::Path),
-                "List" => return Ok(RtTy::List(arg(0))),
-                "Map" => return Ok(RtTy::Map(arg(0), arg(1))),
-                "Set" => return Ok(RtTy::Set(arg(0))),
-                "Tuple" => return Ok(RtTy::Tuple(args)),
-                _ => {}
-            }
-        }
-        let module = if ty.path.len() > 1 {
-            self.program
-                .module_alias(module, &ty.path[0].text)
-                .unwrap_or(module)
-        } else {
-            module
-        };
-        match self.program.lookup(module, name) {
-            Some((_, Symbol::Def(d))) => Ok(RtTy::Named(d, args)),
-            _ => Ok(RtTy::Unknown),
-        }
+        Ok(match ty.base {
+            TypeBase::Int => RtTy::Int,
+            TypeBase::Float => RtTy::Float,
+            TypeBase::Bool => RtTy::Bool,
+            TypeBase::Text => RtTy::Text,
+            TypeBase::Bytes => RtTy::Bytes,
+            TypeBase::Path => RtTy::Path,
+            TypeBase::List => RtTy::List(arg(0)),
+            TypeBase::Map => RtTy::Map(arg(0), arg(1)),
+            TypeBase::Set => RtTy::Set(arg(0)),
+            TypeBase::Tuple => RtTy::Tuple(args),
+            TypeBase::Def(d) => RtTy::Named(d, args),
+            TypeBase::Unknown => RtTy::Unknown,
+        })
     }
 
     pub(crate) fn ty_to_rt(&self, ty: &Ty, subst: &HashMap<usize, RtTy>) -> RtTy {

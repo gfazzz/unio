@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use unio_runtime::fault::EXIT_SANDBOX;
-use unio_runtime::sandbox::{self, Guard, Permissions, Places, Policy, Sandbox, Scope};
+use unio_runtime::sandbox::{self, Declared, Guard, Permissions, Places, Policy, Sandbox, Scope};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
@@ -138,8 +138,8 @@ fn read_manifest(file: &Path) -> Result<(Permissions, Option<PathBuf>), String> 
     Ok((permissions, Some(root)))
 }
 
-/// The manifest of a program for `unio build`: its text and directory, which the executable
-/// keeps, so that it applies the permissions `unio run` would (C-5, SB-1).
+/// The manifest of a program for `unio build`: its text and directory, checked as `unio run`
+/// would check it (C-5, SB-1).
 pub fn manifest_of(file: &Path) -> Result<Option<(String, PathBuf)>, String> {
     let Some(root) = package_root(file) else {
         return Ok(None);
@@ -151,17 +151,23 @@ pub fn manifest_of(file: &Path) -> Result<Option<(String, PathBuf)>, String> {
     Ok(Some((text, root)))
 }
 
-/// The sandbox of an executable made by `unio build`: the manifest kept by the build, narrowed
-/// by the policy of `UNIO_POLICY` (the arguments belong to the program, so there is no
-/// `--policy`). Paths with `$CWD`, `$HOME` and `$TEMP` are those of the run.
-pub fn prepare_embedded(manifest: Option<&(String, PathBuf)>) -> Result<Plan, i32> {
+/// The sandbox of an executable made by `unio build`: the permissions its manifest declared,
+/// kept by the build, narrowed by the policy of `UNIO_POLICY` (the arguments belong to the
+/// program, so there is no `--policy`). Paths with `$CWD`, `$HOME` and `$TEMP` are those of the
+/// run; the build refused relative entries (docs/runtime.md 8.4).
+pub fn prepare_embedded(declared: Option<&Declared>) -> Result<Plan, i32> {
     let fail = |message: String| {
         eprintln!("unio: {message}");
         EXIT_SANDBOX
     };
     let policy = read_policy(&Options::default()).map_err(fail)?;
-    let permissions = match manifest {
-        Some((text, root)) => parse_manifest_at(text, root).map_err(fail)?,
+    let permissions = match declared {
+        Some(declared) => {
+            let places = Places::current(sandbox::working_directory());
+            declared
+                .expand(&places)
+                .map_err(|e| fail(format!("the permissions of this executable: {e}")))?
+        }
         None => Permissions::default(),
     };
     let (permissions, warnings) = sandbox::effective(&permissions, &policy);

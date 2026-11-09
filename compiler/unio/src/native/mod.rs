@@ -39,51 +39,44 @@ pub fn compile_object(file: &Path, release: bool) -> Result<Vec<u8>, BuildError>
             "native executables are made for Linux on x86-64 only so far".into(),
         ));
     }
-    let manifest = crate::sandbox_cli::manifest_of(file).map_err(BuildError::Message)?;
+    let permissions = permissions_of(file).map_err(BuildError::Message)?;
     let file = file.to_path_buf();
-    crate::on_front_end_stack(move || compile(&file, manifest, release))
+    crate::on_front_end_stack(move || compile(&file, permissions.as_ref(), release))
 }
 
-/// The object file of the program: loads and checks it, lowers every body, embeds the image.
+/// The permissions the manifest of the program's package declares, which the executable
+/// expands when it starts (docs/runtime.md 8.4). `$HOME`, `$CWD`, and `$TEMP` then are those of
+/// the run. A relative entry is refused: it is relative to the directory of the manifest
+/// (T-6a), which an executable that is installed or moved does not have.
+fn permissions_of(file: &Path) -> Result<Option<unio_runtime::sandbox::Declared>, String> {
+    let Some((text, root)) = crate::sandbox_cli::manifest_of(file)? else {
+        return Ok(None);
+    };
+    let manifest = root.join("unio.toml");
+    let declared = unio_runtime::sandbox::declared_in_manifest(&text)
+        .map_err(|e| format!("the manifest {} is invalid: {e}", manifest.display()))?;
+    if let Some((key, entry)) = declared.relative_entries().first() {
+        return Err(format!(
+            "the manifest {} permits the relative path '{entry}' in {key}; an executable has no directory of its manifest when it runs, so write $CWD/{entry} for the working directory of the run, or an absolute path",
+            manifest.display()
+        ));
+    }
+    Ok(Some(declared))
+}
+
+/// The object file of the program: loads and checks it, lowers every body, writes the image.
 fn compile(
     file: &Path,
-    manifest: Option<(String, PathBuf)>,
+    permissions: Option<&unio_runtime::sandbox::Declared>,
     release: bool,
 ) -> Result<Vec<u8>, BuildError> {
     let program = crate::load_for_run(&[file.to_path_buf()], crate::effects::Profile::Application)
         .map_err(BuildError::Program)?;
-    let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
-    let main = program.modules[module].path.clone();
-    let stdlib = program.stdlib_root().map(Path::to_path_buf);
-    let mut files: Vec<(PathBuf, String)> = program
-        .modules
-        .iter()
-        .map(|m| (m.path.clone(), m.analysis.source.clone()))
-        .collect();
-    // The manifests that decide the packages, and so the module names in traces.
-    for m in program.modules.iter().filter(|m| !m.stdlib) {
-        let toml = m.package.join("unio.toml");
-        if let Ok(text) = std::fs::read_to_string(&toml) {
-            files.push((toml, text));
-        }
-    }
-    files.sort();
-    files.dedup_by(|a, b| a.0 == b.0);
-    let image = image::Embedded {
-        main,
-        stdlib,
-        manifest,
-        files,
-    };
     let interp = crate::interp::Interp::new(program);
     let units = units::collect(&interp);
-    codegen::compile(
-        &interp,
-        &units,
-        &image.encode(),
-        &codegen::Options { release },
-    )
-    .map_err(BuildError::Message)
+    let image = image::encode(&interp, &units, permissions).map_err(BuildError::Message)?;
+    codegen::compile(&interp, &units, &image, &codegen::Options { release })
+        .map_err(BuildError::Message)
 }
 
 /// `libunio.a`: `UNIO_RUNTIME_LIB`, or the one built next to this compiler.

@@ -1,12 +1,14 @@
 //! The units of native code and the references they need at run time (docs/runtime.md 8.4).
 //!
 //! A unit is a lowered body: a function, a constant, the default of a field or of a parameter
-//! of an external function, or a lambda. The build and the executable both lower the same
-//! program and enumerate its units with [`collect`], in the same order; [`refs`] then walks
-//! each unit in one canonical order and lists the lowered statements, nodes, patterns, and
-//! literal values that its native code passes to the runtime. The build numbers them, and the
-//! executable fills a table of their addresses with the same numbers before `main` runs, so
-//! native code reaches its call-site caches and literals with one load.
+//! of an external function, or a lambda. The build lowers the program and enumerates its units
+//! with [`collect`]; it writes every unit but the lambdas into the program image, in the same
+//! order, and the executable reads them back and finds the lambdas inside them with
+//! [`add_lambdas`], as the build did. [`refs`] then walks each unit in one canonical order and
+//! lists the lowered statements, nodes, patterns, and literal values that its native code
+//! passes to the runtime. The build numbers them, and the executable fills a table of their
+//! addresses with the same numbers before `main` runs, so native code reaches its call-site
+//! caches and literals with one load.
 
 use crate::interp::Interp;
 use crate::lower::{Block, Code, ExprCode, LambdaCode, Node, PStep, Part, Pat, Place, Stmt, S};
@@ -22,7 +24,21 @@ pub(crate) enum Body {
 
 pub(crate) struct Unit {
     pub module: usize,
+    pub key: Key,
     pub body: Body,
+}
+
+/// What a unit is the body of, so that the executable puts it where the interpreter's tables
+/// keep lowered code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Key {
+    Func(usize),
+    Const(usize),
+    /// Field `.1` of declaration `.0`.
+    Field(usize, usize),
+    /// Parameter `.1` (after `self`) of external function `.0`.
+    ExternDefault(usize, usize),
+    Lambda,
 }
 
 /// One reference of a unit, by address.
@@ -61,6 +77,7 @@ pub(crate) fn collect(interp: &Interp) -> Vec<Unit> {
         if let Some(code) = interp.codes[f].get() {
             units.push(Unit {
                 module: def.module,
+                key: Key::Func(f),
                 body: Body::Func(f, Rc::clone(code)),
             });
         }
@@ -69,6 +86,7 @@ pub(crate) fn collect(interp: &Interp) -> Vec<Unit> {
         if let Some(code) = interp.const_code(c) {
             units.push(Unit {
                 module: program.consts[c].module,
+                key: Key::Const(c),
                 body: Body::Expr(code),
             });
         }
@@ -82,6 +100,7 @@ pub(crate) fn collect(interp: &Interp) -> Vec<Unit> {
                 if let Some(code) = interp.field_default_code(d, i) {
                     units.push(Unit {
                         module: def.module,
+                        key: Key::Field(d, i),
                         body: Body::Expr(code),
                     });
                 }
@@ -99,11 +118,18 @@ pub(crate) fn collect(interp: &Interp) -> Vec<Unit> {
             if let Some(code) = interp.extern_default_code(f, i) {
                 units.push(Unit {
                     module: def.module,
+                    key: Key::ExternDefault(f, i),
                     body: Body::Expr(code),
                 });
             }
         }
     }
+    add_lambdas(&mut units);
+    units
+}
+
+/// Adds the lambdas created inside the units, and inside those lambdas, after them.
+pub(crate) fn add_lambdas(units: &mut Vec<Unit>) {
     let mut next = 0;
     while next < units.len() {
         let mut lambdas = Vec::new();
@@ -113,12 +139,12 @@ pub(crate) fn collect(interp: &Interp) -> Vec<Unit> {
         for code in lambdas {
             units.push(Unit {
                 module,
+                key: Key::Lambda,
                 body: Body::Lambda(code),
             });
         }
         next += 1;
     }
-    units
 }
 
 /// The references of a unit in canonical order, and the lambdas it creates.

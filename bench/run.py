@@ -3,10 +3,12 @@
 
 Usage:
     python3 bench/run.py [--runs N] [--only NAME,...] [--json FILE] [--check-floor] [--unio PATH]
-                         [--native]
+                         [--native] [--check-go] [--check-startup]
 
 With --native, each Unio program is also built with `unio build --release` and runs as a native
 executable ("Unio native"); the ratios and the floor then refer to the native executable.
+The benchmark "empty" measures the start of an empty program: the median of STARTUP_RUNS runs,
+and with --check-startup the native executable must start within 5 ms (requirement 7.1).
 
 The rules of the comparison are in bench/README.md. Only the Python standard library is used.
 """
@@ -39,6 +41,11 @@ GO_LIMIT = 2.0
 GO_GATED = ("wc", "loop")
 # Peak resident memory: at most twice Go's peak plus 8 MB for the runtime, on the same gate.
 GO_MEMORY_ALLOWANCE = 8_000_000
+
+# Requirement 7.1: the start of an empty program at most 5 ms. A start takes a few milliseconds,
+# so one run is noise: the median of many runs is compared, and the spread is recorded.
+STARTUP_LIMIT = 0.005
+STARTUP_RUNS = 101
 
 VOCABULARY = (
     "the quick brown fox jumps over lazy dog and then runs into forest where "
@@ -228,10 +235,12 @@ def launcher():
     return _LAUNCHER[0]
 
 
-def run_once(command, cwd):
+def run_once(command, cwd, own_clock=False):
     """Runs the command; returns (exit code, stdout, stderr, wall seconds, peak RSS in bytes).
 
-    The launcher adds well under a millisecond to the wall time; without it the peak is None."""
+    The launcher adds well under a millisecond to the wall time; without it the peak is None.
+    With `own_clock`, the time is the launcher's, from its fork to the end of the child, which
+    leaves out the start of the launcher by Python (for the start-up benchmark)."""
     tool = launcher()
     start = time.perf_counter()
     done = subprocess.run(([tool] if tool else []) + command, capture_output=True, cwd=cwd)
@@ -241,18 +250,21 @@ def run_once(command, cwd):
     if tool:
         head, _, last = stderr.rstrip("\n").rpartition("\n")
         if last.startswith("peak_rss "):
-            peak = int(last.split()[1])
+            fields = last.split()
+            peak = int(fields[1])
+            if own_clock and len(fields) > 2:
+                elapsed = int(fields[2]) / 1e9
             stderr = head
     return done.returncode, done.stdout.decode("utf-8", "replace"), stderr, elapsed, peak
 
 
-def measure(command, runs, cwd, memory=None, samples=None):
+def measure(command, runs, cwd, memory=None, samples=None, own_clock=False):
     """Best wall time of the runs and the output; the peak RSS of each run goes into `memory`
     and the time of each run into `samples`, so that the median and the spread are recorded."""
     best = None
     output = None
     for _ in range(runs):
-        code, stdout, stderr, elapsed, peak = run_once(command, cwd)
+        code, stdout, stderr, elapsed, peak = run_once(command, cwd, own_clock)
         if code != 0:
             return None, (stderr.strip().splitlines() or ["exit " + str(code)])[-1]
         output = stdout.strip()
@@ -315,12 +327,15 @@ def tool_rows(languages, runs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--runs", type=int, default=3, help="best of N runs (default 3)")
-    parser.add_argument("--only", default="wc,json,text,loop,tools", help="benchmarks to run")
+    parser.add_argument("--only", default="wc,json,text,loop,empty,tools", help="benchmarks to run")
     parser.add_argument("--json", default=str(BENCH / "results.json"), help="where to write JSON")
     parser.add_argument("--check-floor", action="store_true",
                         help="exit 1 if Unio is slower than 0.5x Python on wc, json, text, loop")
     parser.add_argument("--check-go", action="store_true",
                         help="exit 1 if Unio is above the time or memory limits against Go of RFC 0003")
+    parser.add_argument("--check-startup", action="store_true",
+                        help="exit 1 if the native executable of an empty program starts in more than 5 ms"
+                             " (median of the runs of the benchmark empty; needs --native)")
     parser.add_argument("--unio", default=None, help="path to the unio binary")
     parser.add_argument("--native", action="store_true",
                         help="also build the Unio programs with unio build --release and compare those")
@@ -388,10 +403,15 @@ def main():
                 if row["benchmark"] == name and row["case"] == "built-in library":
                     for language in ("Java", "Rust"):
                         row["notes"].setdefault(language, "no JSON in the standard library")
+    startup_failures = []
+    if "empty" in selected:
+        rows.append(startup_row(languages, startup_failures, failures))
     if "tools" in selected:
         rows.extend(tool_rows(languages, options.runs))
 
     print_table(rows, reference(languages))
+    if "empty" in selected:
+        print_startup(next(r for r in rows if r["benchmark"] == "empty"))
 
     floor_failures = []
     for row in rows:
@@ -447,6 +467,8 @@ def main():
         "go_limit": GO_LIMIT,
         "go_gated": list(GO_GATED),
         "go_failures": go_failures,
+        "startup_limit": STARTUP_LIMIT,
+        "startup_failures": startup_failures,
     }
     Path(options.json).write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"\nJSON written to {options.json}")
@@ -458,9 +480,71 @@ def main():
     for failure in go_failures:
         print(f"{'error' if options.check_go else 'note'}: against Go (RFC 0003): {failure}",
               file=sys.stderr)
-    if failures or (options.check_floor and floor_failures) or (options.check_go and go_failures):
+    if options.check_startup and not languages.native:
+        startup_failures.append("--check-startup needs --native")
+    if options.check_startup and "empty" not in selected:
+        startup_failures.append("--check-startup needs the benchmark empty")
+    for failure in startup_failures:
+        print(f"{'error' if options.check_startup else 'note'}: start-up (7.1): {failure}", file=sys.stderr)
+    if (failures or (options.check_floor and floor_failures) or (options.check_go and go_failures)
+            or (options.check_startup and startup_failures)):
         return 1
     return 0
+
+
+def startup_row(languages, startup_failures, failures):
+    """(f): the start of an empty program in each language, the median of STARTUP_RUNS runs by
+    the launcher's clock; the limit of 7.1 applies to the native executable."""
+    row = {"benchmark": "empty", "case": "start-up (median)", "times": {}, "notes": {}}
+    for language, _, source in programs("empty", languages):
+        if language in languages.missing:
+            row["notes"][language] = "skipped: " + languages.missing[language]
+            continue
+        try:
+            command = languages.command(language, source, None)
+        except subprocess.CalledProcessError as e:
+            row["notes"][language] = f"build failed: {e}"
+            failures.append(f"empty/{language}: build failed")
+            continue
+        peaks, samples = [], []
+        t, out = measure(command, STARTUP_RUNS, ROOT, peaks, samples, own_clock=True)
+        if t is None:
+            row["notes"][language] = "failed: " + out
+            failures.append(f"empty/{language}: {out}")
+            continue
+        median = statistics.median(samples)
+        row["times"][language] = median
+        row.setdefault("runs", {})[language] = {
+            "times": samples,
+            "best": t,
+            "median": median,
+            "spread": max(samples) - min(samples),
+        }
+        if peaks:
+            row.setdefault("memory", {})[language] = min(peaks)
+        print(f"  empty start-up {language:<11} median {median * 1000:6.2f} ms, best {t * 1000:6.2f} ms"
+              f" of {STARTUP_RUNS} runs", file=sys.stderr)
+    native = row["times"].get("Unio native")
+    if languages.native:
+        if native is None:
+            startup_failures.append("no time for Unio native")
+        elif native > STARTUP_LIMIT:
+            startup_failures.append(f"Unio native starts in {native * 1000:.2f} ms (median), above"
+                                    f" {STARTUP_LIMIT * 1000:.0f} ms")
+    return row
+
+
+def print_startup(row):
+    """The start-up row in milliseconds, against the limit of 7.1."""
+    print(f"\nStart of an empty program, median of {STARTUP_RUNS} runs (7.1: at most"
+          f" {STARTUP_LIMIT * 1000:.0f} ms natively):")
+    for language in ORDER:
+        t = row["times"].get(language)
+        if t is not None:
+            runs = row.get("runs", {}).get(language, {})
+            spread = runs.get("spread")
+            extra = f", spread {spread * 1000:.2f} ms" if spread is not None else ""
+            print(f"  {language:<11} {t * 1000:7.2f} ms{extra}")
 
 
 def print_memory(rows):

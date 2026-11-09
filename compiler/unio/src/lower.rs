@@ -220,8 +220,32 @@ pub(crate) struct CallCode {
     pub f: usize,
     pub args: Vec<ArgCode>,
     /// Explicit type arguments, resolved at the call for `std.json.from_value`.
-    pub types: Vec<Type>,
+    pub types: Vec<TypeCode>,
     pub count: usize,
+}
+
+/// A written type argument with its names resolved in its module: at the call, a name of one
+/// part is first a type parameter of the caller (`generic`), then `base` with `args`.
+pub(crate) struct TypeCode {
+    pub generic: Option<String>,
+    pub base: TypeBase,
+    pub args: Vec<TypeCode>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TypeBase {
+    Int,
+    Float,
+    Bool,
+    Text,
+    Bytes,
+    Path,
+    List,
+    Map,
+    Set,
+    Tuple,
+    Def(usize),
+    Unknown,
 }
 
 pub(crate) struct ConstructCode {
@@ -906,7 +930,7 @@ impl<'a> Lowering<'a> {
         Node::Call(Box::new(CallCode {
             f,
             args,
-            types: types.to_vec(),
+            types: types.iter().map(|t| self.type_code(t)).collect(),
             count,
         }))
     }
@@ -976,6 +1000,59 @@ impl<'a> Lowering<'a> {
             return *slot;
         }
         self.bind(name)
+    }
+
+    /// A type argument as the call resolves it (`Interp::rt_type`): the names of the module
+    /// are resolved here, the type parameters of the caller at the call.
+    fn type_code(&self, ty: &Type) -> TypeCode {
+        let name = ty.path.last().map(|n| n.text.as_str()).unwrap_or("");
+        let args = ty
+            .arguments
+            .iter()
+            .map(|a| match a {
+                TypeArgument::Type(t) => self.type_code(t),
+                _ => TypeCode {
+                    generic: None,
+                    base: TypeBase::Unknown,
+                    args: Vec::new(),
+                },
+            })
+            .collect();
+        let builtin = match name {
+            "Int" => Some(TypeBase::Int),
+            "Float" => Some(TypeBase::Float),
+            "Bool" => Some(TypeBase::Bool),
+            "Text" => Some(TypeBase::Text),
+            "Bytes" => Some(TypeBase::Bytes),
+            "Path" => Some(TypeBase::Path),
+            "List" => Some(TypeBase::List),
+            "Map" => Some(TypeBase::Map),
+            "Set" => Some(TypeBase::Set),
+            "Tuple" => Some(TypeBase::Tuple),
+            _ => None,
+        };
+        let program = &self.interp.program;
+        let base = match builtin {
+            Some(b) if ty.path.len() == 1 => b,
+            _ => {
+                let module = if ty.path.len() > 1 {
+                    program
+                        .module_alias(self.module, &ty.path[0].text)
+                        .unwrap_or(self.module)
+                } else {
+                    self.module
+                };
+                match program.lookup(module, name) {
+                    Some((_, Symbol::Def(d))) => TypeBase::Def(d),
+                    _ => TypeBase::Unknown,
+                }
+            }
+        };
+        TypeCode {
+            generic: (ty.path.len() == 1).then(|| name.to_string()),
+            base,
+            args,
+        }
     }
 
     /// The declared type a written path names in the module: `Node`, or `trees.Node` through

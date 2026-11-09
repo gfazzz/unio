@@ -313,7 +313,94 @@ pub fn symbol_module_files(query: &str, start: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// What an executable made by `unio build` keeps of a module (docs/runtime.md 8.4).
+pub struct PreparedModule {
+    pub name: String,
+    /// The path of traces ([`Program::trace_path`]).
+    pub path: String,
+    pub stdlib: bool,
+    pub prelude: bool,
+    pub report: bool,
+}
+
 impl Program {
+    /// A program read from the image of an executable: its declarations without syntax trees,
+    /// sources, or imports, which the run does not need once every body is lowered.
+    pub fn prepared(
+        modules: Vec<PreparedModule>,
+        defs: Vec<Def>,
+        funcs: Vec<FnDef>,
+        consts: Vec<ConstDef>,
+        impls: Vec<Impl>,
+        params: Vec<ParamInfo>,
+    ) -> Program {
+        let modules = modules
+            .into_iter()
+            .map(|m| Module {
+                name: m.name,
+                analysis: Analysis {
+                    path: m.path.clone(),
+                    source: String::new(),
+                    diagnostics: Vec::new(),
+                    comments: Vec::new(),
+                    file: ast::File {
+                        unsafe_module: false,
+                        items: Vec::new(),
+                    },
+                },
+                path: PathBuf::from(m.path),
+                stdlib: m.stdlib,
+                prelude: m.prelude,
+                package: PathBuf::new(),
+                report: m.report,
+                given: m.report,
+                symbols: HashMap::new(),
+                imports: HashMap::new(),
+                edges: Vec::new(),
+            })
+            .collect();
+        Program {
+            modules,
+            defs,
+            funcs,
+            consts,
+            impls,
+            params,
+            prelude: HashMap::new(),
+            diagnostics: Vec::new(),
+            calls: Vec::new(),
+            generic_calls: Vec::new(),
+            usages: Vec::new(),
+            effect_facts: Default::default(),
+            tests: TestScope::None,
+            by_path: HashMap::new(),
+            stdlib_root: None,
+        }
+    }
+
+    /// The file of a module as traces show it (C-14): relative to the root of its package
+    /// (the directory of its `unio.toml`, or of the file without one), and `std:` with the
+    /// path below the standard library for its modules, so that a trace names the same files
+    /// wherever the program was built or runs.
+    pub fn trace_path(&self, module: ModId) -> String {
+        let m = &self.modules[module];
+        let (prefix, root) = if m.stdlib {
+            ("std:", self.stdlib_root.as_deref())
+        } else {
+            ("", Some(m.package.as_path()))
+        };
+        match root.and_then(|r| m.path.strip_prefix(r).ok()) {
+            Some(relative) => {
+                let parts: Vec<String> = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                format!("{prefix}{}", parts.join("/"))
+            }
+            None => m.path.to_string_lossy().into_owned(),
+        }
+    }
+
     /// The directory of the standard library the program was loaded with.
     pub fn stdlib_root(&self) -> Option<&Path> {
         self.stdlib_root.as_deref()

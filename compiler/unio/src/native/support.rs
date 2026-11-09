@@ -424,12 +424,13 @@ pub unsafe extern "C" fn unio_rt_call(
 }
 
 /// A call with explicit type arguments (`std.json.from_value[T]`): the call node gives them,
-/// resolved with the caller's type arguments and module.
+/// resolved in their module by the lowering and here with the caller's type arguments. The
+/// module of the caller is passed but no longer needed.
 #[no_mangle]
 pub unsafe extern "C" fn unio_rt_call_typed(
     ctx: *mut Ctx,
     n: *const Node,
-    module: i64,
+    _module: i64,
     types: *const (),
     args: *mut Value,
     count: i64,
@@ -441,10 +442,7 @@ pub unsafe extern "C" fn unio_rt_call_typed(
         return c.fail(e);
     };
     let env_types = c.types(types);
-    let types = match c
-        .interp
-        .generic_types_in(&env_types, module as usize, call.f, &call.types)
-    {
+    let types = match c.interp.generic_types_in(&env_types, call.f, &call.types) {
         Ok(t) => t,
         Err(e) => return c.fail(e),
     };
@@ -1633,8 +1631,11 @@ pub unsafe extern "C" fn unio_native_main(
     }
     let image = &*image;
     if image.magic != MAGIC || image.value_size as usize != unio_runtime::value::layout::SIZE {
-        eprintln!("unio: this executable was built by another version of unio");
-        return 2;
+        eprintln!(
+            "unio: {}",
+            super::image::Refusal::Format(image.magic as u32 & 0xffff)
+        );
+        return unio_runtime::fault::EXIT_IMAGE;
     }
     let data = std::slice::from_raw_parts(image.data, image.data_len as usize).to_vec();
     let units = image.units as usize;
@@ -1654,6 +1655,15 @@ pub unsafe extern "C" fn unio_native_main(
     code
 }
 
+/// Refuses an image this runtime cannot run, with code 104.
+fn refuse(why: super::image::Refusal) -> i32 {
+    eprintln!("unio: {why}");
+    unio_runtime::fault::EXIT_IMAGE
+}
+
+/// The start of an executable (docs/runtime.md 8.4): reads the program image, builds the
+/// interpreter's tables from its declarations without the front end, installs the lowered
+/// bodies and the native code of every unit, applies the sandbox, and runs `main`.
 fn start(
     data: &[u8],
     entries: &[Entry],
@@ -1661,22 +1671,25 @@ fn start(
     lengths: &[u64],
     args: Vec<String>,
 ) -> i32 {
-    let Some(image) = super::image::Embedded::decode(data) else {
-        eprintln!("unio: the program image is damaged");
-        return 2;
+    let opened = match super::image::open(data) {
+        Ok(opened) => opened,
+        Err(why) => return refuse(why),
     };
-    crate::vfs::install(image.stdlib.clone(), image.files.clone());
-    let plan = match crate::sandbox_cli::prepare_embedded(image.manifest.as_ref()) {
+    let plan = match crate::sandbox_cli::prepare_embedded(opened.permissions.as_ref()) {
         Ok(plan) => plan,
         Err(code) => return code,
     };
-    let program = crate::program::Program::load(std::slice::from_ref(&image.main));
-    let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
-    let interp = Interp::new(program);
-    let units = super::units::collect(&interp);
+    let module = opened.main;
+    let interp = Interp::prepared(opened.program);
+    let mut units = match super::image::read_units(opened.rest, &interp) {
+        Ok(units) => units,
+        Err(why) => return refuse(why),
+    };
+    super::units::add_lambdas(&mut units);
     if units.len() != entries.len() {
-        eprintln!("unio: the program image does not match its code");
-        return 2;
+        return refuse(super::image::Refusal::Damaged(
+            "it does not match the native code".into(),
+        ));
     }
     let mut hooks = Hooks {
         funcs: vec![None; interp.program.funcs.len()],
@@ -1687,23 +1700,34 @@ fn start(
         let mut lambdas = Vec::new();
         super::units::refs(unit, &mut refs, &mut lambdas);
         if refs.len() as u64 != lengths[i] {
-            eprintln!("unio: the program image does not match its code");
-            return 2;
+            return refuse(super::image::Refusal::Damaged(
+                "it does not match the native code".into(),
+            ));
         }
         let table = tables[i] as *mut usize;
         for (j, r) in refs.iter().enumerate() {
             unsafe { *table.add(j) = r.address() };
         }
-        match &unit.body {
-            super::units::Body::Func(f, _) => hooks.funcs[*f] = Some(entries[i]),
-            super::units::Body::Expr(code) => {
-                hooks.exprs.insert(Rc::as_ptr(code) as usize, entries[i]);
+        match (&unit.key, &unit.body) {
+            (super::units::Key::Func(f), super::units::Body::Func(_, code)) => {
+                hooks.funcs[*f] = Some(entries[i]);
+                let _ = interp.codes[*f].set(Rc::clone(code));
             }
-            super::units::Body::Lambda(_) => {}
+            (key, super::units::Body::Expr(code)) => {
+                hooks.exprs.insert(Rc::as_ptr(code) as usize, entries[i]);
+                let (cache, at) = match *key {
+                    super::units::Key::Const(c) => (&interp.default_codes, (usize::MAX, c)),
+                    super::units::Key::Field(d, f) => (&interp.field_codes, (d, f)),
+                    super::units::Key::ExternDefault(f, p) => (&interp.default_codes, (f, p)),
+                    _ => continue,
+                };
+                cache.borrow_mut().insert(at, Rc::clone(code));
+            }
+            _ => {}
         }
     }
-    // The units stay alive with the interpreter's caches of lowered code, which the tables
-    // point into.
+    // The lowered code lives in the interpreter's tables, which the tables of references point
+    // into; the lambdas live inside it.
     drop(units);
     let _ = interp.native.set(hooks);
     // SB-1: the sandbox applies after the program is loaded and before main runs.
