@@ -949,9 +949,10 @@ fn unio_in(dir: &Path, args: &[&str], stdlib: Option<&Path>) -> (Option<i32>, St
     if let Some(root) = stdlib {
         command.env("UNIO_STDLIB", root);
     }
-    let sandboxed = matches!(args.first(), Some(&"run") | Some(&"test"));
     command.arg(args[0]);
-    if sandboxed && cfg!(windows) {
+    if cfg!(windows) {
+        // Programs and the workers of the tools need the operator's permission for the weaker
+        // sandbox on Windows (SB-5, SB-10).
         command.arg("--allow-weaker-sandbox");
     }
     let output = command.args(&args[1..]).output().unwrap();
