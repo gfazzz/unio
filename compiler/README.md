@@ -425,6 +425,11 @@ The tests were written before the code (concept, section 1.2):
   that is missing, because there is no resolver, lock file or package identity yet (T-14). E0046
   is static; at run time decoding a struct with a private field also fails with `DecodeError`,
   while encoding has no such second guard.
-- The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object), the isolated workers
-  of the tools (SB-10 to SB-13), the hostile projects of SB-15, native code for macOS, Windows and AArch64 and the rest of S6
-  (docs/runtime.md 8.6), and the other commands of requirement 6.1.
+- Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows a worker has only a
+  Job Object (memory, one process) and its files and network are not restricted; `stat` is not
+  restricted anywhere; the tool still reads the manifest and the policy itself for the sandboxes
+  of `run` and `test`; the language server (SB-13), the package operations (SB-12) and the
+  archives of SB-15 do not exist yet.
+- The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object for
+  programs), native code for macOS, Windows and AArch64 and the rest of S6 (docs/runtime.md
+  8.6), and the other commands of requirement 6.1.

@@ -152,7 +152,7 @@ pub fn check_files_with(files: &[std::path::PathBuf], profile: effects::Profile)
 }
 
 /// The analyses of the given files, with the semantic diagnostics merged in.
-fn analyses(mut program: program::Program) -> Vec<Analysis> {
+pub fn analyses(mut program: program::Program) -> Vec<Analysis> {
     let semantic = std::mem::take(&mut program.diagnostics);
     let mut modules = std::mem::take(&mut program.modules);
     for (module, diagnostic) in semantic {

@@ -173,6 +173,37 @@ pub fn writer_profile(scopes: &[Scope]) -> String {
     p
 }
 
+/// Applies the profile of a worker of the tools to this process (SB-11, docs/runtime.md 9.7).
+pub fn apply_worker(read: &[Scope], write: &[Scope], cwd: &Path) -> Result<(), String> {
+    init(&worker_profile(read, write, cwd))
+}
+
+/// The profile of a worker: it may read the read trees, read and write the write trees, and
+/// list its working directory, which `getcwd` needs to resolve relative paths; it may not
+/// start or execute a process, has no network, and may signal only itself.
+pub fn worker_profile(read: &[Scope], write: &[Scope], cwd: &Path) -> String {
+    let mut p = String::from(
+        "(version 1)\n(deny default)\n(allow file-read-metadata)\n(allow sysctl-read)\n\
+         (allow signal (target self))\n\
+         (allow file-read* file-write-data (literal \"/dev/null\"))\n\
+         (allow file-read* (literal \"/dev/urandom\") (literal \"/dev/random\"))\n",
+    );
+    p.push_str(&format!(
+        "(allow file-read-data (literal {}))\n",
+        quoted(cwd)
+    ));
+    for scope in read {
+        p.push_str(&format!("(allow file-read* {})\n", filter(scope)));
+    }
+    for scope in write {
+        p.push_str(&format!(
+            "(allow file-read* file-write* {})\n",
+            filter(scope)
+        ));
+    }
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +255,23 @@ mod tests {
         assert!(w.contains("\\.a\\.json\\.unio-tmp-"), "{w}");
         assert!(w.contains("(allow file-read-data (literal \"/h\"))"), "{w}");
         assert!(!w.contains("process-exec") && !w.contains("network"));
+        let k = worker_profile(
+            &permissions.read,
+            &[Scope {
+                root: PathBuf::from("/t"),
+                subtree: true,
+            }],
+            Path::new("/c"),
+        );
+        assert!(k.contains("(deny default)"));
+        assert!(k.contains("(allow file-read* (subpath \"/w\"))"), "{k}");
+        assert!(
+            k.contains("(allow file-read* file-write* (subpath \"/t\"))"),
+            "{k}"
+        );
+        assert!(
+            !k.contains("process-fork") && !k.contains("process-exec") && !k.contains("network")
+        );
     }
 
     /// Seatbelt applies to the whole process, so it is tried in a child process: the test

@@ -14,6 +14,17 @@ struct Embedded {
 
 static EMBEDDED: OnceLock<Embedded> = OnceLock::new();
 
+/// The standard library a worker of the tools was given by the tool (docs/runtime.md 9.7):
+/// the worker sees no `UNIO_STDLIB`, since it receives no environment but the language of
+/// messages.
+static STDLIB: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Makes the directory the standard library of every program loaded from the file system;
+/// `None`: there is none, as for the tool.
+pub fn use_stdlib(dir: Option<PathBuf>) {
+    let _ = STDLIB.set(dir);
+}
+
 /// Makes the embedded files the only files programs are loaded from.
 pub fn install(stdlib: Option<PathBuf>, files: Vec<(PathBuf, String)>) {
     let _ = EMBEDDED.set(Embedded {
@@ -23,8 +34,12 @@ pub fn install(stdlib: Option<PathBuf>, files: Vec<(PathBuf, String)>) {
 }
 
 /// The standard library directory recorded by the build, when the files are embedded.
+/// Also the directory given by [`use_stdlib`].
 pub(crate) fn embedded_stdlib() -> Option<Option<PathBuf>> {
-    EMBEDDED.get().map(|e| e.stdlib.clone())
+    EMBEDDED
+        .get()
+        .map(|e| e.stdlib.clone())
+        .or_else(|| STDLIB.get().cloned())
 }
 
 pub(crate) fn is_file(path: &Path) -> bool {

@@ -23,18 +23,25 @@ pub fn supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 
-/// Builds the program of `file` into the executable `out` (C-5).
+/// Builds the program of `file` into the executable `out` (C-5), in this process. `unio build`
+/// does the same in two sandboxed steps instead: [`compile_object`] in the worker of the tool,
+/// and the C compiler, run as [`link_command`] says, in a link step (docs/runtime.md 9.7).
 pub fn build(file: &Path, out: &Path, release: bool) -> Result<(), BuildError> {
+    let object = compile_object(file, release)?;
+    let runtime = runtime_library().map_err(BuildError::Message)?;
+    link(&object, &runtime, out).map_err(BuildError::Message)
+}
+
+/// The object file of the program of `file`: everything of a build but linking.
+pub fn compile_object(file: &Path, release: bool) -> Result<Vec<u8>, BuildError> {
     if !supported() {
         return Err(BuildError::Message(
             "native executables are made for Linux on x86-64 only so far".into(),
         ));
     }
-    let runtime = runtime_library().map_err(BuildError::Message)?;
     let manifest = crate::sandbox_cli::manifest_of(file).map_err(BuildError::Message)?;
     let file = file.to_path_buf();
-    let object = crate::on_front_end_stack(move || compile(&file, manifest, release))?;
-    link(&object, &runtime, out).map_err(BuildError::Message)
+    crate::on_front_end_stack(move || compile(&file, manifest, release))
 }
 
 /// The object file of the program: loads and checks it, lowers every body, embeds the image.
@@ -80,7 +87,7 @@ fn compile(
 }
 
 /// `libunio.a`: `UNIO_RUNTIME_LIB`, or the one built next to this compiler.
-fn runtime_library() -> Result<PathBuf, String> {
+pub fn runtime_library() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("UNIO_RUNTIME_LIB") {
         return Ok(PathBuf::from(p));
     }
@@ -108,6 +115,32 @@ fn runtime_library() -> Result<PathBuf, String> {
     ))
 }
 
+/// The C compiler (`cc`, or `CC`) and its arguments that link the object file with the runtime
+/// into the executable `out`.
+pub fn link_command(
+    object: &Path,
+    runtime: &Path,
+    out: &Path,
+) -> (String, Vec<std::ffi::OsString>) {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut args: Vec<std::ffi::OsString> =
+        vec!["-o".into(), out.into(), object.into(), runtime.into()];
+    args.extend(
+        [
+            "-Wl,--gc-sections",
+            "-lgcc_s",
+            "-lutil",
+            "-lrt",
+            "-lpthread",
+            "-lm",
+            "-ldl",
+            "-lc",
+        ]
+        .map(std::ffi::OsString::from),
+    );
+    (cc, args)
+}
+
 /// Links the object with the runtime by the system C compiler (`cc`, or `CC`).
 fn link(object: &[u8], runtime: &Path, out: &Path) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!(
@@ -120,23 +153,8 @@ fn link(object: &[u8], runtime: &Path, out: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let obj = dir.join("program.o");
     std::fs::write(&obj, object).map_err(|e| format!("{}: {e}", obj.display()))?;
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let output = std::process::Command::new(&cc)
-        .arg("-o")
-        .arg(out)
-        .arg(&obj)
-        .arg(runtime)
-        .args([
-            "-Wl,--gc-sections",
-            "-lgcc_s",
-            "-lutil",
-            "-lrt",
-            "-lpthread",
-            "-lm",
-            "-ldl",
-            "-lc",
-        ])
-        .output();
+    let (cc, args) = link_command(&obj, runtime, out);
+    let output = std::process::Command::new(&cc).args(&args).output();
     let _ = std::fs::remove_dir_all(&dir);
     let output = output.map_err(|e| format!("the C compiler {cc} cannot be run: {e}"))?;
     if !output.status.success() {

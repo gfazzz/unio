@@ -99,7 +99,8 @@ fn package_root(file: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn read_policy(options: &Options) -> Result<Policy, String> {
+/// The policy of `--policy` or `UNIO_POLICY`, or the default policy without one.
+pub fn read_policy(options: &Options) -> Result<Policy, String> {
     let path = match &options.policy {
         Some(path) => path.clone(),
         None => match std::env::var_os("UNIO_POLICY") {

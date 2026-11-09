@@ -31,6 +31,7 @@ mod fdio;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod worker;
 #[cfg(unix)]
 pub mod writer;
 

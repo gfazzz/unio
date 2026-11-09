@@ -108,7 +108,7 @@ pub fn missing() -> Vec<String> {
 /// Applies every restriction the kernel supports to the current thread.
 pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
     apply_rlimits(limits)?;
-    restrict(&rules(permissions), &[])
+    restrict(&rules(permissions), &[], false)
 }
 
 /// The restrictions of the writer process (docs/runtime.md 9.2): it may write only in the
@@ -117,10 +117,46 @@ pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
 pub fn apply_writer(scopes: &[Scope]) -> Result<(), String> {
     apply_rlimits(&Limits::default())?;
     let rules: Vec<(PathBuf, u64)> = scopes.iter().map(|s| (write_root(s), WRITE)).collect();
-    restrict(&rules, nr::WRITER_DENIED)
+    restrict(&rules, nr::WRITER_DENIED, false)
 }
 
-fn restrict(rules: &[(PathBuf, u64)], denied: &[u32]) -> Result<(), String> {
+/// The restrictions of a worker of the tools (SB-11, docs/runtime.md 9.7): it may read the
+/// `read` trees, read and write the `write` trees, and execute exactly the `execute` files.
+/// Without `processes` it may start threads but no process (seccomp: no exec, no fork, and
+/// `clone` only with `CLONE_THREAD`), and in any case it opens no socket and reaches no other
+/// process. The memory limit is the address space of the process (`RLIMIT_AS`).
+pub fn apply_worker(
+    read: &[PathBuf],
+    write: &[PathBuf],
+    execute: &[PathBuf],
+    processes: bool,
+    limits: &super::worker::Limits,
+) -> Result<(), String> {
+    super::worker::apply_unix_limits(limits)?;
+    if let Some(bytes) = limits.memory_bytes {
+        super::set_limit(RLIMIT_AS, bytes).map_err(|e| format!("RLIMIT_AS: {e}"))?;
+    }
+    let mut rules: Vec<(PathBuf, u64)> = Vec::new();
+    for path in read {
+        rules.push((path.clone(), READ));
+    }
+    for path in write {
+        rules.push((path.clone(), READ | WRITE));
+    }
+    for path in execute {
+        rules.push((path.clone(), READ_FILE | EXECUTE));
+    }
+    if processes {
+        rules.push((PathBuf::from("/dev/null"), READ_FILE | WRITE_FILE));
+        restrict(&rules, &[], false)
+    } else {
+        restrict(&rules, nr::WORKER_DENIED, true)
+    }
+}
+
+const RLIMIT_AS: i32 = 9;
+
+fn restrict(rules: &[(PathBuf, u64)], denied: &[u32], threads_only: bool) -> Result<(), String> {
     // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments only.
     if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(format!("no_new_privs: {}", std::io::Error::last_os_error()));
@@ -130,7 +166,7 @@ fn restrict(rules: &[(PathBuf, u64)], denied: &[u32]) -> Result<(), String> {
         landlock(abi, rules)?;
     }
     if seccomp_available() {
-        seccomp(denied)?;
+        seccomp(denied, threads_only)?;
     }
     Ok(())
 }
@@ -153,7 +189,7 @@ pub const LIBRARY_DIRS: &[&str] = &[
 
 /// Single files a child may read when the manifest lists any program: the cache of the dynamic
 /// loader and the time zone of the system.
-const CHILD_FILES: &[&str] = &["/etc/ld.so.cache", "/etc/localtime"];
+pub(super) const CHILD_FILES: &[&str] = &["/etc/ld.so.cache", "/etc/localtime"];
 
 /// The paths and rights of the Landlock rules of a program. The write scopes grant nothing
 /// here: the program and its children write no file; the writer process writes for the program
@@ -337,6 +373,7 @@ const fn offset_arg(i: u32) -> u32 {
 /// The namespace flags of clone: a new namespace could hide the rules of the sandbox.
 const CLONE_NAMESPACES: u32 =
     0x0002_0000 | 0x0200_0000 | 0x0400_0000 | 0x0800_0000 | 0x1000_0000 | 0x2000_0000 | 0x4000_0000;
+const CLONE_THREAD: u32 = 0x0001_0000;
 const TIOCSTI: u32 = 0x5412;
 const TIOCLINUX: u32 = 0x541C;
 
@@ -353,6 +390,13 @@ mod nr {
     pub const WRITER_DENIED: &[u32] = &[
         59, 322, // execve, execveat
         56, 57, 58, // clone, fork, vfork
+        53, 42, 43, 288, 49, 50, // socketpair, connect, accept, accept4, bind, listen
+    ];
+    /// What a worker of the tools does not need besides [`DENIED`]: exec, new processes, and
+    /// sockets of any kind; `clone` is checked for `CLONE_THREAD` instead.
+    pub const WORKER_DENIED: &[u32] = &[
+        59, 322, // execve, execveat
+        57, 58, // fork, vfork
         53, 42, 43, 288, 49, 50, // socketpair, connect, accept, accept4, bind, listen
     ];
     /// System calls a Unio program never needs and a sandboxed one must not make.
@@ -386,6 +430,10 @@ mod nr {
     pub const WRITER_DENIED: &[u32] = &[
         221, 281, // execve, execveat
         220, // clone
+        199, 203, 202, 242, 200, 201, // socketpair, connect, accept, accept4, bind, listen
+    ];
+    pub const WORKER_DENIED: &[u32] = &[
+        221, 281, // execve, execveat
         199, 203, 202, 242, 200, 201, // socketpair, connect, accept, accept4, bind, listen
     ];
     pub const DENIED: &[u32] = &[
@@ -423,8 +471,9 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
 
 /// The filter: the native architecture only; no sockets at all (the network is never
 /// permitted and a Unix socket could reach a privileged service); no new namespaces; no
-/// terminal injection; and none of the calls of [`nr::DENIED`].
-fn filter(extra: &[u32]) -> Vec<SockFilter> {
+/// terminal injection; and none of the calls of [`nr::DENIED`]. With `threads_only`, `clone`
+/// must create a thread (`CLONE_THREAD`), so no new process can start.
+fn filter(extra: &[u32], threads_only: bool) -> Vec<SockFilter> {
     let mut f = vec![
         stmt(LD_W_ABS, OFFSET_ARCH),
         jump(JEQ_K, nr::ARCH, 1, 0),
@@ -444,10 +493,18 @@ fn filter(extra: &[u32]) -> Vec<SockFilter> {
     // back to clone, whose flags are checked.
     f.push(jump(JEQ_K, CLONE3, 0, 1));
     f.push(stmt(RET_K, RET_ERRNO | ENOSYS));
-    f.push(jump(JEQ_K, nr::CLONE, 0, 3));
-    f.push(stmt(LD_W_ABS, offset_arg(0)));
-    f.push(jump(JSET_K, CLONE_NAMESPACES, 0, 1));
-    f.push(stmt(RET_K, RET_ERRNO | EPERM));
+    if threads_only {
+        f.push(jump(JEQ_K, nr::CLONE, 0, 4));
+        f.push(stmt(LD_W_ABS, offset_arg(0)));
+        f.push(jump(JSET_K, CLONE_NAMESPACES, 1, 0));
+        f.push(jump(JSET_K, CLONE_THREAD, 1, 0));
+        f.push(stmt(RET_K, RET_ERRNO | EPERM));
+    } else {
+        f.push(jump(JEQ_K, nr::CLONE, 0, 3));
+        f.push(stmt(LD_W_ABS, offset_arg(0)));
+        f.push(jump(JSET_K, CLONE_NAMESPACES, 0, 1));
+        f.push(stmt(RET_K, RET_ERRNO | EPERM));
+    }
     // The number is no longer in the accumulator after the clone check, so ioctl is checked
     // after reloading it.
     f.push(stmt(LD_W_ABS, OFFSET_NR));
@@ -460,8 +517,8 @@ fn filter(extra: &[u32]) -> Vec<SockFilter> {
     f
 }
 
-fn seccomp(extra: &[u32]) -> Result<(), String> {
-    let filter = filter(extra);
+fn seccomp(extra: &[u32], threads_only: bool) -> Result<(), String> {
+    let filter = filter(extra, threads_only);
     let program = SockFprog {
         len: filter.len() as u16,
         filter: filter.as_ptr(),
@@ -550,12 +607,16 @@ mod tests {
 
     #[test]
     fn the_filter_ends_with_allow_and_has_no_jump_out_of_it() {
-        let f = filter(nr::WRITER_DENIED);
-        assert!(f.len() < 200);
-        assert_eq!(f.last().map(|s| (s.code, s.k)), Some((RET_K, RET_ALLOW)));
-        for (i, s) in f.iter().enumerate() {
-            if s.code & 0x07 == 0x05 {
-                assert!(i + 1 + (s.jt.max(s.jf) as usize) < f.len());
+        for f in [
+            filter(nr::WRITER_DENIED, false),
+            filter(nr::WORKER_DENIED, true),
+        ] {
+            assert!(f.len() < 200);
+            assert_eq!(f.last().map(|s| (s.code, s.k)), Some((RET_K, RET_ALLOW)));
+            for (i, s) in f.iter().enumerate() {
+                if s.code & 0x07 == 0x05 {
+                    assert!(i + 1 + (s.jt.max(s.jf) as usize) < f.len());
+                }
             }
         }
     }
