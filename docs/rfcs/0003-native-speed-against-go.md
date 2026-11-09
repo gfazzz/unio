@@ -1,6 +1,6 @@
 # RFC 0003: Native speed and memory measured against Go
 
-- Status: accepted (requirements 7.1, `bench/run.py --check-go`; reported in CI, blocking once the start-up step of Design 4 lands)
+- Status: accepted (requirements 7.1, `bench/run.py --check-go`; blocking in CI for wc and loop, best of 9 runs, since the start-up step of Design 4 and the code generation of `docs/runtime.md` 8.4 brought loop to about 1.4x Go; json and text reported)
 - Author: Unio project, with Claude
 - Date: 2026-11-07
 - Affects: requirements / tools
@@ -44,6 +44,8 @@ Peak memory of the same runs, MB: wc 168 (Go 184), json 731 (Go 173), text 24 (G
    - Release 0.1: wc and loop are within both limits; json and text are measured and published.
    - Release 0.2: every benchmark of the suite is within both limits.
 3. `bench/run.py --check-go` exits with 1 when a gated benchmark is above either limit and prints both ratios of every benchmark. CI runs it on Ubuntu. Until the start-up step below lands, loop varies between 1.6x and 2.4x of Go from run to run, so CI reports the check without failing; it becomes blocking with that step.
+
+   Status note: the start-up step landed with loop still at 2.2x to 2.3x Go, its computation (fib(30) and the loop) about twice Go's. The code generation then removed most of the cost of a call and of a statement (the depth of the stack in a register, a line stored only before a call that can read it, overflow checks left out where bounds prove them unnecessary, leading `if c: return v` clauses decided at the call; `docs/runtime.md` 8.4), which brought loop to about 1.4x Go on the machine of `bench/README.md`. The check is blocking in CI since, for wc and loop, with the best of 9 runs; json and text are printed and do not fail it.
 4. The order of work that closes the gaps, from the measurements:
    1. Start-up: the executable rebuilds the declaration tables from its embedded sources, about 14 ms. Serialized tables remove it; this also meets the 5 ms start-up row of 7.1, which native code misses today. Expected effect: loop within 2x of Go.
    2. Static dispatch and monomorphized generics from the types of the checker, instead of dispatch by the type of the receiver at run time. Expected effect: most of the gap in text and part of json.

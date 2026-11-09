@@ -333,8 +333,11 @@ the remaining cost is the tree walk and allocation of environments, which S6 rep
   function); every read is bounds-checked, and an image this runtime cannot run ends the
   executable with code 104.
 - `codegen.rs` translates every body with Cranelift: locals of type `Int`, `Float` and `Bool`
-  unboxed in registers with inline overflow and zero checks, direct calls with scalars in
-  registers, inline push and pop of the call frame and the current line for traces, temporaries
+  unboxed in registers with inline overflow and zero checks (left out only where the bounds of
+  a counted loop or of a tested parameter prove the result in range), direct calls with scalars
+  and the depth of the call stack in registers, a frame pushed with one store, the current line
+  stored only before a call that can read it, leading `if c: return v` clauses of a callee
+  decided at the call, temporaries
   on the stack released on every path out, and unwinding by status to `try`, `on` and `using`.
   It refuses a unit rather than generate doubtful code: a construct it cannot compile yet, or an
   internal inconsistency it detects, stops the build with the place.

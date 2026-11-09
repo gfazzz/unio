@@ -244,9 +244,10 @@ impl Runtime {
     }
 
     /// The call stack for native code: the storage of `stack_limit` frames, the depth, and the
-    /// limit. Native code pushes a frame by writing `(site, line)` at `frames[depth]` and
-    /// incrementing the depth when it is below the limit, and pops it by restoring the depth;
-    /// the addresses stay valid while `stack_limit` does not grow.
+    /// limit. Native code pushes a frame by writing `(site, line)` at `frames[depth]` when the
+    /// depth is below the limit; it keeps the depth in a register and stores it here before any
+    /// call that can read the stack, and its entries restore it when they return. The addresses
+    /// stay valid while `stack_limit` does not grow.
     pub fn native_stack(&mut self) -> (*mut (u32, u32), *mut usize, usize) {
         if self.frames.len() < self.stack_limit {
             self.frames.resize(self.stack_limit, (0, 0));

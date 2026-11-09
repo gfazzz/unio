@@ -320,6 +320,133 @@ fn faults_and_exit_codes_match_the_interpreter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The fast paths of the code generator: lines stored only before calls, the depth of the
+/// stack in a register, operations without an overflow check where the bounds of a counted
+/// loop or of a tested parameter keep them in range, and leading `if c: return v` clauses
+/// decided at the call. Each keeps the faults, traces, and exit codes of `unio run`: a fault
+/// deep in recursion, overflow of `i * i` in a loop whose bounds do not keep it in range, `%`
+/// and `/` by negative constants and by -1 at the minimum, a fault after the body of a `while`
+/// (the line of the last statement that ran), a fault in a handler, and the depth limit
+/// reached by a call whose leading clause would return at once.
+#[test]
+fn fast_paths_keep_faults_and_traces_exact() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("paths");
+    let program = dir.join("paths.unio");
+    fs::write(
+        &program,
+        r#"import std.args
+
+function fall(n as Int) returns Int:
+    if n < 1: return 0
+    let step = 100 / (n - 25)
+    return fall(n - 1) + step
+
+function edge(n as Int) returns Int:
+    if n >= 9999: return n
+    return edge(n + 1)
+
+function over(n as Int) returns Int:
+    if n >= 10000: return n
+    return over(n + 1)
+
+function sink(n as Int) returns Int:
+    if n < 0: return 0
+    return sink(n + 1) + 1
+
+function check(n as Int) returns Bool:
+    return 10 / (n - 3) != 7
+
+function squares(start as Int) returns Int:
+    var total = 0
+    for i in range(3037000490, 3037000510):
+        total = total + i * i % 7
+    return total + start
+
+function divisions() returns Int:
+    var total = 0
+    for i in range(-7, 8):
+        print("{i / 2} {i % 2} {i / -2} {i % -2} {i % 3} {i / -3} {i % -1} {i / -1} {i * i % 5}")
+        total = total + i * i
+    for i in range(0, 20):
+        print("{i % 7} {i / 7} {i % 8} {i / 8} {i / 1} {i * 1000003 % 1000000007} {i / 3}")
+    for i in range(9223372036854775800, 9223372036854775807):
+        print("{i % 1000000007} {i / 10} {i % 9223372036854775807} {i / 4611686018427387904}")
+    for i in range(-9223372036854775807, -9223372036854775805):
+        let m = i - 1
+        print("{m % -1} {m % 7} {m % -7} {m / 7} {m / -7}")
+        print("{m / -1}")
+    return total
+
+function negative(n as Int) returns Int:
+    if n > -3: return n * 2
+    if n == -5: return 1 / (n + 5)
+    return negative(n + 1) - 1
+
+error Bad:
+    code as Int
+
+function risky(n as Int) returns Int fails with Bad:
+    if n > 2: fail Bad(code = n)
+    return n
+
+public function main() returns Int:
+    let which = args.list()[0]
+    if which == "fall": return fall(40)
+    if which == "edge": return edge(1) % 256
+    if which == "over": return over(1)
+    if which == "sink": return sink(0)
+    if which == "squares": return squares(0)
+    if which == "divisions": return divisions()
+    if which == "negative": return negative(-4) + negative(-9)
+    if which == "handled":
+        let v = try risky(5) on Bad as e:
+            print("caught {e.code}")
+            return fall(30)
+        return v
+    if which == "while":
+        var n = 0
+        while check(n):
+            n = n + 1
+            print("{n}")
+    return 0
+"#,
+    )
+    .unwrap();
+    // Each case and the exit code it must end with, so that a case cannot pass by not
+    // reaching its fault.
+    let expected = [
+        ("fall", 101),
+        ("edge", 15),
+        ("over", 102),
+        ("sink", 102),
+        ("squares", 101),
+        ("divisions", 101),
+        ("negative", 101),
+        ("handled", 101),
+        ("while", 101),
+    ];
+    let cases: Vec<Case> = expected
+        .iter()
+        .map(|(which, _)| case(program.clone(), &[which], &dir))
+        .collect();
+    let differences = compare(&cases, &dir);
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+    let exe = dir.join("bin").join("paths");
+    for (c, (which, code)) in cases.iter().zip(expected) {
+        let found = native(&exe, c);
+        assert_eq!(
+            found.status.code(),
+            Some(code),
+            "{which}: {}",
+            text(&found.stderr)
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn benchmarks_and_tools_match_the_interpreter() {
     if !supported() {

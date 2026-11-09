@@ -78,12 +78,12 @@ jobs:
       # of 101 runs, timed by the launcher from its fork to the end of the program.
       - name: Native start-up of an empty program at most 5 ms (7.1)
         run: python3 bench/run.py --only empty --native --check-startup --json bench/results-startup.json
-      # RFC 0003: native time and peak memory against Go. The start-up step of the RFC has
-      # landed (2.6 ms of loop's 30 ms), but on a fast machine the computation of loop alone is
-      # about 2x Go's, so the check is still reported without failing.
-      - name: Native executables against Go (RFC 0003, reported)
-        continue-on-error: true
-        run: python3 bench/run.py --runs 5 --only wc,json,text,loop --native --check-go --json bench/results-go.json
+      # RFC 0003: native time and peak memory against Go, blocking for the benchmarks gated
+      # for 0.1 (wc and loop); json and text are measured and printed but do not fail the step
+      # (gated from 0.2). Each language's time is the best of 9 runs, which a slow run on a
+      # shared runner does not move; peak memory is the smallest of the runs.
+      - name: Native executables against Go (RFC 0003; wc and loop gated)
+        run: python3 bench/run.py --runs 9 --only wc,json,text,loop --native --check-go --json bench/results-go.json
       - name: Keep the benchmark results
         if: always()
         uses: actions/upload-artifact@v4

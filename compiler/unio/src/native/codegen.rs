@@ -34,6 +34,9 @@ use unio_runtime::value::Value as RValue;
 
 const VSIZE: i32 = layout::SIZE as i32;
 
+/// The smallest and the largest value an integer can have.
+type Bounds = (i64, i64);
+
 /// How code is generated: `release` optimises for speed.
 pub struct Options {
     pub release: bool,
@@ -95,6 +98,124 @@ struct FnInfo {
     /// The kind of each parameter's slot inside the function.
     slot: Vec<Kind>,
     var: Vec<bool>,
+    /// The clauses `if c: return v` that start the body, when they can be decided by the
+    /// caller (see [`guards`]).
+    guards: Vec<Guard>,
+}
+
+/// An expression over the scalar parameters of a function that cannot fault or call: the
+/// condition or the value of a leading clause `if c: return v`.
+#[derive(Clone)]
+enum GExpr {
+    Param(usize, Kind),
+    Int(i64),
+    Bool(bool),
+    Compare(Op, Box<GExpr>, Box<GExpr>),
+    And(Box<GExpr>, Box<GExpr>),
+    Not(Box<GExpr>),
+}
+
+#[derive(Clone)]
+struct Guard {
+    cond: GExpr,
+    value: GExpr,
+}
+
+impl GExpr {
+    fn kind(&self) -> Kind {
+        match self {
+            GExpr::Param(_, k) => *k,
+            GExpr::Int(_) => Kind::Int,
+            _ => Kind::Bool,
+        }
+    }
+
+    fn of(n: &Node, pass: &[Kind], var: &[bool]) -> Option<GExpr> {
+        Some(match n {
+            Node::Local(slot) => {
+                let i = *slot as usize;
+                let k = *pass.get(i)?;
+                if !matches!(k, Kind::Int | Kind::Bool) || var[i] {
+                    return None;
+                }
+                GExpr::Param(i, k)
+            }
+            Node::Value(RValue::Int(c)) => GExpr::Int(*c),
+            Node::Value(RValue::Bool(b)) => GExpr::Bool(*b),
+            Node::Binary(op, l, r) => {
+                let (l, r) = (GExpr::of(l, pass, var)?, GExpr::of(r, pass, var)?);
+                let ok = match (l.kind(), r.kind()) {
+                    (Kind::Int, Kind::Int) => matches!(
+                        op,
+                        Op::Equal
+                            | Op::NotEqual
+                            | Op::Less
+                            | Op::LessEqual
+                            | Op::Greater
+                            | Op::GreaterEqual
+                    ),
+                    (Kind::Bool, Kind::Bool) => matches!(op, Op::Equal | Op::NotEqual),
+                    _ => false,
+                };
+                if !ok {
+                    return None;
+                }
+                GExpr::Compare(*op, Box::new(l), Box::new(r))
+            }
+            Node::And(l, r) => {
+                let (l, r) = (GExpr::of(l, pass, var)?, GExpr::of(r, pass, var)?);
+                if l.kind() != Kind::Bool || r.kind() != Kind::Bool {
+                    return None;
+                }
+                GExpr::And(Box::new(l), Box::new(r))
+            }
+            Node::Not(x) => {
+                let x = GExpr::of(x, pass, var)?;
+                if x.kind() != Kind::Bool {
+                    return None;
+                }
+                GExpr::Not(Box::new(x))
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// The leading clauses `if c: return v` of a function's body whose condition and value read
+/// only scalar parameters and cannot fault: a call can decide them before it is made. Running
+/// such a clause in the callee has no effect but the push of its frame, so when the stack has
+/// room for that frame, the caller takes `v` without the call; otherwise it makes the call,
+/// which then ends with code 102 as it would (C-18).
+fn guards(code: &Code, pass: &[Kind], var: &[bool], ret: RetKind) -> Vec<Guard> {
+    let RetKind::Scalar(rk) = ret else {
+        return Vec::new();
+    };
+    if code.defaults || pass.iter().any(|k| !k.scalar()) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for s in &code.body.stmts {
+        let S::If(branches, None) = &s.kind else {
+            break;
+        };
+        let [(c, body)] = branches.as_slice() else {
+            break;
+        };
+        let [stmt] = body.stmts.as_slice() else {
+            break;
+        };
+        let S::Return(Some(v)) = &stmt.kind else {
+            break;
+        };
+        let (Some(cond), Some(value)) = (GExpr::of(c, pass, var), GExpr::of(v, pass, var)) else {
+            break;
+        };
+        if cond.kind() != Kind::Bool || value.kind() != rk {
+            break;
+        }
+        out.push(Guard { cond, value });
+    }
+    out
 }
 
 /// Facts about the whole program that the code of one unit relies on.
@@ -296,6 +417,10 @@ pub(crate) fn compile(
         "opt_level",
         if options.release { "speed" } else { "none" },
     )?;
+    // Functions start at a cache line, so that the speed of a function does not depend on
+    // where the code before it ends (branches across 32-byte boundaries are slower on many x86
+    // cores, and a loop or call that moves between builds changes its time).
+    set(&mut flags, "log2_min_function_alignment", "6")?;
     set(&mut flags, "is_pic", "true")?;
     set(&mut flags, "enable_probestack", "true")?;
     set(&mut flags, "probestack_strategy", "inline")?;
@@ -428,12 +553,14 @@ fn fn_info(interp: &Interp, f: usize, code: &Code) -> FnInfo {
         t if Kind::of(t).scalar() => RetKind::Scalar(Kind::of(t)),
         _ => RetKind::Boxed,
     };
+    let guards = guards(code, &pass, &var, ret);
     FnInfo {
         direct: FuncId::from_u32(0),
         pass,
         ret,
         slot,
         var,
+        guards,
     }
 }
 
@@ -442,6 +569,8 @@ fn direct_signature(module: &ObjectModule, info: &FnInfo) -> Signature {
     for _ in 0..3 {
         s.params.push(AbiParam::new(P));
     }
+    // The depth of the runtime's stack with the callee's frame, which is its last.
+    s.params.push(AbiParam::new(I64));
     for k in &info.pass {
         s.params.push(AbiParam::new(k.ir()));
     }
@@ -579,7 +708,12 @@ impl Shared<'_> {
             b.switch_to_block(entry);
             let params = b.block_params(entry).to_vec();
             let (cx, frame, out, types) = (params[0], params[1], params[2], params[3]);
-            let mut args = vec![cx, out, types];
+            // The depth of the runtime's stack, which the code below keeps in registers and
+            // stores only where the runtime reads it; it is restored before returning.
+            let depth_ptr = b.ins().load(P, MemFlagsData::trusted(), cx, 8);
+            let depth = b.ins().load(I64, MemFlagsData::trusted(), depth_ptr, 0);
+            let count = b.ins().iadd_imm_s(depth, 1);
+            let mut args = vec![cx, out, types, count];
             let wrong = b.create_block();
             b.set_cold_block(wrong);
             b.append_block_param(wrong, P);
@@ -605,6 +739,7 @@ impl Shared<'_> {
             let call = b.ins().call(callee, &args);
             let results = b.inst_results(call).to_vec();
             let status = results[0];
+            b.ins().store(MemFlagsData::trusted(), depth, depth_ptr, 0);
             match ret {
                 RetKind::Scalar(k) => {
                     let ok = b.create_block();
@@ -826,8 +961,29 @@ struct Gen<'s, 'a, 'b> {
     free: HashMap<i32, Vec<StackSlot>>,
     unwind_exit: ir::Block,
     ok_exit: ir::Block,
-    /// The address of this call's frame on the runtime's call stack, for the current line.
-    site: Option<ir::Value>,
+    /// The depth of the runtime's call stack with this call's frame, the last, where the current
+    /// line goes: what memory holds where the runtime reads it, and the index of a callee's
+    /// frame. It is the only value of the stack that the code keeps in a register.
+    depth: Option<ir::Value>,
+    /// The line of the statement that started last, as a variable of the code: it is stored
+    /// into the frame only before a call that can read it, so that a statement without such a
+    /// call stores nothing, while a trace still names the line that `unio run` names.
+    line_var: Option<Variable>,
+    /// How many times the line was set; with the block that stored it last, the line that a
+    /// block already stored (the variable has not changed since).
+    line_gen: u64,
+    line_stored: Option<(ir::Block, u64)>,
+    /// In a constant, default or lambda, which has no frame: the depth of the stack when it was
+    /// entered. The block that last stored the depth, if no direct call followed.
+    base: Option<ir::Value>,
+    depth_stored: Option<ir::Block>,
+    /// The bounds of the variable of each counted loop whose bounds are constants, inside its
+    /// body, and of a parameter where a test of it is known to have held or failed: neither can
+    /// be assigned (L-10), so an operation whose result the bounds keep in range needs no
+    /// overflow check.
+    ranges: HashMap<u32, Bounds>,
+    /// The slots of the parameters of type `Int` that are not `var`, which cannot change.
+    fixed: HashSet<u32>,
     ret: RetKind,
     ret_var: Option<Variable>,
     line: u32,
@@ -867,7 +1023,14 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
             free: HashMap::new(),
             unwind_exit,
             ok_exit,
-            site: None,
+            depth: None,
+            line_var: None,
+            line_gen: 0,
+            line_stored: None,
+            base: None,
+            depth_stored: None,
+            ranges: HashMap::new(),
+            fixed: HashSet::new(),
             ret: RetKind::Boxed,
             ret_var: None,
             line: 0,
@@ -913,10 +1076,82 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
     // ---------------------------------------------------------------- calls of helpers
 
     fn h(&mut self, name: &'static str, args: &[ir::Value]) -> Result<Option<ir::Value>, String> {
+        // Only a helper that receives the context can fault or call code, and so read the
+        // stack: its depth and this call's line are stored first.
+        if args.first() == Some(&self.cx) {
+            self.sync_depth();
+            self.sync_line();
+        }
         let id = self.s.helper(name)?;
         let r = self.fref(id);
         let call = self.b.ins().call(r, args);
         Ok(self.b.inst_results(call).first().copied())
+    }
+
+    /// Stores the depth of the stack with this call's frame, which the code keeps in a register,
+    /// where the runtime reads it, unless this block already did since its last direct call.
+    fn sync_depth(&mut self) {
+        let Some(count) = self.depth.or(self.base) else {
+            return;
+        };
+        let Some(block) = self.b.current_block() else {
+            return;
+        };
+        if self.depth_stored == Some(block) {
+            return;
+        }
+        let cx = self.cx;
+        let depth_ptr = self.b.ins().load(P, MemFlagsData::trusted(), cx, 8);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), count, depth_ptr, 0);
+        self.depth_stored = Some(block);
+    }
+
+    /// Stores the current line into this call's frame unless this block already did.
+    fn sync_line(&mut self) {
+        let (Some(count), Some(var)) = (self.depth, self.line_var) else {
+            return;
+        };
+        let Some(block) = self.b.current_block() else {
+            return;
+        };
+        if self.line_stored == Some((block, self.line_gen)) {
+            return;
+        }
+        let line = self.b.use_var(var);
+        let cx = self.cx;
+        let frames = self.b.ins().load(P, MemFlagsData::trusted(), cx, 0);
+        let offset = self.b.ins().ishl_imm_s(count, 3);
+        let site = self.b.ins().iadd(frames, offset);
+        // The line of frame `count - 1`.
+        self.b.ins().store(MemFlagsData::trusted(), line, site, -4);
+        self.line_stored = Some((block, self.line_gen));
+    }
+
+    /// Sets the line of the statement that starts.
+    fn set_line(&mut self, line: u32) {
+        self.line = line;
+        if let Some(var) = self.line_var {
+            let v = self.iconst(I32, line as i64);
+            self.b.def_var(var, v);
+            self.line_gen += 1;
+        }
+    }
+
+    /// Switches to `next`, the only successor of the current block on its hot path: what the
+    /// block stored as its line stays known there.
+    fn continue_in(&mut self, next: ir::Block) {
+        let from = self.b.current_block();
+        self.b.switch_to_block(next);
+        if let (Some(from), Some((at, v))) = (from, self.line_stored) {
+            if at == from {
+                self.line_stored = Some((next, v));
+            }
+        }
+        if from.is_some() && self.depth_stored == from {
+            self.depth_stored = Some(next);
+        }
     }
 
     fn hs(&mut self, name: &'static str, args: &[ir::Value]) -> Result<ir::Value, String> {
@@ -1240,7 +1475,7 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         let bad = self.unwind_from(self.scopes.len(), &[], None)?;
         let ok = self.b.create_block();
         self.b.ins().brif(status, bad, &[], ok, &[]);
-        self.b.switch_to_block(ok);
+        self.continue_in(ok);
         Ok(())
     }
 
@@ -1597,7 +1832,8 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         self.cx = params[0];
         self.out = params[1];
         self.types = params[2];
-        let args = &params[3..];
+        let count = params[3];
+        let args = &params[4..];
 
         // Kinds: the parameters from the signature, the rest from their bindings.
         for (i, k) in slot_kinds.iter().enumerate() {
@@ -1642,23 +1878,22 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
             self.ret_var = Some(v);
         }
 
-        // The call frame on the runtime's stack: depth below the limit, then (site, line).
+        // The call frame on the runtime's stack, at index `count - 1`: within the limit, then
+        // (site, line) in one store of both halves (x86-64 is little-endian). The depth comes in
+        // a register and memory holds it only where the runtime reads it (`sync_depth`), so that
+        // a call neither loads nor stores it. The callee takes the depth with its frame, so that
+        // only `count` stays in a register: the argument of a callee, `count + 1`, is computed
+        // again at each call.
         let cx = self.cx;
-        let depth_ptr = self.b.ins().load(P, MemFlagsData::trusted(), cx, 8);
-        let depth = self
-            .b
-            .ins()
-            .load(I64, MemFlagsData::trusted(), depth_ptr, 0);
         let limit = self.b.ins().load(I64, MemFlagsData::trusted(), cx, 16);
-        let over = self
-            .b
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, limit);
+        let over = self.b.ins().icmp(IntCC::UnsignedGreaterThan, count, limit);
         let exhausted = self.b.create_block();
         let body = self.b.create_block();
         self.b.set_cold_block(exhausted);
         self.b.ins().brif(over, exhausted, &[], body, &[]);
         self.b.switch_to_block(exhausted);
+        let depth = self.b.ins().iadd_imm_s(count, -1);
+        self.base = Some(depth);
         // The callee takes its arguments by value: they are released here.
         for (i, k) in pass.iter().enumerate() {
             if !k.scalar() && !var[i] {
@@ -1666,6 +1901,7 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
             }
         }
         self.h("stack_exhausted", &[cx])?;
+        self.base = None;
         let one = self.iconst(I32, 1);
         let mut rets = vec![one];
         if let RetKind::Scalar(k) = self.ret {
@@ -1677,17 +1913,18 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         self.b.ins().return_(&rets);
         self.b.switch_to_block(body);
         let frames = self.b.ins().load(P, MemFlagsData::trusted(), cx, 0);
-        let offset = self.b.ins().ishl_imm_s(depth, 3);
+        let offset = self.b.ins().ishl_imm_s(count, 3);
         let site = self.b.ins().iadd(frames, offset);
-        let id = self.iconst(I32, f as i64);
-        self.b.ins().store(MemFlagsData::trusted(), id, site, 0);
-        let line = self.iconst(I32, def.span.start.line as i64);
-        self.b.ins().store(MemFlagsData::trusted(), line, site, 4);
-        let next = self.b.ins().iadd_imm_s(depth, 1);
-        self.b
-            .ins()
-            .store(MemFlagsData::trusted(), next, depth_ptr, 0);
-        self.site = Some(site);
+        // The line of the declaration; a statement's line is stored before the first call that
+        // can read it (`sync_line`).
+        let entry = (f as i64) | ((def.span.start.line as i64) << 32);
+        let entry = self.iconst(I64, entry);
+        self.b.ins().store(MemFlagsData::trusted(), entry, site, -8);
+        let line_var = self.b.declare_var(I32);
+        self.line_var = Some(line_var);
+        self.set_line(def.span.start.line as u32);
+        self.line_stored = Some((body, self.line_gen));
+        self.depth = Some(count);
 
         // The frame of boxed slots.
         if self.kinds.iter().any(|k| !k.scalar()) || pass.iter().any(|k| !k.scalar()) {
@@ -1700,6 +1937,16 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
             for i in 0..self.nslots {
                 let at = self.slot_addr(i as u32);
                 self.set_unit(at);
+            }
+        }
+        for (i, k) in pass.iter().enumerate() {
+            let slot = i as u32;
+            if *k == Kind::Int
+                && !var[i]
+                && self.kinds.get(i) == Some(&Kind::Int)
+                && !self.hazard.contains(&slot)
+            {
+                self.fixed.insert(slot);
             }
         }
         // Parameters: scalars into registers, values moved into the frame.
@@ -1765,9 +2012,6 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
                 }
             }
             self.release_frame()?;
-            self.b
-                .ins()
-                .store(MemFlagsData::trusted(), depth, depth_ptr, 0);
             let st = self.iconst(I32, status);
             let mut rets = vec![st];
             if let RetKind::Scalar(k) = self.ret {
@@ -1817,22 +2061,32 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         self.frame_param = Some(params[1]);
         self.out = params[2];
         self.types = params[3];
+        // The depth at entry: direct calls take it, and it is the runtime's again on return.
+        let cx = self.cx;
+        let depth_ptr = self.b.ins().load(P, MemFlagsData::trusted(), cx, 8);
+        let base = self
+            .b
+            .ins()
+            .load(I64, MemFlagsData::trusted(), depth_ptr, 0);
+        self.base = Some(base);
         let mut roots = Vec::new();
         self.var_roots(body, &mut roots);
         self.hazard.extend(roots);
         let v = self.expr(body)?;
         let out = self.out;
         self.store_into(v, out)?;
-        let zero = self.iconst(I32, 0);
-        self.b.ins().return_(&[zero]);
-        let exit = self.unwind_exit;
-        self.b.switch_to_block(exit);
-        let one = self.iconst(I32, 1);
-        self.b.ins().return_(&[one]);
         let ok = self.ok_exit;
-        self.b.switch_to_block(ok);
-        let zero = self.iconst(I32, 0);
-        self.b.ins().return_(&[zero]);
+        self.b.ins().jump(ok, &[]);
+        for (exit, status) in [(self.unwind_exit, 1), (self.ok_exit, 0)] {
+            self.b.switch_to_block(exit);
+            let cx = self.cx;
+            let depth_ptr = self.b.ins().load(P, MemFlagsData::trusted(), cx, 8);
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), base, depth_ptr, 0);
+            let st = self.iconst(I32, status);
+            self.b.ins().return_(&[st]);
+        }
         self.finish_deferred()?;
         self.b.seal_all_blocks();
         Ok(())
@@ -1842,16 +2096,67 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
 
     fn block(&mut self, block: &LBlock) -> Result<(), String> {
         self.scopes.push(Scope::Clear(block.clear.0, block.clear.1));
+        // What a statement of the block learns about a parameter holds to the block's end.
+        let ranges = self.ranges.clone();
         for s in &block.stmts {
-            self.line = s.line;
-            if let Some(site) = self.site {
-                let line = self.iconst(I32, s.line as i64);
-                self.b.ins().store(MemFlagsData::trusted(), line, site, 4);
-            }
+            self.set_line(s.line);
             self.stmt(&s.kind)?;
         }
+        self.ranges = ranges;
         self.scopes.pop();
         self.clear(block.clear.0, block.clear.1)
+    }
+
+    /// The bounds that a condition `p < k` (or another comparison of a parameter with an
+    /// integer literal) gives the parameter when it is `truth`: a parameter cannot be assigned
+    /// (L-10), so the bounds hold wherever the outcome of the test is known.
+    fn condition_bounds(&self, c: &Node, truth: bool) -> Option<(u32, Bounds)> {
+        let Node::Binary(op, l, r) = c else {
+            return None;
+        };
+        let (slot, k, op) = match (&**l, &**r) {
+            (Node::Local(p), Node::Value(RValue::Int(k))) => (*p, *k, *op),
+            (Node::Value(RValue::Int(k)), Node::Local(p)) => {
+                let flipped = match op {
+                    Op::Less => Op::Greater,
+                    Op::LessEqual => Op::GreaterEqual,
+                    Op::Greater => Op::Less,
+                    Op::GreaterEqual => Op::LessEqual,
+                    other => *other,
+                };
+                (*p, *k, flipped)
+            }
+            _ => return None,
+        };
+        if !self.fixed.contains(&slot) {
+            return None;
+        }
+        let op = if truth {
+            op
+        } else {
+            match op {
+                Op::Less => Op::GreaterEqual,
+                Op::LessEqual => Op::Greater,
+                Op::Greater => Op::LessEqual,
+                Op::GreaterEqual => Op::Less,
+                Op::Equal => Op::NotEqual,
+                Op::NotEqual => Op::Equal,
+                _ => return None,
+            }
+        };
+        let (lo, hi) = match op {
+            Op::Less => (i64::MIN, k.checked_sub(1)?),
+            Op::LessEqual => (i64::MIN, k),
+            Op::Greater => (k.checked_add(1)?, i64::MAX),
+            Op::GreaterEqual => (k, i64::MAX),
+            Op::Equal => (k, k),
+            _ => return None,
+        };
+        let (lo, hi) = match self.ranges.get(&slot) {
+            Some((a, b)) => (lo.max(*a), hi.min(*b)),
+            None => (lo, hi),
+        };
+        (lo <= hi).then_some((slot, (lo, hi)))
     }
 
     fn clear(&mut self, start: u32, end: u32) -> Result<(), String> {
@@ -2034,18 +2339,34 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
             }
             S::If(branches, otherwise) => {
                 let after = self.b.create_block();
+                // Each branch knows that the conditions before it were false and its own true;
+                // when no branch falls through and there is no `else`, the code after the
+                // statement knows that every condition was false.
+                let outer = self.ranges.clone();
                 for (c, body) in branches {
                     let cond = self.truth(c)?;
                     let then = self.b.create_block();
                     let next = self.b.create_block();
                     self.b.ins().brif(cond, then, &[], next, &[]);
                     self.b.switch_to_block(then);
+                    let before = self.ranges.clone();
+                    if let Some((slot, r)) = self.condition_bounds(c, true) {
+                        self.ranges.insert(slot, r);
+                    }
                     self.block(body)?;
+                    self.ranges = before;
                     self.b.ins().jump(after, &[]);
                     self.b.switch_to_block(next);
+                    if let Some((slot, r)) = self.condition_bounds(c, false) {
+                        self.ranges.insert(slot, r);
+                    }
                 }
+                let exits = otherwise.is_none() && branches.iter().all(|(_, b)| ends(b));
                 if let Some(b) = otherwise {
                     self.block(b)?;
+                }
+                if !exits {
+                    self.ranges = outer;
                 }
                 self.b.ins().jump(after, &[]);
                 self.b.switch_to_block(after);
@@ -2240,7 +2561,7 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
     }
 
     fn ret_stmt(&mut self, e: Option<&Node>) -> Result<(), String> {
-        if self.site.is_none() {
+        if self.depth.is_none() {
             return Err(self.unsupported("return outside a function"));
         }
         let ok = self.ok_exit;
@@ -2437,21 +2758,32 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
                 let (Some(start), Some(end)) = (vals[0], vals[1]) else {
                     return Err(self.unsupported("a range"));
                 };
+                // The test of the bound once before the loop and then at its end, so that an
+                // iteration takes one branch; the counter stays below `end`, so `+ 1` cannot
+                // overflow.
                 let counter = self.b.declare_var(I64);
                 self.b.def_var(counter, start);
-                let header = self.b.create_block();
                 let latch = self.b.create_block();
                 let exit = self.b.create_block();
                 let inside = self.b.create_block();
-                self.b.ins().jump(header, &[]);
-                self.b.switch_to_block(header);
-                let c = self.b.use_var(counter);
-                let more = self.b.ins().icmp(IntCC::SignedLessThan, c, end);
+                let more = self.b.ins().icmp(IntCC::SignedLessThan, start, end);
                 self.b.ins().brif(more, inside, &[], exit, &[]);
                 self.b.switch_to_block(inside);
+                let c = self.b.use_var(counter);
                 if let Some(var) = self.vars[*slot as usize] {
                     self.b.def_var(var, c);
                 }
+                let bounds = match (
+                    int_literal(&call.args[si].value),
+                    int_literal(&call.args[ei].value),
+                ) {
+                    (Some(lo), Some(end)) if lo < end => Some((lo, end - 1)),
+                    _ => None,
+                };
+                let outer = match bounds {
+                    Some(b) => self.ranges.insert(*slot, b),
+                    None => self.ranges.remove(slot),
+                };
                 let live = self.live.len();
                 self.scopes.push(Scope::Loop {
                     brk: exit,
@@ -2460,12 +2792,17 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
                 });
                 self.block(body)?;
                 self.scopes.pop();
+                match outer {
+                    Some(b) => self.ranges.insert(*slot, b),
+                    None => self.ranges.remove(slot),
+                };
                 self.b.ins().jump(latch, &[]);
                 self.b.switch_to_block(latch);
                 let c = self.b.use_var(counter);
                 let n = self.b.ins().iadd_imm_s(c, 1);
                 self.b.def_var(counter, n);
-                self.b.ins().jump(header, &[]);
+                let more = self.b.ins().icmp(IntCC::SignedLessThan, n, end);
+                self.b.ins().brif(more, inside, &[], exit, &[]);
                 self.b.switch_to_block(exit);
                 return Ok(());
             }
@@ -3002,17 +3339,154 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         let ok = self.b.create_block();
         self.b.set_cold_block(bad);
         self.b.ins().brif(of, bad, &[], ok, &[]);
+        let (from, known, depth) = (self.b.current_block(), self.line_stored, self.depth_stored);
         self.b.switch_to_block(bad);
         let (cx, w) = (self.cx, self.iconst(I32, which));
         self.hs("int_fault", &[cx, w])?;
         let t = self.unwind_from(self.scopes.len(), &[], None)?;
         self.b.ins().jump(t, &[]);
         self.b.switch_to_block(ok);
+        // The hot path continues from the block before the check.
+        self.line_stored = match (from, known) {
+            (Some(from), Some((at, g))) if at == from => Some((ok, g)),
+            _ => None,
+        };
+        self.depth_stored = (from.is_some() && depth == from).then_some(ok);
         Ok(())
     }
 
     fn int_fault_if(&mut self, cond: ir::Value, which: i64) -> Result<(), String> {
         self.overflow_check(cond, which)
+    }
+
+    /// The values an integer expression can have, when the code shows them: literals, the
+    /// variables of counted loops with constant bounds, and operators on those (runtime 2.1).
+    fn range_of(&self, n: &Node) -> Option<Bounds> {
+        let fit = |lo: i128, hi: i128| -> Option<Bounds> {
+            Some((i64::try_from(lo).ok()?, i64::try_from(hi).ok()?))
+        };
+        match n {
+            Node::Value(RValue::Int(c)) => Some((*c, *c)),
+            Node::Local(slot) => self.ranges.get(slot).copied(),
+            Node::Negate(x) => {
+                let (lo, hi) = self.range_of(x)?;
+                fit(-(hi as i128), -(lo as i128))
+            }
+            Node::Binary(op, l, r) => {
+                let divisor = match &**r {
+                    Node::Value(RValue::Int(c)) if *c != 0 => Some(*c as i128),
+                    _ => None,
+                };
+                if *op == Op::Remainder {
+                    // The sign of the left operand, below the divisor in size.
+                    let m = divisor?.abs() - 1;
+                    return match self.range_of(l) {
+                        Some((lo, hi)) if lo >= 0 => fit(0, m.min(hi as i128)),
+                        Some((lo, hi)) if hi <= 0 => fit((-m).max(lo as i128), 0),
+                        _ => fit(-m, m),
+                    };
+                }
+                let (a, b) = (self.range_of(l)?, self.range_of(r)?);
+                let (a, b) = ((a.0 as i128, a.1 as i128), (b.0 as i128, b.1 as i128));
+                match op {
+                    Op::Add => fit(a.0 + b.0, a.1 + b.1),
+                    Op::Subtract => fit(a.0 - b.1, a.1 - b.0),
+                    Op::Multiply => {
+                        let p = [a.0 * b.0, a.0 * b.1, a.1 * b.0, a.1 * b.1];
+                        fit(*p.iter().min()?, *p.iter().max()?)
+                    }
+                    Op::Divide => {
+                        // Truncation toward zero is monotonic for a divisor of one sign.
+                        let c = divisor?;
+                        let (x, y) = (a.0 / c, a.1 / c);
+                        fit(x.min(y), x.max(y))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// An operator on two integers in registers whose values may be known to lie in `bounds`:
+    /// a result that cannot overflow needs no check, and an addend of known sign is checked by
+    /// one comparison of the result with the other operand.
+    fn int_op_in(
+        &mut self,
+        op: Op,
+        a: ir::Value,
+        b: ir::Value,
+        b_const: Option<i64>,
+        bounds: (Option<Bounds>, Option<Bounds>),
+    ) -> Result<V, String> {
+        match (op, bounds) {
+            (Op::Add | Op::Subtract | Op::Multiply, (Some(x), Some(y))) => {
+                let (x, y) = ((x.0 as i128, x.1 as i128), (y.0 as i128, y.1 as i128));
+                let (lo, hi) = match op {
+                    Op::Add => (x.0 + y.0, x.1 + y.1),
+                    Op::Subtract => (x.0 - y.1, x.1 - y.0),
+                    _ => {
+                        let p = [x.0 * y.0, x.0 * y.1, x.1 * y.0, x.1 * y.1];
+                        (*p.iter().min().unwrap(), *p.iter().max().unwrap())
+                    }
+                };
+                if lo >= i64::MIN as i128 && hi <= i64::MAX as i128 {
+                    return Ok(V::I(match op {
+                        Op::Add => self.b.ins().iadd(a, b),
+                        Op::Subtract => self.b.ins().isub(a, b),
+                        _ => self.b.ins().imul(a, b),
+                    }));
+                }
+            }
+            (Op::Add | Op::Subtract, (_, Some((lo, hi)))) if lo >= 0 || hi < 0 => {
+                // a + b with b >= 0 overflows exactly when the result is below a; with b < 0,
+                // when it is above a; a - b the other way round.
+                let r = match op {
+                    Op::Add => self.b.ins().iadd(a, b),
+                    _ => self.b.ins().isub(a, b),
+                };
+                let up = (op == Op::Add) == (lo >= 0);
+                let cc = if up {
+                    IntCC::SignedLessThan
+                } else {
+                    IntCC::SignedGreaterThan
+                };
+                let of = self.b.ins().icmp(cc, r, a);
+                self.overflow_check(of, if op == Op::Add { 0 } else { 1 })?;
+                return Ok(V::I(r));
+            }
+            (Op::Remainder | Op::Divide, (Some((lo, _)), _)) if lo >= 0 => {
+                if let Some(c) = b_const.filter(|c| *c > 1) {
+                    // A dividend that is not negative needs none of the corrections for the
+                    // sign (runtime 2.1: `/` truncates toward zero, `%` has the sign of the
+                    // left operand, which here is 0 or more).
+                    let q = self.unsigned_quotient(a, c as u64);
+                    return Ok(V::I(if op == Op::Divide {
+                        q
+                    } else {
+                        let p = self.b.ins().imul_imm_s(q, c);
+                        self.b.ins().isub(a, p)
+                    }));
+                }
+            }
+            _ => {}
+        }
+        self.int_op(op, a, b, b_const)
+    }
+
+    /// `x / c` for `0 <= x < 2^63` and `c > 1`: a shift for a power of two, otherwise the high
+    /// half of a product with `m = ceil(2^(63 + s) / c)`, `2^(s - 1) < c <= 2^s`, shifted by
+    /// `s - 1`. The error `m * c - 2^(63 + s)` is below `c <= 2^s`, which keeps the quotient exact
+    /// for every dividend below `2^63` (Granlund and Montgomery), and `m` fits in 64 bits.
+    fn unsigned_quotient(&mut self, x: ir::Value, c: u64) -> ir::Value {
+        if c.is_power_of_two() {
+            return self.b.ins().ushr_imm_s(x, c.trailing_zeros() as i64);
+        }
+        let s = 64 - (c - 1).leading_zeros();
+        let m = (1u128 << (63 + s)).div_ceil(c as u128) as u64;
+        let m = self.iconst(I64, m as i64);
+        let hi = self.b.ins().umulhi(x, m);
+        self.b.ins().ushr_imm_s(hi, (s - 1) as i64)
     }
 
     /// An operator on two integers in registers.
@@ -3135,7 +3609,8 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
             };
             let b = self.expr(r)?;
             let b = self.scalar(b, Kind::Int)?;
-            return self.int_op(op, a, b, b_const);
+            let bounds = (self.range_of(l), self.range_of(r));
+            return self.int_op_in(op, a, b, b_const, bounds);
         }
         if kl == Kind::Float && kr == Kind::Float && !matches!(op, Op::In | Op::NotIn) {
             let a = self.expr(l)?;
@@ -3486,10 +3961,21 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         if direct {
             let info = &self.s.infos[&call.f];
             let (callee, pass, ret) = (info.direct, info.pass.clone(), info.ret);
+            let guards = info.guards.clone();
             let out = self.temp();
-            let op = self.addr(out);
+            // A scalar or Unit result comes back in a register; the callee writes no value.
+            let op = if ret == RetKind::Boxed {
+                self.addr(out)
+            } else {
+                self.null()
+            };
             let null = self.null();
-            let mut args = vec![self.cx, op, null];
+            let below = match (self.depth, self.base) {
+                (Some(count), _) => self.b.ins().iadd_imm_s(count, 1),
+                (None, Some(b)) => self.b.ins().iadd_imm_s(b, 1),
+                _ => return Err(self.unsupported("a call outside a unit")),
+            };
+            let mut args = vec![self.cx, op, null, below];
             let mut given = Vec::new();
             let mut back: Vec<(usize, Addr, Option<Variable>)> = Vec::new();
             for (i, k) in pass.iter().enumerate() {
@@ -3507,8 +3993,16 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
                     }
                 }
             }
+            let decided = if guards.is_empty() || !taken.is_empty() {
+                None
+            } else {
+                Some(self.decide(&guards, &args[4..], args[3], ret)?)
+            };
+            self.sync_line();
             let r = self.fref(callee);
             let inst = self.b.ins().call(r, &args);
+            // The callee's helpers may have stored a deeper stack.
+            self.depth_stored = None;
             let results = self.b.inst_results(inst).to_vec();
             for a in given {
                 self.consumed(a);
@@ -3520,6 +4014,17 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
                 self.release_stack(a.ss, 1);
             }
             self.check(status)?;
+            if let Some(done) = decided {
+                let v = results[1];
+                self.b.ins().jump(done, &[BlockArg::Value(v)]);
+                self.b.switch_to_block(done);
+                self.release_stack(out.ss, 1);
+                let v = self.b.block_params(done)[0];
+                return Ok(match ret {
+                    RetKind::Scalar(Kind::Int) => V::I(v),
+                    _ => V::B(v),
+                });
+            }
             return Ok(match ret {
                 RetKind::Boxed => {
                     self.push_live(out);
@@ -3587,6 +4092,75 @@ impl<'s, 'a, 'b> Gen<'s, 'a, 'b> {
         self.check(st)?;
         self.push_live(out);
         Ok(V::Own(out))
+    }
+
+    /// Decides the leading clauses of a callee at the call (see [`guards`]): when the stack has
+    /// room for the callee's frame and a condition holds, the value goes to the returned block,
+    /// whose parameter is the result; otherwise the code continues in a new block that makes
+    /// the call.
+    fn decide(
+        &mut self,
+        guards: &[Guard],
+        args: &[ir::Value],
+        count: ir::Value,
+        ret: RetKind,
+    ) -> Result<ir::Block, String> {
+        let RetKind::Scalar(k) = ret else {
+            return Err(self.unsupported("internal: a decided call without a scalar result"));
+        };
+        let done = self.b.create_block();
+        self.b.append_block_param(done, k.ir());
+        let call = self.b.create_block();
+        let cx = self.cx;
+        let limit = self.b.ins().load(I64, MemFlagsData::trusted(), cx, 16);
+        let room = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, count, limit);
+        let test = self.b.create_block();
+        self.b.ins().brif(room, test, &[], call, &[]);
+        self.b.switch_to_block(test);
+        for g in guards {
+            let c = self.gexpr(&g.cond, args);
+            let yes = self.b.create_block();
+            let no = self.b.create_block();
+            self.b.ins().brif(c, yes, &[], no, &[]);
+            self.b.switch_to_block(yes);
+            let v = self.gexpr(&g.value, args);
+            self.b.ins().jump(done, &[BlockArg::Value(v)]);
+            self.b.switch_to_block(no);
+        }
+        self.b.ins().jump(call, &[]);
+        self.b.switch_to_block(call);
+        Ok(done)
+    }
+
+    fn gexpr(&mut self, e: &GExpr, args: &[ir::Value]) -> ir::Value {
+        match e {
+            GExpr::Param(i, _) => args[*i],
+            GExpr::Int(c) => self.iconst(I64, *c),
+            GExpr::Bool(b) => self.iconst(I8, i64::from(*b)),
+            GExpr::Compare(op, l, r) => {
+                let (a, b) = (self.gexpr(l, args), self.gexpr(r, args));
+                let cc = match op {
+                    Op::Equal => IntCC::Equal,
+                    Op::NotEqual => IntCC::NotEqual,
+                    Op::Less => IntCC::SignedLessThan,
+                    Op::LessEqual => IntCC::SignedLessThanOrEqual,
+                    Op::Greater => IntCC::SignedGreaterThan,
+                    _ => IntCC::SignedGreaterThanOrEqual,
+                };
+                self.b.ins().icmp(cc, a, b)
+            }
+            GExpr::And(l, r) => {
+                let (a, b) = (self.gexpr(l, args), self.gexpr(r, args));
+                self.b.ins().band(a, b)
+            }
+            GExpr::Not(x) => {
+                let a = self.gexpr(x, args);
+                self.b.ins().bxor_imm_s(a, 1)
+            }
+        }
     }
 
     /// Moves the value of a `var` argument's place into a new temporary. A plain name is
@@ -3799,5 +4373,28 @@ fn place_nodes<'n>(p: &'n Place, out: &mut Vec<&'n Node>) {
         if let PStep::Index(n) = s {
             out.push(n);
         }
+    }
+}
+
+/// The value of an integer literal, also with a minus sign.
+fn int_literal(n: &Node) -> Option<i64> {
+    match n {
+        Node::Value(RValue::Int(c)) => Some(*c),
+        Node::Negate(x) => match &**x {
+            Node::Value(RValue::Int(c)) => c.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a block never ends by falling through: its last statement leaves it.
+fn ends(b: &LBlock) -> bool {
+    match b.stmts.last().map(|s| &s.kind) {
+        Some(S::Return(_) | S::Fail(_) | S::Break | S::Continue) => true,
+        Some(S::If(branches, Some(otherwise))) => {
+            branches.iter().all(|(_, b)| ends(b)) && ends(otherwise)
+        }
+        _ => false,
     }
 }

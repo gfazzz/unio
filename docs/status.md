@@ -34,7 +34,7 @@ Counted per identifier (a grouped row counts each of its identifiers); the table
 | D (documentation) | 5 | 1 | 0 | 1 | 3 |
 | Total | 152 | 72 | 27 | 32 | 21 |
 
-Table 6.1 (commands): 8 of the 16 commands exist. Section 7.1 (7 metrics): 2 met and gated, 2 met in part and not gated, 3 not measured.
+Table 6.1 (commands): 8 of the 16 commands exist. Section 7.1 (7 metrics): 2 met and gated, 2 met for the gate of release 0.1 and gated (json and text outside, gated from 0.2), 3 not measured.
 
 ## Known gaps
 
@@ -203,10 +203,10 @@ Table 6.1: `unio build` (without `--target`), `run`, `check`, `fmt`, `test`, `sy
 |---|---|---|---|
 | `unio check` of 10,000 lines at most 1 s | not measured | — | — |
 | `--release` build of 10,000 lines at most 30 s | not measured | — | — |
-| Start of an empty program at most 5 ms | met natively and gated | native executable 2.6 ms, median of 101 runs (Go 0.9 ms, `unio run` 22 ms) | CI step "Native start-up of an empty program at most 5 ms (7.1)": `bench/run.py --only empty --native --check-startup`, Lx64 |
-| Text and JSON at least 0.5x of CPython | met natively and gated | native wc 1.33x, json 0.65x, text 0.60x, loop 27x; interpreter json 0.37x | CI benchmarks: native floor enforced; interpreter json reported only |
-| Native time at most 2x Go (RFC 0003) | met in part, not gated | wc within (0.37x Go); loop 2.30x in the last run (start 2.6 ms of 30 ms, Go 13 ms: the computation is about 2x Go); json and text outside, gated from 0.2 | reported with `continue-on-error` |
-| Native peak memory at most 2x Go plus 8 MB | met in part, not gated | wc, text, loop within; json 4.2x | reported |
+| Start of an empty program at most 5 ms | met natively and gated | native executable 2.5 ms, median of 101 runs (Go 0.9 ms, `unio run` 22 ms) | CI step "Native start-up of an empty program at most 5 ms (7.1)": `bench/run.py --only empty --native --check-startup`, Lx64 |
+| Text and JSON at least 0.5x of CPython | met natively and gated | native wc 1.29x, json 0.65x, text 0.64x, loop 43x; interpreter json 0.37x | CI benchmarks: native floor enforced; interpreter json reported only |
+| Native time at most 2x Go (RFC 0003) | met for the gate of 0.1 and gated | wc 0.40x Go; loop 1.37x (17.7 ms, Go 12.9 ms; 1.35x and 1.39x in two more runs; 2.2x to 2.3x before the code generation of runtime 8.4); json 11x and text 2.9x outside, gated from 0.2 | CI step "Native executables against Go (RFC 0003; wc and loop gated)": `bench/run.py --runs 9 --native --check-go`, best of 9 runs, Lx64 |
+| Native peak memory at most 2x Go plus 8 MB | met for the gate of 0.1 and gated | wc, text, loop within; json 4.3x, gated from 0.2 | the same CI step |
 | GC pause at a 100 MB heap at most 10 ms | not measured | no GC (C-13); freeing large structures not measured | — |
 
 Figures are from [bench/README.md](../bench/README.md), Linux x86-64; the start-up row and the native rows were rerun with the program image of the executable.

@@ -25,7 +25,9 @@ use unio_runtime::runtime::Runtime;
 use unio_runtime::value::{Callable, OrderedMap, Value};
 
 /// What native code receives in its first argument. The first three fields are read by
-/// native code at fixed offsets to push and pop its call frame without a call (C-14, C-18).
+/// native code at fixed offsets to push its call frame without a call (C-14, C-18). Native code
+/// keeps the depth in a register and writes it, with the line of its frame, before each call of
+/// a function here that takes the context; the entries from the runtime restore it on return.
 #[repr(C)]
 pub struct Ctx {
     pub frames: *mut (u32, u32),

@@ -37,19 +37,19 @@ The runner uses only the Python standard library. It generates the inputs into `
 
 ## Status
 
-Measured on Linux x86-64 with 4 CPUs (Go 1.24, Rust 1.97, Python 3.13), best of 5 runs, wall time including start-up (`python3 bench/run.py --native --runs 5 --only wc,json,text,loop --check-floor --check-go`), with the executables that read a prepared program image at start (docs/runtime.md 8.4). The row empty is the median of 101 runs (`--only empty --native`). The ratio is the other language's time divided by the native executable's: above 1, Unio is faster.
+Measured on Linux x86-64 with 4 CPUs (Go 1.24, Rust 1.97, Python 3.13), best of 9 runs, wall time including start-up (`python3 bench/run.py --native --runs 9 --only empty,wc,json,text,loop --check-floor --check-go --check-startup`, the first of three runs; loop was 1.37x, 1.35x and 1.39x Go in the three), with the executables that read a prepared program image at start and the code generation of docs/runtime.md 8.4. The row empty is the median of 101 runs (`--only empty --native`). The ratio is the other language's time divided by the native executable's: above 1, Unio is faster.
 
 | Benchmark | Interpreter | Native | Python | Go | Rust | Native vs Python | Native vs Go | Native vs Rust |
 |---|---|---|---|---|---|---|---|---|
-| wc | 0.243 s | 0.217 s | 0.288 s | 0.589 s | 0.088 s | 1.33x | 2.72x | 0.41x |
-| json | 9.288 s | 5.343 s | 3.465 s | 0.451 s | 0.267 s | 0.65x | 0.08x | 0.05x |
-| text | 0.173 s | 0.149 s | 0.090 s | 0.054 s | 0.047 s | 0.60x | 0.36x | 0.31x |
-| loop | 0.715 s | 0.030 s | 0.809 s | 0.013 s | 0.012 s | 26.69x | 0.43x | 0.40x |
-| empty | 22.4 ms | 2.6 ms | 11.2 ms | 0.9 ms | 1.0 ms | 4.32x | 0.34x | 0.39x |
+| wc | 0.248 s | 0.216 s | 0.278 s | 0.547 s | 0.087 s | 1.29x | 2.53x | 0.40x |
+| json | 9.580 s | 5.470 s | 3.567 s | 0.493 s | 0.275 s | 0.65x | 0.09x | 0.05x |
+| text | 0.174 s | 0.147 s | 0.095 s | 0.051 s | 0.046 s | 0.64x | 0.35x | 0.31x |
+| loop | 0.703 s | 0.018 s | 0.770 s | 0.013 s | 0.012 s | 43.38x | 0.73x | 0.68x |
+| empty | 21.6 ms | 2.5 ms | 10.4 ms | 0.9 ms | 1.1 ms | 4.22x | 0.36x | 0.45x |
 
 The native executables of sprint S6 (docs/runtime.md 8.4) meet the floor of 7.1 on all four benchmarks and start an empty program within the 5 ms of 7.1; the interpreter meets the floor on wc, text, and loop, and json is 0.37x. The start of an executable was 6.2 to 7.3 ms on this machine while it rebuilt the declaration tables from embedded sources (about 14 ms on the machine of the earlier measurements); reading the prepared image instead takes 2.6 ms, of which about 0.9 ms is the start of any process, as Go's shows. Where the time goes:
 
-- loop: integers live in registers and every operator is one instruction with its overflow branch; the start is now 2.6 ms of the 30 ms. Go took 13 ms in this run (23 ms on the earlier machine), so the computation itself, fib(30) and the loop of ten million steps, is about twice Go's here, and loop is 2.30x Go, above the limit of RFC 0003: the next steps (static dispatch, then reference-count elision) are what remains for it.
+- loop: 17.7 ms against Go's 12.9 ms, 1.37x Go (before the changes of the code generation below: 28 to 30 ms, 2.2x to 2.3x). Of the 17.7 ms, the start is 2.5 ms (Go 0.9 ms), fib(30) about 6 ms (Go about 3.4 ms) and the loop of ten million steps about 9 ms (Go about 7.4 ms). Measured on the executables before the changes (no profiler on the machine: separate programs for fib and for the loop, and their machine code), fib(30) took about 11 ms and the loop about 11.5 ms. The cost of a call was the push and pop of the frame through memory (the depth loaded, stored, and stored back), a store of the line for every statement, three overflow branches, five saved registers, and a status check; the loop spent a store of the line per step and kept `total` in memory, because the registers that survive calls held the stack's addresses. What changed (docs/runtime.md 8.4): the depth travels in a register and is stored only before a call of the runtime, the frame is pushed with one store, the line is stored only before a call that can read it (a variable of the code, so the trace still names the statement that ran last), `n - 1` and `i * i` carry no overflow check where the bounds of a tested parameter or of the loop prove them in range, `% 7` on a value known not to be negative needs no sign correction, the loop tests its bound once per step, and a call of `fib` decides its leading `if n < 2: return n` at the call when the stack has room, so the leaves of the recursion are not called. Every check of the language stays: an overflow still faults at its line, and traces and the stack limit are those of `unio run` (`tests/native.rs`). Functions start at 64-byte boundaries: without it the time of fib moved between 10 and 22 ms from build to build with the code before it.
 - json: the parser of `std.json` works on a list of one-character texts and a `Reader` struct passed by `var`; every character is a heap value, every method call is dispatched by the runtime by the type of the receiver, every `Option` is allocated, and every copy of a value counts a reference. What closes it, in order: the checker's types in the lowered form for static dispatch and monomorphised generics, then reference-count elision and reuse in place (Perceus), then a representation of characters without a heap value.
 - text: the work is in the externals `split`, `join`, and `replace` and in building a text per line; the start is 2.6 ms of the 149 ms. Static dispatch of the method calls and fewer allocations of short texts would close it.
 
@@ -57,12 +57,12 @@ Peak memory in MB, smallest of the runs (`--native --check-go`; empty from `--on
 
 | Benchmark | Native | Python | Go | Rust | Native vs Go |
 |---|---|---|---|---|---|
-| wc | 166.1 | 231.5 | 183.5 | 21.9 | 0.91x |
-| json | 728.4 | 233.4 | 173.5 | 178.8 | 4.20x |
-| text | 21.5 | 28.5 | 13.3 | 6.0 | 1.62x |
-| loop | 5.3 | 11.2 | 1.6 | 2.2 | 3.21x, within 2x + 8 MB |
+| wc | 166.1 | 231.5 | 176.8 | 22.0 | 0.94x |
+| json | 728.4 | 233.4 | 168.6 | 178.7 | 4.32x |
+| text | 21.5 | 28.5 | 13.4 | 6.0 | 1.61x |
+| loop | 5.1 | 11.1 | 1.6 | 2.2 | 3.17x, within 2x + 8 MB |
 | empty | 5.1 | 11.1 | 1.3 | 2.1 | 3.92x, within 2x + 8 MB |
 
 The executable no longer carries the parser, the checker, or the lowering, nor the sources and syntax trees of the program at run time: an empty program peaks at 5.1 MB instead of 7.6 MB and loop at 5.3 MB instead of 7.7 MB (measured on this machine with the executables of both kinds), and the executable of an empty program is 5.96 MB instead of 6.33 MB (1.68 MB instead of 2.02 MB stripped; code and data 1.69 MB instead of 2.03 MB). Of the rest, 1 MiB is the reserve for `release` (C-17), written page by page at start. json holds the document as a list of one-character texts, each a heap value; that is a step of RFC 0003.
 
-The tools are 0.23x to 0.72x of their Python references in the interpreter. CI enforces the floor on the native executables for all four benchmarks and on the interpreter for wc, text, and loop, and reports the interpreter's json without failing; it enforces the start-up of 7.1 on the native executable of empty (the median of 101 runs, since shared runners are noisy), and reports the limits against Go of RFC 0003 without failing, since loop is still above 2x Go on fast runners.
+The tools are 0.23x to 0.72x of their Python references in the interpreter. CI enforces the floor on the native executables for all four benchmarks and on the interpreter for wc, text, and loop, and reports the interpreter's json without failing; it enforces the start-up of 7.1 on the native executable of empty (the median of 101 runs, since shared runners are noisy), and enforces the limits against Go of RFC 0003 for wc and loop (best of 9 runs), reporting json and text, which are gated from 0.2.
