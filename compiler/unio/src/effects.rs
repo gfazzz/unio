@@ -1298,7 +1298,7 @@ pub enum Profile {
 
 /// The effects a manifest permits, or None when it has no `[permissions]` table.
 pub fn manifest_permissions(package: &Path) -> Option<HashSet<&'static str>> {
-    let text = std::fs::read_to_string(package.join("unio.toml")).ok()?;
+    let text = crate::vfs::read_to_string(&package.join("unio.toml")).ok()?;
     let mut section = String::new();
     let mut found = false;
     let mut permitted = HashSet::new();

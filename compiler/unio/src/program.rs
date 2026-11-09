@@ -241,7 +241,7 @@ const LAYERS: [&str; 3] = ["core", "alloc", "std"];
 
 /// Whether `[dependencies]` of the package's `unio.toml` lists the alias (T-6, T-14).
 fn declares_dependency(package: &Path, alias: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(package.join("unio.toml")) else {
+    let Ok(text) = crate::vfs::read_to_string(&package.join("unio.toml")) else {
         return false;
     };
     let mut section = String::new();
