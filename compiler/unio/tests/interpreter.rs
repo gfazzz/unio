@@ -21,6 +21,16 @@ fn unio() -> Command {
 /// Windows has no sandbox of the operating system yet (SB-4), so `unio run` and `unio test`
 /// refuse to start there (SB-5); the tests act as the operator and allow the weaker sandbox
 /// through a policy.
+/// Standard error of a program without the warnings that the operator allowed a weaker
+/// sandbox, which Windows prints before every program and every worker of the tools.
+fn program_err(output: &std::process::Output) -> String {
+    text(&output.stderr)
+        .lines()
+        .filter(|l| !l.starts_with("unio: warning: the operator allowed a weaker sandbox"))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
@@ -455,7 +465,7 @@ fn release_runs_from_the_reserve_after_a_fault_on_a_full_heap() {
     assert_the_heap_is_full("release");
     let dir = common::reserve_package("unio-interpreter", "release", FAULT_ON_A_FULL_HEAP);
     let output = run_reserve(&dir, "run", Some(0));
-    let err = text(&output.stderr);
+    let err = program_err(&output);
     assert_eq!(output.status.code(), Some(101), "{err}");
     // Both releases ran, in reverse order: the log with its 2,000 texts, then the file, whose
     // temporary is gone while the target is unchanged.
@@ -502,7 +512,7 @@ fn a_fault_in_release_on_a_full_heap_still_releases_the_rest() {
 ",
     );
     let output = run_reserve(&dir, "run", Some(0));
-    let err = text(&output.stderr);
+    let err = program_err(&output);
     assert_eq!(output.status.code(), Some(101), "{err}");
     assert_eq!(
         text(&output.stdout),
@@ -544,7 +554,7 @@ fn exhausting_the_reserve_in_release_ends_with_102() {
 ",
     );
     let output = run_reserve(&dir, "run", Some(0));
-    let err = text(&output.stderr);
+    let err = program_err(&output);
     assert_eq!(output.status.code(), Some(102), "{err}");
     assert_eq!(
         err,
@@ -583,7 +593,7 @@ fn exhaustion_does_not_run_release() {
     );
     // A real fill under the limit of 8 MiB, without the hook.
     let output = run_reserve(&dir, "run", None);
-    let err = text(&output.stderr);
+    let err = program_err(&output);
     assert_eq!(output.status.code(), Some(102), "{err}");
     assert_eq!(
         err,
