@@ -245,7 +245,8 @@ public function copy_file(
 public external function rename(source as Path, target as Path) fails with IoError
 
 ## Creates one directory; fails with kind AlreadyExists if it exists and NotFound if its parent
-## does not. Permission: files.write.
+## does not. On Linux and macOS the directory that holds it is synced as well, so that a durable
+## write into the new directory survives power loss (S-9). Permission: files.write.
 public external function create_directory(path as Path) fails with IoError
 
 ## Creates the directory and every missing parent; an existing directory is not an error.
@@ -434,7 +435,8 @@ external function system_close(descriptor as Int) fails with IoError
 ## Permission: files.write.
 external function system_rename(temporary as Path, target as Path) fails with IoError
 
-## fsync of the directory on Linux and macOS; on Windows MOVEFILE_WRITE_THROUGH has done this already.
+## fsync of the directory on Linux, fcntl(F_FULLFSYNC) on macOS, where a refused one fails after a
+## plain fsync; on Windows MOVEFILE_WRITE_THROUGH has done this already.
 ## Permission: files.write.
 external function system_sync_directory(directory as Path) fails with IoError
 

@@ -196,8 +196,14 @@ pub fn make_directory_in(dir: &OwnedFd, name: &OsStr) -> io::Result<()> {
 }
 
 /// Syncs the directory: it is opened again through `.`, which is never a link, since a handle
-/// opened only to name the directory cannot be synced.
-pub fn sync_directory(dir: &OwnedFd) -> io::Result<()> {
+/// opened only to name the directory cannot be synced. `path` names it in the trace of the
+/// crash trials (`file_trace`).
+///
+/// `sync_all` is fsync on Linux and fcntl(F_FULLFSYNC) on Apple platforms, where a plain fsync
+/// does not reach storage (S-9a). A file system that refuses F_FULLFSYNC for a directory still
+/// gets a plain fsync, which orders the rename, but the error is reported: the rename is not
+/// confirmed to survive power loss, and `commit` reports kind DurabilityUnconfirmed (S-9c).
+pub fn sync_directory(dir: &OwnedFd, path: &Path) -> io::Result<()> {
     let dot = c_text(b".")?;
     // SAFETY: the descriptor is open and dot ends with 0.
     let fd = owned(unsafe {
@@ -208,17 +214,28 @@ pub fn sync_directory(dir: &OwnedFd) -> io::Result<()> {
         )
     })?;
     let file = std::fs::File::from(fd);
-    // sync_all is fsync on Linux and F_FULLFSYNC on Apple platforms, where a file system that
-    // refuses it for a directory still orders the rename with a plain fsync.
+    let trace = path.as_os_str().as_bytes();
     match file.sync_all() {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::file_trace::record(
+                "fsync-dir",
+                &[crate::file_trace::FILE_SYNC.as_bytes(), trace],
+            );
+            Ok(())
+        }
         #[cfg(target_vendor = "apple")]
-        Err(_) => {
+        Err(full) => {
             extern "C" {
                 fn fsync(fd: c_int) -> c_int;
             }
             // SAFETY: the descriptor belongs to `file`, which stays open during the call.
-            check(unsafe { fsync(file.as_raw_fd()) }).map(drop)
+            if unsafe { fsync(file.as_raw_fd()) } == 0 {
+                crate::file_trace::record("fsync-dir", &[b"fsync", trace]);
+            }
+            Err(io::Error::new(
+                full.kind(),
+                format!("F_FULLFSYNC of the directory failed, so the rename may not reach storage: {full}"),
+            ))
         }
         #[cfg(not(target_vendor = "apple"))]
         Err(e) => Err(e),

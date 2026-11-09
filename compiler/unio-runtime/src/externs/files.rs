@@ -53,6 +53,31 @@ fn path_text(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// Records an operation for the crash trials (`file_trace`): absolute paths, then raw data.
+fn trace(operation: &str, paths: &[&Path], data: Option<&[u8]>) {
+    if !crate::file_trace::enabled() {
+        return;
+    }
+    let mut arguments: Vec<Vec<u8>> = paths
+        .iter()
+        .map(|p| crate::file_trace::path_bytes(&crate::sandbox::absolute(p)))
+        .collect();
+    arguments.extend(data.map(<[u8]>::to_vec));
+    let arguments: Vec<&[u8]> = arguments.iter().map(Vec::as_slice).collect();
+    crate::file_trace::record(operation, &arguments);
+}
+
+/// Records an operation on a descriptor of the runtime for the crash trials.
+fn trace_descriptor(operation: &str, descriptor: i64, data: &[&[u8]]) {
+    if !crate::file_trace::enabled() {
+        return;
+    }
+    let number = descriptor.to_string();
+    let mut arguments: Vec<&[u8]> = vec![number.as_bytes()];
+    arguments.extend_from_slice(data);
+    crate::file_trace::record(operation, &arguments);
+}
+
 fn injected(p: &str) -> Unwind {
     io_error(p, "Other", "injected failure")
 }
@@ -287,6 +312,11 @@ fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }
     rename_without_replacing(&native(&source), &native(&target))
         .map_err(|e| os_error(target.as_str(), &e))?;
+    trace(
+        "rename-noreplace",
+        &[&native(&source), &native(&target)],
+        None,
+    );
     Ok(Value::Unit)
 }
 
@@ -440,6 +470,17 @@ fn create_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         return done.map(|()| Value::Unit);
     }
     fs::create_dir(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
+    trace("mkdir", &[&native(&p)], None);
+    // The entry of the new directory is synced, so that a durable write into it survives power
+    // loss (S-9, docs/runtime.md 10); the directory exists either way, so the result of the
+    // sync is not reported. Windows has no sync of a directory (NTFS journals the entry).
+    #[cfg(unix)]
+    {
+        let created = crate::sandbox::absolute(&native(&p));
+        if let Some(parent) = created.parent() {
+            let _ = sync_directory(parent);
+        }
+    }
     Ok(Value::Unit)
 }
 
@@ -473,6 +514,11 @@ fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
     }) {
         let (temporary, file) = opened?;
         let descriptor = runtime.add_descriptor(file);
+        trace_descriptor(
+            "open",
+            descriptor,
+            &[&crate::file_trace::path_bytes(&temporary)],
+        );
         return Ok(Value::record(
             "TemporaryFile",
             vec![
@@ -496,7 +542,15 @@ fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
         .create_new(true)
         .open(&temporary)
         .map_err(|e| os_error(target.as_str(), &e))?;
+    trace("create", &[&temporary], None);
     let descriptor = runtime.add_descriptor(file);
+    trace_descriptor(
+        "open",
+        descriptor,
+        &[&crate::file_trace::path_bytes(&crate::sandbox::absolute(
+            &temporary,
+        ))],
+    );
     Ok(Value::record(
         "TemporaryFile",
         vec![
@@ -525,6 +579,7 @@ fn write_all(runtime: &mut Runtime, descriptor: i64, data: &[u8]) -> Outcome {
         }
     }
     file.write_all(data).map_err(|e| os_error(&label, &e))?;
+    trace_descriptor("write", descriptor, &[data]);
     Ok(Value::Unit)
 }
 
@@ -552,6 +607,11 @@ fn system_sync_data(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         .descriptor(descriptor)
         .ok_or_else(|| io_error(&label, "Other", "the descriptor is not open"))?;
     file.sync_all().map_err(|e| os_error(&label, &e))?;
+    trace_descriptor(
+        "fsync",
+        descriptor,
+        &[crate::file_trace::FILE_SYNC.as_bytes()],
+    );
     Ok(Value::Unit)
 }
 
@@ -568,6 +628,7 @@ fn system_close(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         return Err(injected(&label));
     }
     closed.map_err(|e| os_error(&label, &e))?;
+    trace_descriptor("close", descriptor, &[]);
     Ok(Value::Unit)
 }
 
@@ -615,6 +676,13 @@ fn system_rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         return done.map(|()| Value::Unit);
     }
     replace(&native(&temporary), &native(&target)).map_err(|e| os_error(target.as_str(), &e))?;
+    // MOVEFILE_WRITE_THROUGH returns after the rename is on the disk (S-9a).
+    let operation = if cfg!(windows) {
+        "rename-write-through"
+    } else {
+        "rename"
+    };
+    trace(operation, &[&native(&temporary), &native(&target)], None);
     Ok(Value::Unit)
 }
 
@@ -668,11 +736,14 @@ fn system_sync_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
 fn sync_directory(directory: &Path) -> std::io::Result<()> {
-    File::open(directory)?.sync_all()
+    File::open(directory)?.sync_all()?;
+    trace_directory_sync(crate::file_trace::FILE_SYNC, directory);
+    Ok(())
 }
 
-/// On Apple platforms `sync_all` is fcntl(F_FULLFSYNC); where a file system refuses it for a
-/// directory, a plain fsync of the directory still orders the rename.
+/// On Apple platforms `sync_all` is fcntl(F_FULLFSYNC). Where a file system refuses it for a
+/// directory, a plain fsync of the directory still orders the rename, but it does not reach
+/// storage, so the error is reported: `commit` then fails with kind DurabilityUnconfirmed.
 #[cfg(target_vendor = "apple")]
 fn sync_directory(directory: &Path) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -680,14 +751,29 @@ fn sync_directory(directory: &Path) -> std::io::Result<()> {
         fn fsync(fd: i32) -> i32;
     }
     let file = File::open(directory)?;
-    if file.sync_all().is_ok() {
-        return Ok(());
-    }
+    let full = match file.sync_all() {
+        Ok(()) => {
+            trace_directory_sync(crate::file_trace::FILE_SYNC, directory);
+            return Ok(());
+        }
+        Err(e) => e,
+    };
     // SAFETY: the descriptor belongs to `file`, which stays open during the call.
     if unsafe { fsync(file.as_raw_fd()) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+        trace_directory_sync("fsync", directory);
+    }
+    Err(std::io::Error::new(
+        full.kind(),
+        format!("F_FULLFSYNC of the directory failed, so the rename may not reach storage: {full}"),
+    ))
+}
+
+/// Records a sync of a directory and the call that did it, for the crash trials.
+#[cfg(unix)]
+fn trace_directory_sync(call: &str, directory: &Path) {
+    if crate::file_trace::enabled() {
+        let path = crate::file_trace::path_bytes(&crate::sandbox::absolute(directory));
+        crate::file_trace::record("fsync-dir", &[call.as_bytes(), &path]);
     }
 }
 
@@ -713,8 +799,8 @@ fn system_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     {
         return Ok(Value::Unit);
     }
-    if crate::sandbox::may_write_temporary(p.as_str()) {
-        let _ = fs::remove_file(native(&p));
+    if crate::sandbox::may_write_temporary(p.as_str()) && fs::remove_file(native(&p)).is_ok() {
+        trace("unlink", &[&native(&p)], None);
     }
     Ok(Value::Unit)
 }

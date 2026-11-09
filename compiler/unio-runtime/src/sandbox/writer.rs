@@ -391,6 +391,8 @@ fn seed() -> u64 {
 /// temporary file there, and its target.
 struct Operation {
     dir: OwnedFd,
+    /// The path of `dir`, for the trace of the crash trials.
+    parent: PathBuf,
     temporary: OsString,
     name: OsString,
     target: PathBuf,
@@ -400,7 +402,8 @@ struct Operation {
 pub struct Server {
     scopes: Vec<Scope>,
     open: HashMap<u64, Operation>,
-    committed: VecDeque<(u64, OwnedFd)>,
+    /// Committed operations: the id, the directory, and its path.
+    committed: VecDeque<(u64, OwnedFd, PathBuf)>,
     ids: Ids,
     /// /proc/self/mountinfo, read before the writer's own sandbox applies (Linux).
     mountinfo: Option<String>,
@@ -531,12 +534,15 @@ impl Server {
                     let temporary = OsString::from_vec(temporary);
                     match fdio::create_new(&dir, &temporary) {
                         Ok(file) => {
+                            let created = parent.join(&temporary);
+                            trace("create", &[&created]);
                             let mut out = Out::default();
-                            out.u64(id).path(&parent.join(&temporary));
+                            out.u64(id).path(&created);
                             self.open.insert(
                                 id,
                                 Operation {
                                     dir,
+                                    parent,
                                     temporary,
                                     name,
                                     target: path,
@@ -560,11 +566,19 @@ impl Server {
                 }
                 fdio::replace_in(&operation.dir, &operation.temporary, &operation.name)
                     .map_err(Reply::Os)?;
+                trace(
+                    "rename",
+                    &[
+                        &operation.parent.join(&operation.temporary),
+                        &operation.target,
+                    ],
+                );
                 let operation = self
                     .open
                     .remove(&id)
                     .expect("the operation was found above");
-                self.committed.push_back((id, operation.dir));
+                self.committed
+                    .push_back((id, operation.dir, operation.parent));
                 while self.committed.len() > KEEP_COMMITTED {
                     self.committed.pop_front();
                 }
@@ -578,16 +592,21 @@ impl Server {
                     .expect("the operation was found above");
                 match fdio::remove_in(&operation.dir, &operation.temporary) {
                     Err(e) if e.kind() != io::ErrorKind::NotFound => Err(Reply::Os(e)),
-                    _ => Ok(Reply::ok()),
+                    removed => {
+                        if removed.is_ok() {
+                            trace("unlink", &[&operation.parent.join(&operation.temporary)]);
+                        }
+                        Ok(Reply::ok())
+                    }
                 }
             }
             Request::Sync(id) => {
-                let Some((_, dir)) = self.committed.iter().find(|(i, _)| *i == id) else {
+                let Some((_, dir, path)) = self.committed.iter().find(|(i, _, _)| *i == id) else {
                     return Err(Reply::Refused(format!(
                         "denied by the sandbox: operation {id:016x} is not a committed atomic file of this program"
                     )));
                 };
-                fdio::sync_directory(dir).map_err(Reply::Os)?;
+                fdio::sync_directory(dir, path).map_err(Reply::Os)?;
                 Ok(Reply::ok())
             }
             Request::SyncDirectory(dir) => {
@@ -596,12 +615,18 @@ impl Server {
                     return Err(refused_scope(&dir));
                 }
                 let fd = walk(&dir)?;
-                fdio::sync_directory(&fd).map_err(Reply::Os)?;
+                fdio::sync_directory(&fd, &dir).map_err(Reply::Os)?;
                 Ok(Reply::ok())
             }
             Request::MakeDirectory(path) => {
-                let (_, name, dir) = self.target(&path)?;
+                let (parent, name, dir) = self.target(&path)?;
                 fdio::make_directory_in(&dir, &name).map_err(Reply::Os)?;
+                trace("mkdir", &[&path]);
+                // The entry of the new directory is synced, so that a durable write into it
+                // survives power loss (S-9, docs/runtime.md 10). The directory exists either
+                // way, so the result of the sync is not reported: a file system that cannot
+                // sync a directory gives no guarantee after power loss in any case (S-9a).
+                let _ = fdio::sync_directory(&dir, &parent);
                 Ok(Reply::ok())
             }
             Request::Rename(source, target) => {
@@ -609,6 +634,7 @@ impl Server {
                 let (_, to, to_dir) = self.target(&target)?;
                 fdio::rename_without_replacing(&from_dir, &from, &to_dir, &to)
                     .map_err(Reply::Os)?;
+                trace("rename-noreplace", &[&source, &target]);
                 Ok(Reply::ok())
             }
         }
@@ -636,6 +662,19 @@ impl Server {
         let _ = &self.mountinfo;
         super::super::externs::durability::file_system_name(dir)
     }
+}
+
+/// Records an operation of the writer for the crash trials (`file_trace`); only observes.
+fn trace(operation: &str, paths: &[&Path]) {
+    if !crate::file_trace::enabled() {
+        return;
+    }
+    let paths: Vec<Vec<u8>> = paths
+        .iter()
+        .map(|p| p.as_os_str().as_bytes().to_vec())
+        .collect();
+    let paths: Vec<&[u8]> = paths.iter().map(Vec::as_slice).collect();
+    crate::file_trace::record(operation, &paths);
 }
 
 fn read_frame(stream: &mut UnixStream) -> io::Result<Option<Result<Vec<u8>, String>>> {
@@ -855,6 +894,11 @@ impl Handle {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit());
+        // The trace of the crash trials only observes; the writer records on the standard
+        // error it inherits anyway (`file_trace`).
+        if crate::file_trace::enabled() {
+            command.env(crate::file_trace::ENV, "1");
+        }
         // SAFETY: the closure only calls dup2 and fcntl, which are async-signal-safe.
         unsafe {
             command.pre_exec(move || {
