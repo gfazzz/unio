@@ -413,19 +413,15 @@ fn os_limits(config: &Config) -> os::Limits {
 }
 
 /// Applies the rules, or reports what is missing: a missing mechanism stops the worker with
-/// code 103 unless the operator allowed a weaker sandbox (SB-5). On Windows no mechanism for
-/// files and the network exists yet; the worker runs with its Job Object and says so (SB-14:
-/// the tools run no code of the package, docs/runtime.md 9.7).
+/// code 103, before it reads anything of the project, unless the operator allowed a weaker
+/// sandbox with --allow-weaker-sandbox or allow_weaker in the external policy (SB-5, SB-10);
+/// a project cannot allow it through its manifest. On Windows the restrictions of files and
+/// the network are missing, so the tools need that permission there; the Job Object (memory,
+/// processes) and the time limit still apply (docs/runtime.md 9.7).
 fn apply(rules: &os::Rules, allow_weaker: bool) -> Result<(), ExitCode> {
     let missing = os::missing();
     if !missing.is_empty() {
-        if cfg!(windows) {
-            eprintln!(
-                "unio: note: on Windows the worker of the tool is limited only by a Job Object \
-                 (memory, processes); its files and network are not restricted yet \
-                 (docs/runtime.md 9.7)"
-            );
-        } else if allow_weaker {
+        if allow_weaker {
             eprintln!(
                 "unio: warning: the operator allowed a weaker sandbox for the worker; missing: {}",
                 missing.join("; ")

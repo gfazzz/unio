@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{repo_root, unio_files};
+use common::{allow_weaker_on_windows, repo_root, unio_files};
 
 fn unio() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
@@ -21,14 +21,6 @@ fn unio() -> Command {
 /// Windows has no sandbox of the operating system yet (SB-4), so `unio run` and `unio test`
 /// refuse to start there (SB-5); the tests act as the operator and allow the weaker sandbox
 /// through a policy.
-fn allow_weaker_on_windows(command: &mut Command) {
-    if cfg!(windows) {
-        let policy = std::env::temp_dir().join(format!("unio-weaker-{}.toml", std::process::id()));
-        fs::write(&policy, "allow_weaker = true\n").unwrap();
-        command.env("UNIO_POLICY", policy);
-    }
-}
-
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }

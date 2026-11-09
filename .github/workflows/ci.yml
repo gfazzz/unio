@@ -114,6 +114,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Windows has no sandbox of the operating system for the workers of the tools yet, so
+      # check and fmt refuse there with 103 (SB-10); CI, as the operator, allows the weaker
+      # sandbox on Windows only. The refusal itself is tested in tests/workers.rs.
+      SANDBOX: ${{ matrix.os == 'windows-latest' && '--allow-weaker-sandbox' || '' }}
     defaults:
       run:
         working-directory: compiler
@@ -138,8 +143,8 @@ jobs:
         working-directory: .
         run: |
           cargo build --release --manifest-path compiler/Cargo.toml
-          compiler/target/release/unio fmt --check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio
+          compiler/target/release/unio fmt --check $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio
       - name: Unio sources pass name and type checks (docs/semantics.md)
         shell: bash
         working-directory: .
-        run: compiler/target/release/unio check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/semantic/valid/*.unio
+        run: compiler/target/release/unio check $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/semantic/valid/*.unio

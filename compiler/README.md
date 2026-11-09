@@ -426,7 +426,8 @@ The tests were written before the code (concept, section 1.2):
   is static; at run time decoding a struct with a private field also fails with `DecodeError`,
   while encoding has no such second guard.
 - Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows a worker has only a
-  Job Object (memory, one process) and its files and network are not restricted; `stat` is not
+  Job Object (memory, one process) and its files and network are not restricted, so the tools
+  refuse there with 103 unless the operator allows the weaker sandbox; `stat` is not
   restricted anywhere; the tool still reads the manifest and the policy itself for the sandboxes
   of `run` and `test`; the language server (SB-13), the package operations (SB-12) and the
   archives of SB-15 do not exist yet.

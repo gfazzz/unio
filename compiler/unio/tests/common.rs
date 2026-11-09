@@ -32,3 +32,22 @@ pub fn unio_files(dir: &Path) -> Vec<PathBuf> {
 pub fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
+
+/// Windows has no sandbox of the operating system for programs or for the workers of the tools
+/// yet, so `unio` refuses there with code 103 unless the operator allows a weaker sandbox
+/// (SB-5, SB-10). The functional tests act as that operator through the external policy; the
+/// refusal itself is tested separately without it.
+#[allow(dead_code)]
+pub fn allow_weaker_on_windows(command: &mut std::process::Command) {
+    if cfg!(windows) {
+        command.env("UNIO_POLICY", weaker_policy());
+    }
+}
+
+/// A policy file that only allows the weaker sandbox.
+#[allow(dead_code)]
+pub fn weaker_policy() -> PathBuf {
+    let policy = std::env::temp_dir().join(format!("unio-weaker-{}.toml", std::process::id()));
+    fs::write(&policy, "allow_weaker = true\n").unwrap();
+    policy
+}

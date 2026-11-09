@@ -77,6 +77,13 @@ impl Project {
             .env_remove("UNIO_WORKER_PROBE")
             .env("HOME", self.path("home"))
             .args(args);
+        if cfg!(windows) {
+            // The operator allows the weaker sandbox through the external policy (SB-5, SB-10);
+            // the refusal without it is tested on its own below.
+            let policy = self.path("weaker.toml");
+            fs::write(&policy, "allow_weaker = true\n").unwrap();
+            command.env("UNIO_POLICY", policy);
+        }
         for (name, value) in envs {
             command.env(name, value);
         }
@@ -93,7 +100,13 @@ impl Project {
 
     fn policy(&self, body: &str) -> PathBuf {
         let path = self.path("policy.toml");
-        fs::write(&path, body).unwrap();
+        // On Windows the operator must allow the weaker sandbox (SB-5, SB-10).
+        let weaker = if cfg!(windows) {
+            "allow_weaker = true\n"
+        } else {
+            ""
+        };
+        fs::write(&path, format!("{weaker}{body}")).unwrap();
         path
     }
 }
@@ -338,6 +351,45 @@ fn the_worker_cannot_start_a_process() {
         assert_eq!(output.status.code(), Some(0), "{}", all(&output));
     }
     assert!(!marker.exists());
+}
+
+/// On Windows the worker cannot restrict files and the network, so the tools refuse with code
+/// 103 before they read the project, unless the operator allows a weaker sandbox by the flag or
+/// the external policy; a project cannot allow it in its manifest (SB-5, SB-10).
+#[cfg(windows)]
+#[test]
+fn the_tools_refuse_a_weaker_sandbox_on_windows_unless_the_operator_allows_it() {
+    let p = Project::new("refuse");
+    fs::write(
+        p.pkg().join("unio.toml"),
+        "[package]\nname = \"refuse\"\nversion = \"0.1.0\"\nallow_weaker = true\n",
+    )
+    .unwrap();
+    for args in [
+        &["check", "main.unio"][..],
+        &["fmt", "--check", "main.unio"][..],
+    ] {
+        let mut command = p.command(args, &[("UNIO_WORKER_PROBE", "marker")]);
+        command.env_remove("UNIO_POLICY");
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(103), "{}", all(&output));
+        assert!(
+            text(&output.stderr).contains("--allow-weaker-sandbox"),
+            "{}",
+            all(&output)
+        );
+        let mut allowed: Vec<&str> = args.to_vec();
+        allowed.insert(1, "--allow-weaker-sandbox");
+        let mut command = p.command(&allowed, &[]);
+        command.env_remove("UNIO_POLICY");
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+        assert!(
+            text(&output.stderr).contains("weaker sandbox"),
+            "{}",
+            all(&output)
+        );
+    }
 }
 
 /// (e) On Windows the Job Object of the worker allows one process: the worker itself.
