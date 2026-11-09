@@ -70,7 +70,8 @@ allow_weaker = false        # true is the same as --allow-weaker-sandbox (SB-5)
 files.read = ["$CWD/src/**"]
 
 [limits]
-heap_bytes = 268_435_456    # the runtime's count of live values; 102 when exceeded
+heap_bytes = 268_435_456    # the runtime's count of live values; 102 when exceeded; at least
+                            # 2 MiB, of which 1 MiB is the reserve for release (C-17)
 wall_seconds = 60           # 102 when exceeded
 cpu_seconds = 30            # 102 when exceeded; each child gets RLIMIT_CPU
 processes = 4               # process.run calls; more fail with PermissionDenied
@@ -107,6 +108,17 @@ out, or overflows its output. The deadline covers reading the outputs; each outp
 size the program decides (`read_bytes(max_bytes)`, whole files, `Text.repeat`) check the heap
 limit before they allocate, so a refused allocation ends with 102 instead of an abort
 (docs/runtime.md 3.4, 3.5).
+
+Before `main`, before each test, and in an executable, the runtime sets aside a reserve of 1 MiB
+for `release` (C-17, docs/runtime.md 3.6–3.7): allocated, its pages written, and counted within
+`limits.heap_bytes`, so a program may use the limit minus 1 MiB, and a policy whose limit is
+below 2 MiB is refused with code 103. The reserve opens only when a fault is created, before its
+message and trace are allocated; then the allocator of the runtime
+(`unio-runtime/src/reserve.rs`, the global allocator of every build) serves the fault, its trace,
+and the `release` calls of the unwinding from the reserved pages, so they run on a full heap. A
+`release` that overflows the reserve on a full heap ends with 102 and skips the remaining
+releases; exhaustion never opens it. The test hook `UNIO_TEST_HEAP_FREE=N` counts the heap as
+full but for `N` bytes before `main`, so tests reach a fault on a full heap exactly.
 
 ## What is implemented
 
@@ -275,9 +287,10 @@ is the reference for it.
   Interpolation and the generated `to_text` show the short name.
 - Errors travel as `Unwind::Error` to the nearest `try ... on` or `try:` handler that names their
   type or `Error`; faults (`Unwind::Fault`) carry the trace of function, file and line of every
-  frame (C-14), run the `release` of every open `using` block on the way out (C-17), and end
-  `unio run` with code 101; exhaustion of the stack, or of the heap limit when a policy sets one,
-  ends it with 102 (C-18). An
+  frame (C-14), run the `release` of every open `using` block on the way out (C-17), from the
+  reserve set aside before `main`, and end `unio run` with code 101, the diagnostic written line
+  by line; exhaustion of the stack, or of the heap limit when a policy sets one, ends it with
+  102 without running `release` (C-18). An
   exit code of `main` outside 0–100 is a fault (C-15).
 - Top-level constants are evaluated on first use, once, which is dependency order (runtime 6.3).
 - Externals are called by their binding-table names (`Text.slice`, `std.files.system_rename`,
@@ -375,14 +388,21 @@ The tests were written before the code (concept, section 1.2):
   `using` blocks in reverse order and ends with 101 and its trace, exit codes of `main` inside and
   outside 0–100, and recursion that ends with 102; two modules with a struct, an error and an
   enum of the same names (`tests/programs/same_names`), whose methods, interface
-  implementations, handlers and variants stay apart under `unio run` and `unio test`.
+  implementations, handlers and variants stay apart under `unio run` and `unio test`; the
+  reserve for `release` (C-17): on a heap filled by the test hook, a fault releases an
+  `open_atomic` file and a resource that builds 2,000 texts, with the whole trace and no 102; a
+  fault inside a `release` still releases the rest; a `release` that exhausts the reserve ends
+  with 102 and leaves the temporary file; a real fill under 8 MiB runs no `release`; the same in
+  `unio test` with `expect_fault`. The runtime unit tests check that the reserve is set aside
+  before `main`, opens only for a fault and before the fault is built, and serves the path from
+  its pages; `the_reserve_peak_is_measured` (`unio/src/interp.rs`) measures its peak use.
 - `tests/sandbox.rs` (SB-8): programs that try forbidden actions through `std.files`, `std.env`
   and `std.process` (reading, listing, resolving, writing, copying, renaming, creating outside
   the scopes, `..` and links out of a scope, hidden variables, unlisted programs), with no
   permissions at all, and through child processes that read, write, connect and start
   grandchildren (Linux and macOS); a policy that narrows and warns, through `--policy` and
   `UNIO_POLICY`; the limits of heap, wall and CPU time (102), processes and file size; code 103
-  for an unreadable or invalid policy or manifest; tests that run in their package's sandbox; a
+  for an unreadable or invalid policy or manifest and for a heap limit below 2 MiB; tests that run in their package's sandbox; a
   child that sees only the granted environment; a read whose `max_bytes` exceeds the heap limit,
   which ends with 102; and `list_tree` over a cycle of links (Unix). `unio-runtime/tests` cover
   the process tree (a grandchild that holds the output, a timeout that stops the grandchild),
@@ -396,7 +416,9 @@ The tests were written before the code (concept, section 1.2):
   the task list, faults of every kind with their traces, exit codes, exhaustion of the stack, the
   benchmarks, the four tools over the repository, and the types of one name in two modules of
   `tests/programs/same_names`; two builds give identical bytes; a program
-  with errors is not built; the executable applies the manifest of its package.
+  with errors is not built; the executable applies the manifest of its package; on a heap filled
+  by the test hook, the executable releases from the reserve after a fault, as `unio run` does,
+  and runs no `release` on exhaustion (C-17, C-18).
 - `tests/tools.rs` (ignored by default, run in CI in a release build): `tools/check_docs.unio`,
   `tools/check_grammar.unio` (corpus, self-check, sources, invalid sources, parse trees) and
   `tools/check_api.unio` under `unio run` give the same output and exit code as the Python
@@ -419,7 +441,9 @@ The tests were written before the code (concept, section 1.2):
 - Known limits of `process.run` (docs/runtime.md 9.5): a process that leaves the process group
   (`setsid`) or, on Windows, starts before the child joins its job is not stopped; on Unix an
   interrupt from the terminal does not reach a child in its own group. Heap exhaustion that the
-  system reports late (overcommit and its out-of-memory killer) ends the process without 102.
+  system reports late (overcommit and its out-of-memory killer) ends the process without 102;
+  outside the path of a fault, which the reserve serves, a small allocation the system refuses
+  inside the Rust standard library aborts.
 - Known limits of the RFC 0001 checks: a struct with a `Float` field used as a key is rejected
   at the calls that need `Hash` (E0062, E0056), not at the type; E0048 covers only a dependency
   that is missing, because there is no resolver, lock file or package identity yet (T-14). E0046

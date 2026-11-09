@@ -8,6 +8,7 @@
 pub mod externs;
 pub mod fault;
 pub mod heap;
+pub mod reserve;
 pub mod runtime;
 pub mod sandbox;
 pub mod value;
@@ -16,3 +17,8 @@ pub use externs::{bindings, call, ExternFn};
 pub use fault::{Exhaustion, Fault, FaultKind, Frame, Outcome, ReleaseStack, Unwind};
 pub use runtime::{FailPoint, Runtime};
 pub use value::{Callable, OrderedMap, OrderedSet, Text, Value};
+
+/// Every allocation of a program goes through the allocator of the reserve for `release`
+/// (C-17): the system allocator, except on a thread whose reserve a fault opened.
+#[global_allocator]
+static ALLOCATOR: reserve::ReserveAllocator = reserve::ReserveAllocator;

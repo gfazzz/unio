@@ -51,3 +51,87 @@ pub fn weaker_policy() -> PathBuf {
     fs::write(&policy, "allow_weaker = true\n").unwrap();
     policy
 }
+
+/// The resources of the programs of the reserve for `release` (C-17): `Log` builds 2,000 texts
+/// in its `release`, more than a full heap allows, so that it can only run from the reserve;
+/// `Faulty` faults in its `release` after doing the same; `Hungry` needs more than the reserve.
+#[allow(dead_code)]
+pub const RESERVE_PRELUDE: &str = "import std.files
+
+struct Log:
+    name as Text
+
+extend Log with Resource:
+    function release(var self):
+        let words = [\"{self.name} {i}\" for i in range(0, 2000)]
+        print(\"released {self.name}: {words.length()} words, last {words[1999]}\")
+
+struct Faulty:
+    name as Text
+
+extend Faulty with Resource:
+    function release(var self):
+        let words = [\"{self.name} {i}\" for i in range(0, 2000)]
+        print(\"releasing {self.name}: {words.length()} words\")
+        print(words[words.length() + 5])
+
+struct Hungry:
+    name as Text
+
+extend Hungry with Resource:
+    function release(var self):
+        print(\"releasing {self.name}\")
+        let numbers = [i for i in range(0, 300000)]
+        print(\"released {self.name}: {numbers.length()}\")
+
+function divide(a as Int, b as Int) returns Int:
+    return a / b
+
+";
+
+/// A fresh package for a program of the reserve: `RESERVE_PRELUDE` and `body` in `main.unio`,
+/// a manifest that lets it write `open/`, `open/target.txt` holding "old content", and
+/// `policy.toml` with a heap limit of 8 MiB (on Windows also allowing the weaker sandbox).
+#[allow(dead_code)]
+pub fn reserve_package(prefix: &str, name: &str, body: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-reserve-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("open")).unwrap();
+    fs::write(dir.join("open/target.txt"), "old content").unwrap();
+    fs::write(
+        dir.join("unio.toml"),
+        "[package]\nname = \"reserve\"\n\n[permissions]\nfiles.write = [\"$CWD/open/**\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("main.unio"), format!("{RESERVE_PRELUDE}{body}")).unwrap();
+    let weaker = if cfg!(windows) {
+        "allow_weaker = true\n"
+    } else {
+        ""
+    };
+    fs::write(
+        dir.join("policy.toml"),
+        format!("{weaker}[limits]\nheap_bytes = 8_388_608\n"),
+    )
+    .unwrap();
+    fs::canonicalize(dir).unwrap()
+}
+
+/// The names in `open/` of a reserve package other than the target: a temporary file of
+/// `open_atomic` left behind.
+#[allow(dead_code)]
+pub fn temporaries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir.join("open"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "target.txt")
+        .collect();
+    names.sort();
+    names
+}
+
+#[allow(dead_code)]
+#[track_caller]
+pub fn assert_target_unchanged(dir: &Path) {
+    assert_eq!(read(&dir.join("open/target.txt")), "old content");
+}

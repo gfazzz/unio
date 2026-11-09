@@ -128,7 +128,7 @@ fn output_over_the_limit_is_an_error() {
 #[test]
 fn captured_output_counts_against_the_heap_limit() {
     let mut rt = Runtime::new(vec![]);
-    rt.heap_limit = Some(1 << 20);
+    rt.heap_limit = Some(unio_runtime::reserve::RESERVE_BYTES + (1 << 20));
     let arguments = Value::list(vec![
         Value::text("-c"),
         Value::text("4000000"),

@@ -34,15 +34,24 @@ fn expect_fault(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         other => {
             return Err(runtime.fault(
                 FaultKind::InvalidArgument,
-                format!(
+                format_args!(
                     "internal: expect_fault needs a function, found a {}",
                     other.kind()
                 ),
             ))
         }
     };
+    // The fault opens the reserve for `release` (C-17); once it is received here, the test goes
+    // on with the budget it had, unless the reserve was already open for an outer fault.
+    let was_open = crate::reserve::is_open();
     match action.call(runtime, &mut []) {
-        Err(Unwind::Fault(_)) => Ok(Value::Unit),
+        Err(Unwind::Fault(fault)) => {
+            drop(fault);
+            if !was_open {
+                crate::reserve::close();
+            }
+            Ok(Value::Unit)
+        }
         Err(Unwind::Exhausted(what)) => Err(Unwind::Exhausted(what)),
         Ok(_) | Err(Unwind::Error(_)) => Err(runtime.fault(
             FaultKind::ExpectedFault,
@@ -57,7 +66,7 @@ fn is_same(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         (Value::Resource(a), Value::Resource(b)) => Ok(Value::Bool(Rc::ptr_eq(&a, &b))),
         (a, _) => Err(runtime.fault(
             FaultKind::InvalidArgument,
-            format!("internal: is_same compares resources, found a {}", a.kind()),
+            format_args!("internal: is_same compares resources, found a {}", a.kind()),
         )),
     }
 }

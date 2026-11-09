@@ -59,7 +59,7 @@ pub fn call(runtime: &mut Runtime, name: &str, arguments: &mut [Value]) -> Outco
         Some(function) => function(runtime, arguments),
         None => Err(runtime.fault(
             FaultKind::NotProvided,
-            format!("the runtime has no external function {name}"),
+            format_args!("the runtime has no external function {name}"),
         )),
     }
 }
@@ -70,7 +70,7 @@ pub fn call(runtime: &mut Runtime, name: &str, arguments: &mut [Value]) -> Outco
 fn wrong(runtime: &Runtime, index: usize, expected: &str, found: &Value) -> Unwind {
     runtime.fault(
         FaultKind::InvalidArgument,
-        format!(
+        format_args!(
             "internal: argument {} is a {}, expected {expected}",
             index + 1,
             found.kind()
@@ -86,7 +86,7 @@ fn argument<'a>(
     arguments.get(index).ok_or_else(|| {
         runtime.fault(
             FaultKind::InvalidArgument,
-            format!("internal: argument {} is missing", index + 1),
+            format_args!("internal: argument {} is missing", index + 1),
         )
     })
 }

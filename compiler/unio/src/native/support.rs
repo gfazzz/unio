@@ -851,7 +851,7 @@ fn method_on(
         let target = match &arg.name {
             Some(n) => match def.params.iter().position(|p| p.name == *n) {
                 Some(i) => i + 1,
-                None => return Err(internal(rt, format!("no parameter {n}"))),
+                None => return Err(internal(rt, format_args!("no parameter {n}"))),
             },
             None => {
                 position += 1;
@@ -1266,7 +1266,7 @@ pub unsafe extern "C" fn unio_rt_assert_failed(ctx: *mut Ctx, s: *const S) -> i3
     };
     let e = c.rt.fault(
         FaultKind::AssertionFailed,
-        format!("assertion failed: {text}"),
+        format_args!("assertion failed: {text}"),
     );
     c.fail(e)
 }
@@ -1351,8 +1351,12 @@ pub unsafe extern "C" fn unio_rt_using_unwind(ctx: *mut Ctx, resource: *mut Valu
     if matches!(c.ctx.pending, Some(Unwind::Exhausted(_))) {
         return;
     }
-    if let Err(Unwind::Fault(f)) = c.interp.release(c.rt, &r) {
-        c.rt.write_error(&f.render());
+    match c.interp.release(c.rt, &r) {
+        Err(Unwind::Fault(f)) => c.rt.write_fault(&f),
+        // A release that exhausted the reserve or the heap: code 102, and the remaining
+        // releases are skipped (C-18).
+        Err(exhausted @ Unwind::Exhausted(_)) => c.ctx.pending = Some(exhausted),
+        _ => {}
     }
 }
 
@@ -1537,7 +1541,7 @@ pub unsafe extern "C" fn unio_rt_set_index(
                     }
                     None => Err(rt.fault(
                         FaultKind::IndexOutOfRange,
-                        format!("index {i} is outside 0..{}", list.len()),
+                        format_args!("index {i} is outside 0..{}", list.len()),
                     )),
                 }
             }

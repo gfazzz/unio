@@ -403,3 +403,246 @@ fn an_external_function_of_a_program_is_rejected_before_it_runs() {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------- the reserve for release (C-17)
+
+/// Runs `unio run` (or `unio test`) on `main.unio` of the package under its policy; `free`
+/// fills the heap through the test hook so that only that many bytes are left to the program.
+fn run_reserve(dir: &Path, command: &str, free: Option<usize>) -> Output {
+    let mut unio = Command::new(env!("CARGO_BIN_EXE_unio"));
+    unio.current_dir(dir).env_remove("UNIO_POLICY").args([
+        command,
+        "--policy",
+        "policy.toml",
+        "main.unio",
+    ]);
+    match free {
+        Some(free) => unio.env("UNIO_TEST_HEAP_FREE", free.to_string()),
+        None => unio.env_remove("UNIO_TEST_HEAP_FREE"),
+    };
+    unio.output().unwrap()
+}
+
+/// The test hook fills the heap: a program that allocates on it ends with code 102. Without the
+/// hook the same program runs.
+#[track_caller]
+fn assert_the_heap_is_full(name: &str) {
+    let dir = common::reserve_package("unio-interpreter", 
+        &format!("{name}-full"),
+        "public function main():\n    let words = [\"w {i}\" for i in range(0, 100)]\n    print(\"{words.length()}\")\n",
+    );
+    let full = run_reserve(&dir, "run", Some(0));
+    assert_eq!(full.status.code(), Some(102), "{}", text(&full.stderr));
+    assert!(text(&full.stderr).contains("memory exhausted"));
+    let free = run_reserve(&dir, "run", None);
+    assert_eq!(text(&free.stdout), "100\n", "{}", text(&free.stderr));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+const FAULT_ON_A_FULL_HEAP: &str = "public function main() returns Int:
+    try:
+        using file = try files.open_atomic(Path(\"open/target.txt\")):
+            try file.write(\"new content\")
+            using log = Log(name = \"log\"):
+                return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+";
+
+#[test]
+fn release_runs_from_the_reserve_after_a_fault_on_a_full_heap() {
+    assert_the_heap_is_full("release");
+    let dir = common::reserve_package("unio-interpreter", "release", FAULT_ON_A_FULL_HEAP);
+    let output = run_reserve(&dir, "run", Some(0));
+    let err = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "{err}");
+    // Both releases ran, in reverse order: the log with its 2,000 texts, then the file, whose
+    // temporary is gone while the target is unchanged.
+    assert_eq!(
+        text(&output.stdout),
+        "released log: 2000 words, last log 1999\n"
+    );
+    assert_eq!(common::temporaries(&dir), Vec::<String>::new());
+    common::assert_target_unchanged(&dir);
+    // The whole trace, and no message of code 102.
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 3, "{err}");
+    assert_eq!(lines[0], "fault: division by zero");
+    assert!(
+        lines[1].starts_with("    at main.divide (") && lines[1].ends_with("main.unio:30)"),
+        "{err}"
+    );
+    assert!(
+        lines[2].starts_with("    at main.main (") && lines[2].ends_with("main.unio:37)"),
+        "{err}"
+    );
+    assert!(!err.contains("exhausted"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_fault_in_release_on_a_full_heap_still_releases_the_rest() {
+    assert_the_heap_is_full("release-fault");
+    let dir = common::reserve_package(
+        "unio-interpreter",
+        "release-fault",
+        "public function main() returns Int:
+    try:
+        using first = Log(name = \"first\"):
+            using file = try files.open_atomic(Path(\"open/target.txt\")):
+                try file.write(\"new content\")
+                using second = Faulty(name = \"second\"):
+                    using third = Faulty(name = \"third\"):
+                        using fourth = Log(name = \"fourth\"):
+                            return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+",
+    );
+    let output = run_reserve(&dir, "run", Some(0));
+    let err = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "{err}");
+    assert_eq!(
+        text(&output.stdout),
+        "released fourth: 2000 words, last fourth 1999\nreleasing third: 2000 words\nreleasing second: 2000 words\nreleased first: 2000 words, last first 1999\n"
+    );
+    assert_eq!(common::temporaries(&dir), Vec::<String>::new());
+    common::assert_target_unchanged(&dir);
+    // Each fault of a release is reported, then the fault of the program with its trace.
+    assert_eq!(
+        err.matches("fault: index 2005 is outside 0..2000\n")
+            .count(),
+        2,
+        "{err}"
+    );
+    assert_eq!(err.matches("    at main.release (").count(), 2, "{err}");
+    assert!(
+        err.ends_with("main.unio:40)\n") && err.contains("fault: division by zero\n"),
+        "{err}"
+    );
+    assert!(!err.contains("exhausted"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn exhausting_the_reserve_in_release_ends_with_102() {
+    let dir = common::reserve_package(
+        "unio-interpreter",
+        "release-exhausted",
+        "public function main() returns Int:
+    try:
+        using first = Log(name = \"first\"):
+            using file = try files.open_atomic(Path(\"open/target.txt\")):
+                try file.write(\"new content\")
+                using hungry = Hungry(name = \"hungry\"):
+                    return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+",
+    );
+    let output = run_reserve(&dir, "run", Some(0));
+    let err = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(102), "{err}");
+    assert_eq!(
+        err,
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    // The hungry release started and did not finish; the remaining releases were skipped: the
+    // temporary file stays and the target is unchanged (S-9).
+    assert_eq!(text(&output.stdout), "releasing hungry\n");
+    assert_eq!(
+        common::temporaries(&dir).len(),
+        1,
+        "{:?}",
+        common::temporaries(&dir)
+    );
+    assert!(common::temporaries(&dir)[0].contains("unio-tmp"));
+    common::assert_target_unchanged(&dir);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn exhaustion_does_not_run_release() {
+    let dir = common::reserve_package(
+        "unio-interpreter",
+        "exhaustion",
+        "public function main():
+    try:
+        using file = try files.open_atomic(Path(\"open/target.txt\")):
+            try file.write(\"new content\")
+            using log = Log(name = \"log\"):
+                var all as List[List[Int]] = []
+                while true:
+                    all.append([n for n in range(0, 10000)])
+    on IoError as e:
+        print(\"error {e.reason}\")
+",
+    );
+    // A real fill under the limit of 8 MiB, without the hook.
+    let output = run_reserve(&dir, "run", None);
+    let err = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(102), "{err}");
+    assert_eq!(
+        err,
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    assert_eq!(text(&output.stdout), "");
+    assert_eq!(
+        common::temporaries(&dir).len(),
+        1,
+        "{:?}",
+        common::temporaries(&dir)
+    );
+    common::assert_target_unchanged(&dir);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The same paths in `unio test`: a test that faults on a full heap, and `expect_fault`, which
+/// receives the fault after the releases ran from the reserve and closes the reserve again.
+#[test]
+fn unio_test_releases_from_the_reserve_after_a_fault_on_a_full_heap() {
+    let dir = common::reserve_package(
+        "unio-interpreter",
+        "unio-test",
+        "function expected():
+    using log = Log(name = \"expected\"):
+        assert divide(1, 0) == 0
+
+test \"a fault on a full heap\":
+    using log = Log(name = \"plain\"):
+        assert divide(1, 0) == 0
+
+test \"expect_fault on a full heap\":
+    expect_fault(expected)
+    print(\"received\")
+    let words = [\"w {i}\" for i in range(0, 100)]
+    print(\"after {words.length()}\")
+",
+    );
+    let output = run_reserve(&dir, "test", Some(0));
+    let out = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{out}{}",
+        text(&output.stderr)
+    );
+    assert!(
+        out.contains("released plain: 2000 words, last plain 1999"),
+        "{out}"
+    );
+    assert!(out.contains("fault: division by zero"), "{out}");
+    // expect_fault received the fault after the release; then the reserve is closed again
+    // and the full heap ends the test with exhaustion.
+    assert!(
+        out.contains("released expected: 2000 words, last expected 1999"),
+        "{out}"
+    );
+    assert!(out.contains("received"), "{out}");
+    assert!(!out.contains("after 100"), "{out}");
+    assert!(out.contains("memory exhausted"), "{out}");
+    let _ = fs::remove_dir_all(&dir);
+}

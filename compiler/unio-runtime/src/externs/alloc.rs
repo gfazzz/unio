@@ -112,7 +112,7 @@ fn position(
         .ok_or_else(|| {
             runtime.fault(
                 FaultKind::IndexOutOfRange,
-                format!("{what} {value} is outside 0..{length}"),
+                format_args!("{what} {value} is outside 0..{length}"),
             )
         })
 }
@@ -127,7 +127,7 @@ fn text_slice(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         Some(slice) => Ok(Value::Text(slice)),
         None => Err(runtime.fault(
             FaultKind::IndexOutOfRange,
-            format!("slice start {start} is after its end {end}"),
+            format_args!("slice start {start} is after its end {end}"),
         )),
     }
 }
@@ -183,7 +183,7 @@ fn is_white(c: char) -> bool {
 fn assertion(runtime: &Runtime, condition: &str) -> crate::fault::Unwind {
     runtime.fault(
         FaultKind::AssertionFailed,
-        format!("assertion failed: {condition}"),
+        format_args!("assertion failed: {condition}"),
     )
 }
 
@@ -461,7 +461,7 @@ fn list_items(runtime: &Runtime, arguments: &[Value]) -> Result<Vec<Value>, crat
         Value::List(items) => Ok(items.to_vec()),
         other => Err(runtime.fault(
             FaultKind::InvalidArgument,
-            format!("internal: expected a List, found a {}", other.kind()),
+            format_args!("internal: expected a List, found a {}", other.kind()),
         )),
     }
 }

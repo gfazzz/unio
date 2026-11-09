@@ -85,12 +85,39 @@ pub enum FaultKind {
     NotProvided,
 }
 
-/// One frame of a fault trace (C-14).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Frame {
+/// A function and its file, named once per runtime; frames of a trace share it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Site {
     pub function: std::rc::Rc<str>,
     pub file: std::rc::Rc<str>,
+}
+
+/// One frame of a fault trace (C-14): 16 bytes, so that the trace of the deepest stack fits in
+/// the reserve for `release` with room to spare (docs/runtime.md 3.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub site: std::rc::Rc<Site>,
     pub line: u32,
+}
+
+impl Frame {
+    pub fn new(function: &str, file: &str, line: u32) -> Frame {
+        Frame {
+            site: std::rc::Rc::new(Site {
+                function: function.into(),
+                file: file.into(),
+            }),
+            line,
+        }
+    }
+
+    pub fn function(&self) -> &str {
+        &self.site.function
+    }
+
+    pub fn file(&self) -> &str {
+        &self.site.file
+    }
 }
 
 /// A fault: its kind, its message, and the trace of the calls that led to it.
@@ -102,24 +129,38 @@ pub struct Fault {
 }
 
 impl Fault {
-    pub fn new(kind: FaultKind, message: impl Into<String>) -> Fault {
+    /// A fault without a trace. It opens the reserve for `release` of this thread first
+    /// (C-17), so that the message, the trace, and the unwinding are built from the reserved
+    /// memory even on a full heap; callers pass the message unformatted (`format_args!`), so
+    /// that nothing is allocated before.
+    pub fn new(kind: FaultKind, message: impl fmt::Display) -> Fault {
+        crate::reserve::open();
         Fault {
             kind,
-            message: message.into(),
+            message: message.to_string(),
             trace: Vec::new(),
         }
     }
 
+    /// Writes the diagnostic, the message and the trace innermost first, line by line, so that
+    /// a long trace needs no memory for its text.
+    pub fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        writeln!(out, "fault: {}", self.message)?;
+        for frame in self.trace.iter().rev() {
+            writeln!(
+                out,
+                "    at {} ({}:{})",
+                frame.site.function, frame.site.file, frame.line
+            )?;
+        }
+        Ok(())
+    }
+
     /// The diagnostic written to standard error: the message and the trace, innermost first.
     pub fn render(&self) -> String {
-        let mut text = format!("fault: {}\n", self.message);
-        for frame in self.trace.iter().rev() {
-            text.push_str(&format!(
-                "    at {} ({}:{})\n",
-                frame.function, frame.file, frame.line
-            ));
-        }
-        text
+        let mut text = Vec::new();
+        let _ = self.write_to(&mut text);
+        String::from_utf8(text).unwrap_or_default()
     }
 }
 
@@ -137,11 +178,11 @@ pub fn main_exit_code(value: &Value) -> Result<i32, Fault> {
         Value::Int(code) if (0..=100).contains(code) => Ok(*code as i32),
         Value::Int(code) => Err(Fault::new(
             FaultKind::InvalidExitCode,
-            format!("main returned {code}; an exit code of main lies in 0–100"),
+            format_args!("main returned {code}; an exit code of main lies in 0–100"),
         )),
         other => Err(Fault::new(
             FaultKind::InvalidExitCode,
-            format!(
+            format_args!(
                 "main returned a {}; it returns Int or nothing",
                 other.kind()
             ),
@@ -154,7 +195,7 @@ pub fn main_exit_code(value: &Value) -> Result<i32, Fault> {
 fn overflow(operation: &str) -> Fault {
     Fault::new(
         FaultKind::IntegerOverflow,
-        format!("Int overflow in {operation}; use the checked form to handle it"),
+        format_args!("Int overflow in {operation}; use the checked form to handle it"),
     )
 }
 
@@ -310,7 +351,7 @@ mod tests {
             if fails {
                 Err(Fault::new(
                     FaultKind::AssertFail,
-                    format!("release {name} failed"),
+                    format_args!("release {name} failed"),
                 ))
             } else {
                 Ok(())
@@ -341,16 +382,8 @@ mod tests {
     fn a_fault_renders_its_trace_innermost_first() {
         let mut fault = Fault::new(FaultKind::IndexOutOfRange, "index 5 is outside 0..3");
         fault.trace = vec![
-            Frame {
-                function: "main".into(),
-                file: "a.unio".into(),
-                line: 3,
-            },
-            Frame {
-                function: "load".into(),
-                file: "a.unio".into(),
-                line: 9,
-            },
+            Frame::new("main", "a.unio", 3),
+            Frame::new("load", "a.unio", 9),
         ];
         let text = fault.render();
         assert!(text.starts_with("fault: index 5 is outside 0..3\n    at load (a.unio:9)\n"));

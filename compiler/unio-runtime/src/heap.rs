@@ -12,6 +12,7 @@ use std::ops::{Deref, DerefMut};
 
 thread_local! {
     static LIVE_BYTES: Cell<usize> = const { Cell::new(0) };
+    static BALLAST: Cell<usize> = const { Cell::new(0) };
 }
 
 /// The bytes that live values of this thread hold, as estimated by [`Measure`].
@@ -19,12 +20,30 @@ pub fn live_bytes() -> usize {
     LIVE_BYTES.with(Cell::get)
 }
 
-fn add(bytes: usize) {
+pub(crate) fn add(bytes: usize) {
     LIVE_BYTES.with(|live| live.set(live.get().saturating_add(bytes)));
 }
 
-fn sub(bytes: usize) {
+pub(crate) fn sub(bytes: usize) {
     LIVE_BYTES.with(|live| live.set(live.get().saturating_sub(bytes)));
+}
+
+/// Test hook, like `fail_point` of S-9b (plan section 12, condition 1): sets the count of this
+/// thread to `count` bytes by adding a ballast that holds no memory, so that a test fills the
+/// heap exactly instead of by estimate. A count below what live values hold removes the
+/// ballast. The ballast only ever shrinks the budget of the program.
+pub fn fill_to(count: usize) {
+    let ballast = BALLAST.with(Cell::get);
+    let without = live_bytes().saturating_sub(ballast);
+    let wanted = count.saturating_sub(without);
+    sub(ballast);
+    add(wanted);
+    BALLAST.with(|b| b.set(wanted));
+}
+
+/// Removes the ballast of [`fill_to`].
+pub fn clear_ballast() {
+    sub(BALLAST.with(|b| b.replace(0)));
 }
 
 /// The size of the heap memory an object holds.
@@ -95,6 +114,19 @@ mod tests {
         data.recount();
         assert!(live_bytes() >= before + 5000);
         drop(data);
+        assert_eq!(live_bytes(), before);
+    }
+
+    #[test]
+    fn the_test_hook_fills_the_heap_exactly() {
+        let before = live_bytes();
+        fill_to(before + 12_345);
+        assert_eq!(live_bytes(), before + 12_345);
+        let data = Counted::new(Vec::<u8>::with_capacity(1000));
+        fill_to(before + 12_345);
+        assert_eq!(live_bytes(), before + 12_345);
+        drop(data);
+        clear_ballast();
         assert_eq!(live_bytes(), before);
     }
 }

@@ -174,15 +174,15 @@ pub(crate) fn take(v: &mut Value) -> Value {
     std::mem::replace(v, Value::Unit)
 }
 
-pub(crate) fn internal(rt: &Runtime, message: impl Into<String>) -> Unwind {
+pub(crate) fn internal(rt: &Runtime, message: impl std::fmt::Display) -> Unwind {
     rt.fault(
         FaultKind::InvalidArgument,
-        format!("internal: {}", message.into()),
+        format_args!("internal: {message}"),
     )
 }
 
 pub(crate) fn traced(rt: &Runtime, fault: Fault) -> Unwind {
-    rt.fault(fault.kind, fault.message)
+    rt.traced(fault)
 }
 
 /// The interpreter: the checked program and the tables derived from it.
@@ -690,7 +690,10 @@ impl Interp {
             return hooks.invoke(self, rt, f, frame, &types);
         }
         let Some(code) = self.code(f) else {
-            return Err(internal(rt, format!("no declaration for {}", def.name)));
+            return Err(internal(
+                rt,
+                format_args!("no declaration for {}", def.name),
+            ));
         };
         let module = def.module;
         let base = rt.site_base(|| self.sites());
@@ -812,7 +815,10 @@ impl Interp {
             }
         }
         let Some((sig, _)) = self.signature(f) else {
-            return Err(internal(rt, format!("no declaration for {}", def.name)));
+            return Err(internal(
+                rt,
+                format_args!("no declaration for {}", def.name),
+            ));
         };
         // Defaults of externals are evaluated here, in the declaring module.
         let offset = usize::from(def.self_param.is_some());
@@ -1029,7 +1035,7 @@ impl Interp {
             let target = match &arg.name {
                 Some(n) => match def.params.iter().position(|p| p.name == *n) {
                     Some(i) => i + 1,
-                    None => return Err(internal(rt, format!("no parameter {n}"))),
+                    None => return Err(internal(rt, format_args!("no parameter {n}"))),
                 },
                 None => {
                     position += 1;
@@ -1366,7 +1372,10 @@ impl Interp {
     ) -> Outcome {
         match function {
             Value::Function(f) => f.call(rt, &mut args),
-            other => Err(internal(rt, format!("{} is not a function", other.kind()))),
+            other => Err(internal(
+                rt,
+                format_args!("{} is not a function", other.kind()),
+            )),
         }
     }
 
@@ -1526,7 +1535,7 @@ impl Interp {
                                 }
                                 None => Err(rt.fault(
                                     FaultKind::IndexOutOfRange,
-                                    format!("index {i} is outside 0..{}", list.len()),
+                                    format_args!("index {i} is outside 0..{}", list.len()),
                                 )),
                             }
                         }
@@ -1558,7 +1567,7 @@ impl Interp {
                         }
                         other => {
                             env.vars[slot] = Value::Text(text);
-                            Err(internal(rt, format!("text + {}", other.kind())))
+                            Err(internal(rt, format_args!("text + {}", other.kind())))
                         }
                     };
                 }
@@ -1574,7 +1583,7 @@ impl Interp {
                         Value::Text(t) => text = text.append(t.as_str()),
                         other => {
                             env.vars[slot] = Value::Text(text);
-                            return Err(internal(rt, format!("text + {}", other.kind())));
+                            return Err(internal(rt, format_args!("text + {}", other.kind())));
                         }
                     }
                 }
@@ -1592,7 +1601,7 @@ impl Interp {
                 } else {
                     Err(rt.fault(
                         FaultKind::AssertionFailed,
-                        format!("assertion failed: {text}"),
+                        format_args!("assertion failed: {text}"),
                     ))
                 }
             }
@@ -1695,8 +1704,11 @@ impl Interp {
                 }
                 let released = self.release(rt, &resource);
                 match (flow, released) {
+                    // A release that exhausted the reserve or the heap ends the program with
+                    // code 102; the remaining releases are skipped (C-18).
+                    (_, Err(exhausted @ Unwind::Exhausted(_))) => Err(exhausted),
                     (Err(e), Err(Unwind::Fault(f))) => {
-                        rt.write_error(&f.render());
+                        rt.write_fault(&f);
                         Err(e)
                     }
                     (Ok(_), Err(e)) => Err(e),
@@ -1716,8 +1728,16 @@ impl Interp {
         if !has_release {
             return Ok(());
         }
-        let (result, _) = self.call_method_owned(rt, resource.clone(), "release", Vec::new())?;
-        result.map(|_| ())
+        let result = self
+            .call_method_owned(rt, resource.clone(), "release", Vec::new())
+            .and_then(|(result, _)| result.map(|_| ()));
+        if let Err(exhausted @ Unwind::Exhausted(_)) = result {
+            return Err(exhausted);
+        }
+        // On the path of a fault, a release that overflowed the reserve on a full heap is
+        // exhaustion even when it reached no check of the heap itself (C-17, C-18).
+        rt.check_heap()?;
+        result
     }
 
     // ---------------------------------------------------------------- iteration
@@ -1826,7 +1846,10 @@ impl Interp {
         }
         match self.eval(rt, env, node)? {
             Value::Bool(b) => Ok(b),
-            other => Err(internal(rt, format!("condition is a {}", other.kind()))),
+            other => Err(internal(
+                rt,
+                format_args!("condition is a {}", other.kind()),
+            )),
         }
     }
 
@@ -1928,7 +1951,7 @@ impl Interp {
             )),
             Node::Not(operand) => match self.eval(rt, env, operand)? {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
-                v => Err(internal(rt, format!("unary not on {}", v.kind()))),
+                v => Err(internal(rt, format_args!("unary not on {}", v.kind()))),
             },
             Node::Const(c) => self.constant(rt, *c),
             Node::FnRef(f) => Ok(Value::Function(Rc::new(FnRef {
@@ -2033,7 +2056,7 @@ impl Interp {
                     .map(Value::Int)
                     .map_err(|f| traced(rt, f)),
                 Value::Float(f) => Ok(Value::Float(-f)),
-                v => Err(internal(rt, format!("unary - on {}", v.kind()))),
+                v => Err(internal(rt, format_args!("unary - on {}", v.kind()))),
             },
             Node::Try(operand, is_value) => match self.eval(rt, env, operand)? {
                 Value::Enum(e) if &*e.type_name == "Result" && *is_value => {
@@ -2071,7 +2094,7 @@ impl Interp {
                 }
                 other => field_of(rt, &other, name),
             },
-            Node::Fault(message) => Err(rt.fault(FaultKind::InvalidArgument, message.clone())),
+            Node::Fault(message) => Err(rt.fault(FaultKind::InvalidArgument, message)),
         }
     }
 
@@ -2099,7 +2122,7 @@ impl Interp {
                         .unwrap_or(Value::Unit))
                 }
             }
-            other => Err(internal(rt, format!("or on {}", other.kind()))),
+            other => Err(internal(rt, format_args!("or on {}", other.kind()))),
         }
     }
 
@@ -2774,7 +2797,12 @@ impl Interp {
                 }
             }
             Value::Unit => self.json("Null", None),
-            other => return Err(internal(rt, format!("{} has no JSON form", other.kind()))),
+            other => {
+                return Err(internal(
+                    rt,
+                    format_args!("{} has no JSON form", other.kind()),
+                ))
+            }
         })
     }
 
@@ -3346,7 +3374,7 @@ pub(crate) fn navigate_fields<'a>(
             let s = Rc::make_mut(s);
             match field_index(&s.fields, n).map(|i| &mut s.fields[i]) {
                 Some((_, x)) => x,
-                None => return Err(internal(rt, format!("no field {n}"))),
+                None => return Err(internal(rt, format_args!("no field {n}"))),
             }
         }
         other => {
@@ -3381,7 +3409,7 @@ pub(crate) fn navigate<'a>(
             let s = Rc::make_mut(s);
             match field_index(&s.fields, n).map(|i| &mut s.fields[i]) {
                 Some((_, x)) => x,
-                None => return Err(internal(rt, format!("no field {n}"))),
+                None => return Err(internal(rt, format_args!("no field {n}"))),
             }
         }
         (Value::List(l), Step::Index(Value::Int(i))) => {
@@ -3392,7 +3420,7 @@ pub(crate) fn navigate<'a>(
                 None => {
                     return Err(rt.fault(
                         FaultKind::IndexOutOfRange,
-                        format!("index {i} is outside 0..{len}"),
+                        format_args!("index {i} is outside 0..{len}"),
                     ))
                 }
             }
@@ -3443,13 +3471,13 @@ pub(crate) fn field_of(rt: &Runtime, v: &Value, name: &str) -> Outcome {
             .iter()
             .find(|(n, _)| &**n == name)
             .map(|(_, x)| x.clone())
-            .ok_or_else(|| internal(rt, format!("no field {name} in {}", s.type_name))),
+            .ok_or_else(|| internal(rt, format_args!("no field {name} in {}", s.type_name))),
         Value::Enum(e) => e
             .fields
             .iter()
             .find(|(n, _)| &**n == name)
             .map(|(_, x)| x.clone())
-            .ok_or_else(|| internal(rt, format!("no field {name} in {}", e.variant))),
+            .ok_or_else(|| internal(rt, format_args!("no field {name} in {}", e.variant))),
         Value::Resource(cell) => field_of(rt, &cell.value.borrow(), name),
         other => Err(internal(
             rt,
@@ -3467,14 +3495,17 @@ pub(crate) fn index_value(rt: &Runtime, t: &Value, i: &Value) -> Outcome {
             .ok_or_else(|| {
                 rt.fault(
                     FaultKind::IndexOutOfRange,
-                    format!("index {i} is outside 0..{}", l.len()),
+                    format_args!("index {i} is outside 0..{}", l.len()),
                 )
             }),
         (Value::Map(m), key) => m
             .get(key)
             .cloned()
             .ok_or_else(|| rt.fault(FaultKind::MissingKey, "the map has no such key")),
-        (other, _) => Err(internal(rt, format!("cannot index a {}", other.kind()))),
+        (other, _) => Err(internal(
+            rt,
+            format_args!("cannot index a {}", other.kind()),
+        )),
     }
 }
 
@@ -3505,10 +3536,7 @@ pub fn run_main(interp: &Rc<Interp>, rt: &mut Runtime, module: ModId) -> i32 {
     match interp.call_fn(rt, main, &mut args, Rc::clone(&interp.empty_types)) {
         Ok(v) => match rf::main_exit_code(&v) {
             Ok(code) => code,
-            Err(fault) => {
-                rt.write_error(&fault.render());
-                rf::EXIT_FAULT
-            }
+            Err(fault) => end(rt, Unwind::Fault(Box::new(fault))),
         },
         Err(e) => end(rt, e),
     }
@@ -3516,8 +3544,14 @@ pub fn run_main(interp: &Rc<Interp>, rt: &mut Runtime, module: ModId) -> i32 {
 
 pub(crate) fn end(rt: &mut Runtime, e: Unwind) -> i32 {
     match e {
+        // The fault was built on the reserve for `release`, and the releases ran from it; if
+        // they overflowed it on a full heap, the program ends as exhausted (C-17, C-18).
+        Unwind::Fault(_) if rt.check_heap().is_err() => {
+            rt.write_error(rf::Exhaustion::Heap.message());
+            rf::EXIT_EXHAUSTED
+        }
         Unwind::Fault(f) => {
-            rt.write_error(&f.render());
+            rt.write_fault(&f);
             rf::EXIT_FAULT
         }
         Unwind::Exhausted(x) => {
@@ -3564,9 +3598,18 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
         )
         .and_then(|_| interp.run_block(&mut rt, &mut env, &body));
     let millis = started.elapsed().as_millis();
+    // The test has ended, and its releases ran from the reserve (C-17). The result is the
+    // harness's report: its text is made outside the reserve, as the captured output is.
+    let result = match result {
+        Err(Unwind::Fault(_)) if rt.check_heap().is_err() => {
+            Err(Unwind::Exhausted(rf::Exhaustion::Heap))
+        }
+        other => other,
+    };
+    drop(env);
     let (passed, message) = match result {
         Ok(_) => (true, String::new()),
-        Err(Unwind::Fault(f)) => (false, f.render()),
+        Err(Unwind::Fault(f)) => (false, unio_runtime::reserve::outside(|| f.render())),
         Err(Unwind::Exhausted(x)) => (false, x.message().to_string()),
         Err(Unwind::Error(e)) => {
             let text = interp.display(&mut rt, &e).unwrap_or_default();
@@ -3624,6 +3667,128 @@ impl Intrinsic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The peak use of the reserve for `release` (C-17, plan section 12 condition 1) in its
+    /// three measured cases, each on a heap the test hook filled to the limit, so that the whole
+    /// path of the fault runs from the reserve: deep unwinding (a `using` block in each of 9,000
+    /// nested calls, each `release` building texts), repeated faults (on the same stack, every
+    /// `release` meets an error it handles, and the innermost ten fault after it, each with a
+    /// trace of about 9,000 frames), and a diagnostic with a long trace (a fault 9,990 calls
+    /// deep, under a long function name and file path). Each peak is reported and must fit in
+    /// the reserve; the figures are recorded in docs/runtime.md 3.6.
+    #[test]
+    fn the_reserve_peak_is_measured() {
+        use unio_runtime::reserve;
+        const RESOURCES: &str = "error Oops:
+    reason as Text
+
+function risky(n as Int) returns Int fails with Oops:
+    if n % 2 == 0:
+        fail Oops(reason = \"even {n}\")
+    return n
+
+struct Res:
+    name as Text
+    depth as Int
+
+extend Res with Resource:
+    function release(var self):
+        let words = [\"{self.name} {self.depth} {i}\" for i in range(0, 20)]
+        let value = try risky(self.depth) on Oops as e:
+            if FAULTING and self.depth < 20 and e.reason.length() > 0:
+                print(words[100])
+            return
+        assert value == self.depth
+
+function nest(depth as Int) returns Int:
+    using r = Res(name = \"level\", depth = depth):
+        if depth == 0:
+            return 1 / depth
+        return nest(depth - 1) + 1
+
+public function main() returns Int:
+    return nest(9000)
+";
+        let cases = [
+            (
+                "deep unwinding",
+                format!("let FAULTING as Bool = false\n\n{RESOURCES}"),
+            ),
+            (
+                "repeated faults",
+                format!("let FAULTING as Bool = true\n\n{RESOURCES}"),
+            ),
+            (
+                "long trace",
+                "function a_function_with_a_rather_long_name_to_make_every_line_of_the_trace_long(n as Int) returns Int:
+    if n == 0:
+        return 1 / n
+    return a_function_with_a_rather_long_name_to_make_every_line_of_the_trace_long(n - 1) + 1
+
+public function main() returns Int:
+    return a_function_with_a_rather_long_name_to_make_every_line_of_the_trace_long(9990)
+"
+                .to_string(),
+            ),
+        ];
+        let dir = std::env::temp_dir()
+            .join(format!("unio-reserve-peak-{}", std::process::id()))
+            .join("a-directory-with-a-long-name-so-that-the-file-of-each-frame-is-long");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut report = Vec::new();
+        for (name, source) in cases {
+            let file = dir.join(format!("{}.unio", name.replace(' ', "_")));
+            std::fs::write(&file, source).unwrap();
+            let measured = std::thread::Builder::new()
+                .stack_size(1 << 30)
+                .spawn(move || {
+                    let program =
+                        crate::load_for_run(&[file], crate::effects::Profile::Application)
+                            .unwrap_or_else(|a| {
+                                panic!("{}", a[0].render_text(crate::diag::Lang::En))
+                            });
+                    let module = program.modules.iter().position(|m| m.report).unwrap();
+                    let interp = Interp::new(program);
+                    let (mut rt, _out, err) = Runtime::captured(Vec::new());
+                    rt.heap_limit = Some(reserve::MINIMUM_HEAP_LIMIT);
+                    unio_runtime::heap::fill_to(reserve::MINIMUM_HEAP_LIMIT);
+                    reserve::reset_peak();
+                    let code = run_main(&interp, &mut rt, module);
+                    let peak = reserve::peak();
+                    unio_runtime::heap::clear_ballast();
+                    let err = String::from_utf8_lossy(&err.borrow()).into_owned();
+                    (code, peak, err.lines().count(), err.len())
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            let (code, peak, lines, bytes) = measured;
+            println!(
+                "reserve peak, {name}: {peak} bytes of {} ({:.1}%), margin {} bytes; \
+                 standard error {lines} lines, {bytes} bytes",
+                reserve::USABLE_BYTES,
+                100.0 * peak as f64 / reserve::USABLE_BYTES as f64,
+                reserve::USABLE_BYTES.saturating_sub(peak)
+            );
+            report.push((name, code, peak, lines));
+        }
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        for (name, code, peak, lines) in report {
+            assert_eq!(
+                code, 101,
+                "{name}: the fault ends the program, not exhaustion"
+            );
+            assert!(
+                lines > 9000,
+                "{name}: the whole trace was written ({lines} lines)"
+            );
+            assert!(peak > 0, "{name}: the path ran from the reserve");
+            assert!(
+                peak <= reserve::USABLE_BYTES,
+                "{name}: the peak of {peak} bytes exceeds the reserve"
+            );
+        }
+    }
 
     /// Every external function the standard library declares has an implementation in the
     /// runtime, so a checked program never reaches "the runtime has no external function"

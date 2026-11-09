@@ -355,6 +355,17 @@ pub fn parse_policy(source: &str, places: &Places) -> Result<Policy, String> {
         }
         *limit = Some(n.unsigned_abs());
     }
+    if let Some(heap) = policy.limits.heap_bytes {
+        let minimum = crate::reserve::MINIMUM_HEAP_LIMIT as u64;
+        if heap < minimum {
+            return Err(format!(
+                "limits.heap_bytes = {heap} is below the minimum of {minimum} bytes (2 MiB): the \
+                 runtime sets aside a reserve of {} bytes (1 MiB) for release within the limit \
+                 (C-17)",
+                crate::reserve::RESERVE_BYTES
+            ));
+        }
+    }
     Ok(policy)
 }
 
@@ -1082,7 +1093,7 @@ mod tests {
     fn policies_read_limits_and_reject_mistakes() {
         let p = places();
         let policy = parse_policy(
-            "allow_weaker = true\n[limits]\nheap_bytes = 1_000_000\nwall_seconds = 5\ncpu_seconds = 2\nprocesses = 0\nfile_size_bytes = 10\n",
+            "allow_weaker = true\n[limits]\nheap_bytes = 4_000_000\nwall_seconds = 5\ncpu_seconds = 2\nprocesses = 0\nfile_size_bytes = 10\n",
             &p,
         )
         .unwrap();
@@ -1091,7 +1102,7 @@ mod tests {
         assert_eq!(
             policy.limits,
             Limits {
-                heap_bytes: Some(1_000_000),
+                heap_bytes: Some(4_000_000),
                 wall_seconds: Some(5),
                 cpu_seconds: Some(2),
                 processes: Some(0),
@@ -1101,6 +1112,13 @@ mod tests {
         assert!(parse_policy("[limits]\nheap = 5\n", &p).is_err());
         assert!(parse_policy("[limits]\nwall_seconds = 0\n", &p).is_err());
         assert!(parse_policy("[limits]\nheap_bytes = \"1 GiB\"\n", &p).is_err());
+        // The reserve for `release` lies within the heap limit, so the limit is at least 2 MiB.
+        let low = parse_policy("[limits]\nheap_bytes = 2_097_151\n", &p).unwrap_err();
+        assert!(
+            low.contains("2097151") && low.contains("2097152") && low.contains("1048576"),
+            "{low}"
+        );
+        assert!(parse_policy("[limits]\nheap_bytes = 2_097_152\n", &p).is_ok());
         assert!(parse_policy("allow_weaker = 1\n", &p).is_err());
         assert!(parse_policy("[limits\n", &p).is_err());
     }

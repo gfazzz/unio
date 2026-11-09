@@ -587,7 +587,7 @@ fn the_limits_of_a_policy_end_the_program_or_fail_the_operation() {
     let cases: [(&str, &str, &str); 4] = [
         (
             "heap",
-            "limits.heap_bytes = 1_000_000",
+            "limits.heap_bytes = 4_000_000",
             "public function main():\n    var all as List[List[Int]] = []\n    while true:\n        all.append([n for n in range(0, 10000)])\n",
         ),
         (
@@ -815,6 +815,31 @@ public function main():
     let err = text(&output.stderr);
     assert_eq!(output.status.code(), Some(102), "{err}");
     assert!(err.contains("memory exhausted"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The reserve for `release` lies within the heap limit (C-17), so a policy whose heap limit
+/// is below 2 MiB is refused before `main` with code 103, naming the limit, the minimum, and
+/// the reserve; at the minimum the program runs.
+#[test]
+fn a_heap_limit_below_the_minimum_ends_with_103() {
+    let program = "public function main():\n    print(\"ran\")\n";
+    let dir = package("heap-minimum", "[package]\nname = \"x\"\n", program);
+    let low = policy(&dir, "[limits]\nheap_bytes = 2_097_151\n");
+    let output = run(&dir, &["--policy", &low.to_string_lossy()], &[]);
+    let err = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(103), "{err}");
+    assert_eq!(text(&output.stdout), "", "main does not run");
+    assert!(
+        err.contains("limits.heap_bytes = 2097151")
+            && err.contains("minimum of 2097152 bytes")
+            && err.contains("reserve of 1048576 bytes"),
+        "{err}"
+    );
+    let minimum = policy(&dir, "[limits]\nheap_bytes = 2_097_152\n");
+    let output = run(&dir, &["--policy", &minimum.to_string_lossy()], &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stdout), "ran\n");
     let _ = fs::remove_dir_all(&dir);
 }
 

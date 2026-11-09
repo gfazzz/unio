@@ -489,3 +489,151 @@ fn the_executable_applies_the_manifest_of_its_package() {
     assert!(!out.contains("SECRET"), "{out}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- the reserve for release (C-17)
+
+/// Runs `main.unio` of a reserve package under `unio run` and as an executable built from it,
+/// both under the package's policy and with the heap filled by the test hook when `free` is
+/// given; the target file is reset before each run. Returns both outputs.
+fn run_both(dir: &Path, free: Option<usize>) -> (Output, Output) {
+    let exe = build(&dir.join("main.unio"), dir, true);
+    let prepare = |command: &mut Command| {
+        command
+            .current_dir(dir)
+            .env("UNIO_POLICY", dir.join("policy.toml"));
+        match free {
+            Some(free) => command.env("UNIO_TEST_HEAP_FREE", free.to_string()),
+            None => command.env_remove("UNIO_TEST_HEAP_FREE"),
+        };
+    };
+    let reset = || {
+        for name in common::temporaries(dir) {
+            fs::remove_file(dir.join("open").join(name)).unwrap();
+        }
+        fs::write(dir.join("open/target.txt"), "old content").unwrap();
+    };
+    reset();
+    let mut interpreter = Command::new(env!("CARGO_BIN_EXE_unio"));
+    interpreter.args(["run", "main.unio"]);
+    prepare(&mut interpreter);
+    let interpreted = interpreter.output().unwrap();
+    reset();
+    let mut native = Command::new(&exe);
+    prepare(&mut native);
+    let found = native.output().unwrap();
+    for (what, a, b) in [
+        ("stdout", &interpreted.stdout, &found.stdout),
+        ("stderr", &interpreted.stderr, &found.stderr),
+    ] {
+        assert_eq!(text(a), text(b), "{what} of unio run and of the executable");
+    }
+    assert_eq!(interpreted.status.code(), found.status.code());
+    (interpreted, found)
+}
+
+#[test]
+fn the_executable_releases_from_the_reserve_after_a_fault_on_a_full_heap() {
+    if !supported() {
+        return;
+    }
+    let dir = common::reserve_package(
+        "unio-native",
+        "release",
+        "public function main() returns Int:
+    try:
+        using first = Log(name = \"first\"):
+            using file = try files.open_atomic(Path(\"open/target.txt\")):
+                try file.write(\"new content\")
+                using second = Faulty(name = \"second\"):
+                    using third = Log(name = \"third\"):
+                        return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+",
+    );
+    // The hook fills the heap of the executable: without the reserve, allocating fails.
+    let full = common::reserve_package(
+        "unio-native",
+        "full",
+        "public function main():\n    let words = [\"w {i}\" for i in range(0, 100)]\n    print(\"{words.length()}\")\n",
+    );
+    let (_, filled) = run_both(&full, Some(0));
+    assert_eq!(filled.status.code(), Some(102));
+    let (_, found) = run_both(&dir, Some(0));
+    let err = text(&found.stderr);
+    assert_eq!(found.status.code(), Some(101), "{err}");
+    assert_eq!(
+        text(&found.stdout),
+        "released third: 2000 words, last third 1999\nreleasing second: 2000 words\nreleased first: 2000 words, last first 1999\n"
+    );
+    assert_eq!(common::temporaries(&dir), Vec::<String>::new());
+    common::assert_target_unchanged(&dir);
+    assert!(
+        err.starts_with("fault: index 2005 is outside 0..2000\n"),
+        "{err}"
+    );
+    assert!(
+        err.contains("fault: division by zero\n    at main.divide ("),
+        "{err}"
+    );
+    assert!(err.ends_with("main.unio:39)\n"), "{err}");
+    assert!(!err.contains("exhausted"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&full);
+}
+
+#[test]
+fn the_executable_does_not_release_on_exhaustion() {
+    if !supported() {
+        return;
+    }
+    // A release that exhausts the reserve on a full heap: code 102, the rest is skipped.
+    let dir = common::reserve_package(
+        "unio-native",
+        "exhausted",
+        "public function main() returns Int:
+    try:
+        using first = Log(name = \"first\"):
+            using file = try files.open_atomic(Path(\"open/target.txt\")):
+                try file.write(\"new content\")
+                using hungry = Hungry(name = \"hungry\"):
+                    return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+",
+    );
+    let (_, found) = run_both(&dir, Some(0));
+    assert_eq!(found.status.code(), Some(102));
+    assert_eq!(
+        text(&found.stderr),
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    assert_eq!(text(&found.stdout), "releasing hungry\n");
+    assert_eq!(common::temporaries(&dir).len(), 1);
+    common::assert_target_unchanged(&dir);
+    // A program that really fills the heap under the limit of 8 MiB: no release runs.
+    let filled = common::reserve_package(
+        "unio-native",
+        "filled",
+        "public function main():
+    try:
+        using file = try files.open_atomic(Path(\"open/target.txt\")):
+            try file.write(\"new content\")
+            using log = Log(name = \"log\"):
+                var all as List[List[Int]] = []
+                while true:
+                    all.append([n for n in range(0, 10000)])
+    on IoError as e:
+        print(\"error {e.reason}\")
+",
+    );
+    let (_, found) = run_both(&filled, None);
+    assert_eq!(found.status.code(), Some(102));
+    assert_eq!(text(&found.stdout), "");
+    assert_eq!(common::temporaries(&filled).len(), 1);
+    common::assert_target_unchanged(&filled);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&filled);
+}

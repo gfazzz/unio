@@ -2,7 +2,8 @@
 //! error, the call stack for traces and its limit, the heap budget, open file descriptors,
 //! resource identities, and a fault-injection hook for tests (requirement S-9b).
 
-use crate::fault::{Exhaustion, Fault, FaultKind, Frame, Unwind};
+use crate::fault::{Exhaustion, Fault, FaultKind, Frame, Site, Unwind};
+use crate::reserve::Reserve;
 use crate::value::{ResourceCell, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -38,13 +39,43 @@ impl Sink {
         let _ = match self {
             Sink::Stdout => std::io::stdout().write_all(bytes),
             Sink::Stderr => std::io::stderr().write_all(bytes),
+            // The captured output belongs to the harness, not to the program: it is not
+            // counted in the heap and never taken from the reserve for `release`.
             Sink::Buffer(buffer) => {
-                buffer.borrow_mut().extend_from_slice(bytes);
+                crate::reserve::outside(|| buffer.borrow_mut().extend_from_slice(bytes));
                 Ok(())
             }
         };
     }
+
+    /// Writes a fault line by line, without building its text (C-17).
+    fn write_fault(&mut self, fault: &Fault) {
+        let _ = match self {
+            Sink::Stdout => fault.write_to(&mut std::io::stdout().lock()),
+            Sink::Stderr => fault.write_to(&mut std::io::stderr().lock()),
+            Sink::Buffer(buffer) => {
+                crate::reserve::outside(|| fault.write_to(&mut *buffer.borrow_mut()))
+            }
+        };
+    }
 }
+
+/// The ballast of the test hook `UNIO_TEST_HEAP_FREE`, removed with the runtime.
+struct Ballast(bool);
+
+impl Drop for Ballast {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::heap::clear_ballast();
+        }
+    }
+}
+
+/// The environment variable of the test hook that fills the heap before `main` (plan section
+/// 12, condition 1): with a heap limit, the heap is counted as full but for this many bytes, so
+/// that a test reaches a fault on a full heap exactly in `unio run`, `unio test`, and an
+/// executable alike. It can only shrink the budget of the program.
+pub const TEST_HEAP_FREE: &str = "UNIO_TEST_HEAP_FREE";
 
 /// The runtime state of one program or one test.
 pub struct Runtime {
@@ -53,7 +84,7 @@ pub struct Runtime {
     output: Sink,
     error: Sink,
     /// The function and file of each place a call can be in, named once (see [`Runtime::site`]).
-    sites: Vec<(Rc<str>, Rc<str>)>,
+    sites: Vec<Rc<Site>>,
     /// The call stack: a site and the current line of each call, in `frames[..depth]`. Names
     /// are looked up only when a fault needs a trace, so that a call costs two integers. The
     /// storage only grows, so that native code can keep its address (see
@@ -74,27 +105,52 @@ pub struct Runtime {
     pub fail_point: Option<FailPoint>,
     /// How many descriptors were released, for tests of "closed once" (S-9c).
     pub releases: Cell<usize>,
+    /// The reserve for `release`, set aside before `main` (C-17).
+    reserve: Reserve,
+    _ballast: Ballast,
 }
 
 impl Runtime {
     pub fn new(args: Vec<String>) -> Runtime {
+        // The reserve for `release` is set aside before anything of the program runs (C-17).
+        let reserve = Reserve::set_aside();
+        let heap_limit = crate::sandbox::heap_limit();
+        let free = std::env::var(TEST_HEAP_FREE)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok());
+        let ballast = match (heap_limit, free) {
+            (Some(limit), Some(free)) => {
+                crate::heap::fill_to(limit.saturating_sub(free));
+                true
+            }
+            _ => false,
+        };
         Runtime {
             args,
             output: Sink::Stdout,
             error: Sink::Stderr,
             sites: Vec::new(),
-            frames: Vec::new(),
+            // Room for the deepest stack, so that a `release` that runs deeper than the program
+            // went before does not grow it on the path of a fault (C-17).
+            frames: Vec::with_capacity(10_000),
             depth: 0,
             base: None,
             stack_limit: 10_000,
-            heap_limit: crate::sandbox::heap_limit(),
+            heap_limit,
             descriptors: BTreeMap::new(),
             next_descriptor: 3,
             next_resource: 1,
             temporary_counter: 0,
             fail_point: None,
             releases: Cell::new(0),
+            reserve,
+            _ballast: Ballast(ballast),
         }
+    }
+
+    /// The reserve for `release` of this runtime (C-17).
+    pub fn reserve(&self) -> &Reserve {
+        &self.reserve
     }
 
     /// A runtime whose standard output and error are captured; returns both buffers.
@@ -115,6 +171,11 @@ impl Runtime {
         self.error.write(text.as_bytes());
     }
 
+    /// Writes the diagnostic of a fault to standard error, line by line (C-14, C-17).
+    pub fn write_fault(&mut self, fault: &Fault) {
+        self.error.write_fault(fault);
+    }
+
     // ---------------------------------------------------------------- calls and traces
 
     /// Enters a call; exceeding the stack limit is exhaustion with code 102.
@@ -130,7 +191,7 @@ impl Runtime {
 
     /// Names a function and its file for [`Runtime::enter_site`].
     pub fn site(&mut self, function: Rc<str>, file: Rc<str>) -> u32 {
-        self.sites.push((function, file));
+        self.sites.push(Rc::new(Site { function, file }));
         (self.sites.len() - 1) as u32
     }
 
@@ -142,7 +203,11 @@ impl Runtime {
             Some(base) => base,
             None => {
                 let base = self.sites.len() as u32;
-                self.sites.extend(make());
+                self.sites.extend(
+                    make()
+                        .into_iter()
+                        .map(|(function, file)| Rc::new(Site { function, file })),
+                );
                 self.base = Some(base);
                 base
             }
@@ -193,30 +258,34 @@ impl Runtime {
     pub fn trace(&self) -> Vec<Frame> {
         self.frames[..self.depth]
             .iter()
-            .map(|&(site, line)| {
-                let (function, file) = &self.sites[site as usize];
-                Frame {
-                    function: Rc::clone(function),
-                    file: Rc::clone(file),
-                    line,
-                }
+            .map(|&(site, line)| Frame {
+                site: Rc::clone(&self.sites[site as usize]),
+                line,
             })
             .collect()
     }
 
-    /// A fault with the current trace.
-    pub fn fault(&self, kind: FaultKind, message: impl Into<String>) -> Unwind {
-        let mut fault = Fault::new(kind, message);
+    /// A fault with the current trace. The reserve for `release` opens before the message and
+    /// the trace are built (C-17); pass the message unformatted (`format_args!`).
+    pub fn fault(&self, kind: FaultKind, message: impl std::fmt::Display) -> Unwind {
+        self.traced(Fault::new(kind, message))
+    }
+
+    /// The fault with the current trace.
+    pub fn traced(&self, mut fault: Fault) -> Unwind {
+        crate::reserve::open();
         fault.trace = self.trace();
         Unwind::Fault(Box::new(fault))
     }
 
     // ---------------------------------------------------------------- memory
 
-    /// Ends with code 102 when the values of the program hold more than the heap limit.
+    /// Ends with code 102 when the values of the program hold more than the heap limit. On the
+    /// path of a fault, the reserve for `release` serves while it has room; once an allocation
+    /// overflowed it, the limit applies again (C-17, C-18).
     pub fn check_heap(&self) -> Result<(), Unwind> {
         match self.heap_limit {
-            Some(limit) if crate::heap::live_bytes() > limit => {
+            Some(limit) if crate::heap::live_bytes() > limit && !crate::reserve::covers(0) => {
                 Err(Unwind::Exhausted(Exhaustion::Heap))
             }
             _ => Ok(()),
@@ -228,7 +297,10 @@ impl Runtime {
     /// that memory over the budget is refused instead of allocated.
     pub fn reserve_heap(&self, bytes: usize) -> Result<(), Unwind> {
         match self.heap_limit {
-            Some(limit) if crate::heap::live_bytes().saturating_add(bytes) > limit => {
+            Some(limit)
+                if crate::heap::live_bytes().saturating_add(bytes) > limit
+                    && !crate::reserve::covers(bytes) =>
+            {
                 Err(Unwind::Exhausted(Exhaustion::Heap))
             }
             _ => Ok(()),
@@ -323,6 +395,156 @@ mod tests {
         ));
         runtime.heap_limit = None;
         assert!(runtime.check_heap().is_ok());
+    }
+
+    // ------------------------------------------------------------ the reserve for release (C-17)
+
+    use crate::fault::{int_divide, ReleaseStack};
+    use crate::heap::{fill_to, live_bytes};
+    use crate::reserve::{self, MINIMUM_HEAP_LIMIT, RESERVE_BYTES};
+
+    #[test]
+    fn the_release_reserve_is_set_aside_before_main() {
+        let before = live_bytes();
+        let mut runtime = Runtime::new(Vec::new());
+        // Allocated, its pages written, counted in the heap, and closed.
+        assert!(runtime.reserve().is_set_aside());
+        assert_eq!(runtime.reserve().range().len(), RESERVE_BYTES);
+        assert!(runtime.reserve().pages_are_written());
+        assert_eq!(live_bytes(), before + RESERVE_BYTES);
+        assert!(!reserve::is_open());
+        // Within the limit, not on top of it: at the minimum limit the program has the limit
+        // minus the reserve.
+        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
+        let room = MINIMUM_HEAP_LIMIT - live_bytes();
+        assert!(room <= MINIMUM_HEAP_LIMIT - RESERVE_BYTES);
+        let fits = Value::bytes(vec![0; room - 64 * 1024]);
+        assert!(runtime.check_heap().is_ok());
+        let over = Value::bytes(vec![0; 128 * 1024]);
+        assert!(matches!(
+            runtime.check_heap(),
+            Err(Unwind::Exhausted(Exhaustion::Heap))
+        ));
+        drop((fits, over));
+        drop(runtime);
+        assert_eq!(
+            live_bytes(),
+            before,
+            "the reserve leaves the count with its runtime"
+        );
+    }
+
+    #[test]
+    fn the_reserve_opens_only_for_unwinding() {
+        let mut runtime = Runtime::new(Vec::new());
+        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
+        fill_to(MINIMUM_HEAP_LIMIT + 1);
+        // User code on a full heap gets exhaustion, not the reserve.
+        let ordinary: Vec<u8> = Vec::with_capacity(64);
+        assert!(!reserve::contains(ordinary.as_ptr()));
+        assert!(matches!(
+            runtime.check_heap(),
+            Err(Unwind::Exhausted(Exhaustion::Heap))
+        ));
+        assert!(runtime.reserve_heap(16).is_err());
+        assert!(!reserve::is_open());
+        // Neither an error nor stack exhaustion opens it.
+        let error = Unwind::Error(Box::new(Value::Int(1)));
+        assert_eq!(error.exit_code(), None);
+        runtime.stack_limit = 0;
+        assert!(runtime.enter("deep", "a.unio", 1).is_err());
+        assert!(!reserve::is_open());
+        // A fault does, and the path of the fault may go on on the full heap.
+        runtime.stack_limit = 10;
+        runtime.enter("main", "a.unio", 1).unwrap();
+        let fault = runtime.fault(FaultKind::AssertFail, "boom");
+        assert!(reserve::is_open());
+        assert!(runtime.check_heap().is_ok());
+        assert!(runtime.reserve_heap(4096).is_ok());
+        assert!(runtime.reserve_heap(2 * RESERVE_BYTES).is_err());
+        // Received by expect_fault, it closes again: the program has its old budget.
+        drop(fault);
+        reserve::close();
+        assert!(!reserve::is_open());
+        assert!(runtime.check_heap().is_err());
+        crate::heap::clear_ballast();
+    }
+
+    #[test]
+    fn the_reserve_opens_before_the_fault_is_built() {
+        let mut runtime = Runtime::new(Vec::new());
+        runtime.enter("main", "a.unio", 3).unwrap();
+        runtime.enter("load", "a.unio", 9).unwrap();
+        assert!(!reserve::is_open());
+        let Unwind::Fault(fault) = runtime.fault(
+            FaultKind::IndexOutOfRange,
+            format_args!("index {} is outside 0..{}", 5, 3),
+        ) else {
+            unreachable!()
+        };
+        // The message, the trace, and the fault itself are on the reserved pages.
+        assert_eq!(fault.message, "index 5 is outside 0..3");
+        assert!(reserve::contains(fault.message.as_ptr()));
+        assert!(reserve::contains(fault.trace.as_ptr()));
+        assert!(reserve::contains(&*fault as *const Fault));
+        assert_eq!(fault.trace.len(), 2);
+        drop(fault);
+        reserve::close();
+        // A fault of arithmetic, made without the runtime, opens it as well.
+        let fault = int_divide(1, 0).unwrap_err();
+        assert!(reserve::is_open());
+        assert!(reserve::contains(fault.message.as_ptr()));
+        let Unwind::Fault(traced) = runtime.traced(fault) else {
+            unreachable!()
+        };
+        assert!(reserve::contains(traced.trace.as_ptr()));
+    }
+
+    #[test]
+    fn the_unwinding_path_allocates_from_the_reserved_pages() {
+        let mut runtime = Runtime::new(Vec::new());
+        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
+        fill_to(MINIMUM_HEAP_LIMIT);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = ReleaseStack::new();
+        for name in ["outer", "inner"] {
+            let seen = Rc::clone(&seen);
+            stack.open(Box::new(move |runtime: &mut Runtime| {
+                // What a release does: values, texts, a list, checked against the heap.
+                let words: Vec<Value> = (0..2000)
+                    .map(|i| Value::text(format!("{name} {i}")))
+                    .collect();
+                let first = match &words[0] {
+                    Value::Text(t) => reserve::contains(t.as_str().as_ptr()),
+                    _ => false,
+                };
+                let list = Value::list(words);
+                let checked = runtime.check_heap().is_ok();
+                seen.borrow_mut()
+                    .push((name, first, checked, matches!(list, Value::List(..))));
+                Ok(())
+            }));
+        }
+        reserve::reset_peak();
+        let fault = runtime.fault(FaultKind::DivisionByZero, "division by zero");
+        let faults = stack.unwind_all(&mut runtime);
+        assert!(faults.is_empty());
+        assert_eq!(
+            *seen.borrow(),
+            [("inner", true, true, true), ("outer", true, true, true)]
+        );
+        assert!(reserve::peak() > 2000 * 16, "the releases used the reserve");
+        assert!(!reserve::overflowed());
+        // A release that needs more than the reserve on a full heap is exhaustion.
+        let big: Vec<u8> = vec![1; RESERVE_BYTES + 1];
+        let counted = Value::bytes(big);
+        assert!(reserve::overflowed());
+        assert!(matches!(
+            runtime.check_heap(),
+            Err(Unwind::Exhausted(Exhaustion::Heap))
+        ));
+        drop((counted, fault));
+        crate::heap::clear_ballast();
     }
 
     #[test]

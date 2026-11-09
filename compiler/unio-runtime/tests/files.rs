@@ -385,7 +385,8 @@ fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
     let file = scratch.path("big.bin");
     std::fs::write(&file, vec![b'x'; 300_000]).unwrap();
     let mut rt = Runtime::new(vec![]);
-    rt.heap_limit = Some(100_000);
+    // The reserve for `release` counts within the limit (C-17): 100,000 bytes for the program.
+    rt.heap_limit = Some(unio_runtime::reserve::RESERVE_BYTES + 100_000);
     let descriptor = call(&mut rt, "std.files.system_open_read", &mut [p(&file)]).unwrap();
     // A buffer of 2^50 bytes cannot be allocated at all: it must be refused, not attempted.
     let outcome = call(
@@ -434,7 +435,7 @@ fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
 #[test]
 fn repeating_a_text_over_the_heap_limit_is_exhaustion() {
     let mut rt = Runtime::new(vec![]);
-    rt.heap_limit = Some(100_000);
+    rt.heap_limit = Some(unio_runtime::reserve::RESERVE_BYTES + 100_000);
     assert!(exhausted(call(
         &mut rt,
         "Text.repeat",
