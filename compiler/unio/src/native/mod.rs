@@ -6,6 +6,7 @@
 pub mod codegen;
 pub mod image;
 pub(crate) mod support;
+pub mod toolchain;
 pub(crate) mod units;
 
 use std::ffi::OsString;
@@ -112,17 +113,19 @@ pub fn unsupported() -> String {
 /// does the same in two sandboxed steps instead: [`compile_object`] in the worker of the tool,
 /// and the C compiler, run as [`link_command`] says, in a link step (docs/runtime.md 9.7).
 pub fn build(file: &Path, out: &Path, release: bool) -> Result<(), BuildError> {
-    let object = compile_object(file, release)?;
+    let toolchain = toolchain::identity().map_err(BuildError::Message)?;
+    let object = compile_object(file, release, &toolchain)?;
     let runtime = runtime_library().map_err(BuildError::Message)?;
     link(&object, &runtime, out).map_err(BuildError::Message)
 }
 
-/// The object file of the program of `file`: everything of a build but linking.
-pub fn compile_object(file: &Path, release: bool) -> Result<Vec<u8>, BuildError> {
+/// The object file of the program of `file`: everything of a build but linking. Its image
+/// records `toolchain`, the identity of the linker that links it ([`toolchain::identity`]).
+pub fn compile_object(file: &Path, release: bool, toolchain: &str) -> Result<Vec<u8>, BuildError> {
     let Some(target) = Target::host() else {
         return Err(BuildError::Message(unsupported()));
     };
-    compile_object_for(file, target, release)
+    compile_object_for(file, target, release, toolchain)
 }
 
 /// The object file of the program of `file` for `target`. Only an object for the host can be
@@ -131,10 +134,14 @@ pub fn compile_object_for(
     file: &Path,
     target: Target,
     release: bool,
+    toolchain: &str,
 ) -> Result<Vec<u8>, BuildError> {
     let permissions = permissions_of(file).map_err(BuildError::Message)?;
     let file = file.to_path_buf();
-    crate::on_front_end_stack(move || compile(&file, permissions.as_ref(), target, release))
+    let toolchain = toolchain.to_string();
+    crate::on_front_end_stack(move || {
+        compile(&file, permissions.as_ref(), target, release, &toolchain)
+    })
 }
 
 /// The permissions the manifest of the program's package declares, which the executable
@@ -163,12 +170,14 @@ fn compile(
     permissions: Option<&unio_runtime::sandbox::Declared>,
     target: Target,
     release: bool,
+    toolchain: &str,
 ) -> Result<Vec<u8>, BuildError> {
     let program = crate::load_for_run(&[file.to_path_buf()], crate::effects::Profile::Application)
         .map_err(BuildError::Program)?;
     let interp = crate::interp::Interp::new(program);
     let units = units::collect(&interp);
-    let image = image::encode(&interp, &units, permissions).map_err(BuildError::Message)?;
+    let image =
+        image::encode(&interp, &units, permissions, toolchain).map_err(BuildError::Message)?;
     codegen::compile(
         &interp,
         &units,
@@ -261,33 +270,14 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
                 "-lc",
             ]));
             Ok(Linker {
-                program: std::env::var("CC").unwrap_or_else(|_| "cc".to_string()),
+                program: linux_compiler(),
                 args,
                 env: Vec::new(),
                 read: Vec::new(),
             })
         }
         Target::MacosAarch64 => {
-            let xcrun = |what: &[&str]| -> Result<String, String> {
-                let output = std::process::Command::new("xcrun")
-                    .args(what)
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .map_err(|e| format!("xcrun cannot be run ({e}); install the Xcode command line tools with xcode-select --install"))?;
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !output.status.success() || text.is_empty() {
-                    return Err(format!(
-                        "xcrun {} failed; install the Xcode command line tools with xcode-select --install:\n{}",
-                        what.join(" "),
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
-                }
-                Ok(text)
-            };
-            let program = match std::env::var("CC") {
-                Ok(cc) => cc,
-                Err(_) => xcrun(&["--find", "clang"])?,
-            };
+            let program = macos_compiler()?;
             let sdk = PathBuf::from(xcrun(&["--show-sdk-path"])?);
             let mut args = os(&["-arch", "arm64", "-mmacosx-version-min=11.0", "-isysroot"]);
             args.push(sdk.clone().into());
@@ -302,6 +292,37 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
             })
         }
         Target::WindowsX86_64 => windows_linker(object, runtime, out),
+    }
+}
+
+/// The C compiler that links on Linux: `CC`, or `cc`.
+fn linux_compiler() -> String {
+    std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
+}
+
+/// What `xcrun` prints for `what` (macOS), or why it failed.
+fn xcrun(what: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("xcrun")
+        .args(what)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("xcrun cannot be run ({e}); install the Xcode command line tools with xcode-select --install; unio does not install them"))?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || text.is_empty() {
+        return Err(format!(
+            "xcrun {} failed; install the Xcode command line tools with xcode-select --install:\n{}",
+            what.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(text)
+}
+
+/// The compiler that links on macOS: `CC`, or `clang` of the selected developer tools.
+fn macos_compiler() -> Result<String, String> {
+    match std::env::var("CC") {
+        Ok(cc) => Ok(cc),
+        Err(_) => xcrun(&["--find", "clang"]),
     }
 }
 
@@ -323,14 +344,23 @@ pub fn set_msvc_finder(finder: fn() -> Option<MsvcLinker>) {
     let _ = MSVC_FINDER.set(finder);
 }
 
+/// Why no executable is linked on Windows without `link.exe`.
+#[cfg(windows)]
+const MSVC_MISSING: &str =
+    "the linker link.exe of Visual Studio was not found; install the Visual \
+     Studio Build Tools with the workload \"Desktop development with C++\" (MSVC and a Windows \
+     SDK), or run from a developer command prompt of the chosen installation; unio does not \
+     install it";
+
+/// `link.exe` as the finder of the tool finds it.
+#[cfg(windows)]
+fn find_msvc() -> Option<MsvcLinker> {
+    MSVC_FINDER.get().and_then(|find| find())
+}
+
 #[cfg(windows)]
 fn windows_linker(object: &Path, runtime: &Path, out: &Path) -> Result<Linker, String> {
-    let tool = MSVC_FINDER.get().and_then(|find| find()).ok_or(
-        "the linker link.exe of Visual Studio was not found; install the Visual Studio Build \
-         Tools with the workload \"Desktop development with C++\" (MSVC and a Windows SDK), \
-         or run from a developer command prompt of the chosen installation; unio does not \
-         install it",
-    )?;
+    let tool = find_msvc().ok_or(MSVC_MISSING)?;
     let mut out_arg = OsString::from("/OUT:");
     out_arg.push(out);
     let mut args = vec![
@@ -440,7 +470,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{} does not compile", program_path.display()));
                 let interp = crate::interp::Interp::new(loaded);
                 let units = units::collect(&interp);
-                let image = image::encode(&interp, &units, None).unwrap();
+                let image = image::encode(&interp, &units, None, "test toolchain").unwrap();
                 let mut objects = Vec::new();
                 for target in Target::ALL {
                     for release in [false, true, true] {

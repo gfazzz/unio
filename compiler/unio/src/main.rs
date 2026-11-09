@@ -18,6 +18,7 @@ const USAGE: &str = "Usage:
     unio fmt [--check] FILE...
     unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]
     unio build [--release] [--policy FILE] [--allow-weaker-sandbox] FILE [-o OUT]
+    unio build --print-toolchain
     unio test [--json] [--policy FILE] [--allow-weaker-sandbox] [FILTER] FILE...
     unio outline [--json] FILE
     unio symbol [--json] MODULE.NAME
@@ -487,7 +488,9 @@ fn malformed() -> ExitCode {
 /// `unio build [--release] FILE [-o OUT]`: one executable (C-5, docs/runtime.md 8.4). The worker
 /// checks the program and writes its object file into its temporary directory; the link step
 /// links it there; this process copies the executable to OUT, the path the operator chose
-/// (docs/runtime.md 9.7).
+/// (docs/runtime.md 9.7). The identity of the linker and the SDK is computed here, before the
+/// compile step, and the worker records it in the program image (C-4); `--print-toolchain`
+/// prints it without building.
 fn build(arguments: &[String]) -> ExitCode {
     let (sandbox, arguments) = match sandbox_cli::take(arguments) {
         Ok(taken) => taken,
@@ -496,11 +499,18 @@ fn build(arguments: &[String]) -> ExitCode {
     let mut release = false;
     let mut out = None;
     let mut file = None;
+    let mut print_toolchain = false;
+    let mut toolchain = None;
     let mut i = 0;
     while i < arguments.len() {
         let a = &arguments[i];
         if a == "--release" {
             release = true;
+        } else if a == "--print-toolchain" {
+            print_toolchain = true;
+        } else if let Some(t) = a.strip_prefix(TOOLCHAIN_ARG).filter(|_| worker::inside()) {
+            // Given by the tool to its worker only.
+            toolchain = Some(t.to_string());
         } else if a == "-o" {
             match arguments.get(i + 1) {
                 Some(o) => out = Some(PathBuf::from(o)),
@@ -518,18 +528,38 @@ fn build(arguments: &[String]) -> ExitCode {
         }
         i += 1;
     }
-    let Some(file) = file else {
-        return usage("unio build needs a file");
-    };
-    if worker::inside() {
-        return build_object(&file, release);
-    }
     let fail = |m: String| {
         eprintln!("unio build: {m}");
         ExitCode::from(1)
     };
+    if print_toolchain {
+        if file.is_some() || out.is_some() || release {
+            return usage("--print-toolchain takes no file and no other option");
+        }
+        return match unio::native::toolchain::identity() {
+            Ok(identity) => {
+                println!("{identity}");
+                ExitCode::SUCCESS
+            }
+            Err(m) => fail(m),
+        };
+    }
+    let Some(file) = file else {
+        return usage("unio build needs a file");
+    };
+    if worker::inside() {
+        let Some(toolchain) = toolchain else {
+            return fail("the compile step was not given the identity of the toolchain".into());
+        };
+        return build_object(&file, release, &toolchain);
+    }
     let Some(target) = unio::native::Target::host() else {
         return fail(unio::native::unsupported());
+    };
+    // The linker and the SDK of this build, recorded in its image; a missing linker stops here.
+    let toolchain = match unio::native::toolchain::identity() {
+        Ok(identity) => identity,
+        Err(m) => return fail(m),
     };
     let out = out.unwrap_or_else(|| {
         let mut name = file.file_stem().unwrap_or_default().to_os_string();
@@ -552,6 +582,7 @@ fn build(arguments: &[String]) -> ExitCode {
     if release {
         compile.push("--release".into());
     }
+    compile.push(format!("{TOOLCHAIN_ARG}{toolchain}"));
     compile.push(file.to_string_lossy().into_owned());
     match worker::start("tool", &compile, &spec, &temp, false, &[]) {
         Ok(finished) if finished.code == 0 => {}
@@ -585,12 +616,15 @@ fn build(arguments: &[String]) -> ExitCode {
     }
 }
 
+/// How the tool hands the identity of the toolchain to the compile step in its worker.
+const TOOLCHAIN_ARG: &str = "--toolchain=";
+
 /// The compile step of `unio build` in the worker: the object file in its temporary directory.
-fn build_object(file: &Path, release: bool) -> ExitCode {
+fn build_object(file: &Path, release: bool, toolchain: &str) -> ExitCode {
     let Some(dir) = worker::temp_dir() else {
         return ExitCode::from(worker::EXIT_SANDBOX);
     };
-    match unio::native::compile_object(file, release) {
+    match unio::native::compile_object(file, release, toolchain) {
         Ok(object) => match std::fs::write(dir.join(unio::native::object_file_name()), object) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

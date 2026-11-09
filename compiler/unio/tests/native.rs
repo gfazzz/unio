@@ -594,6 +594,129 @@ fn two_builds_are_byte_for_byte_the_same() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `unio build --print-toolchain` prints the identity of the linker and the SDK that a build
+/// records in the image of its executable (C-4, docs/runtime.md 8.4): the same each time, one
+/// line of tool names and versions without a path of the machine, and the same as the one an
+/// executable built here carries.
+#[test]
+fn the_toolchain_is_recorded_in_the_executable() {
+    if !supported() {
+        return;
+    }
+    let print = || {
+        let output = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
+            .args(["build", "--print-toolchain"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        text(&output.stdout)
+    };
+    let printed = print();
+    assert_eq!(print(), printed);
+    assert!(
+        printed.ends_with('\n') && printed.lines().count() == 1,
+        "{printed:?}"
+    );
+    let identity = printed.trim_end().to_string();
+    let host = if cfg!(windows) {
+        "x86_64-pc-windows-msvc; link.exe: MSVC "
+    } else if cfg!(target_os = "macos") {
+        "aarch64-apple-macosx11.0.0; "
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu; "
+    } else {
+        "x86_64-unknown-linux-gnu; "
+    };
+    assert!(identity.starts_with(host), "{identity}");
+    if cfg!(any(windows, target_os = "macos")) {
+        assert!(identity.contains("; sdk: "), "{identity}");
+        assert!(!identity.contains("unknown"), "{identity}");
+    } else {
+        // Linux: the C compiler and the first line of its --version.
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let version = Command::new(&cc)
+            .arg("--version")
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        let first = text(&version.stdout)
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+        let name = cc.rsplit('/').next().unwrap();
+        assert_eq!(identity, format!("{host}{name}: {first}"));
+    }
+    for place in [std::env::temp_dir(), repo_root()] {
+        let place = place.to_string_lossy().into_owned();
+        assert!(!identity.contains(&place), "{identity} names {place}");
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = home.to_string_lossy().into_owned();
+        assert!(home.len() < 2 || !identity.contains(&home), "{identity}");
+    }
+    // The executable carries the identity in its image, after that of the compiler.
+    let dir = scratch("toolchain");
+    let program = dir.join("hello.unio");
+    fs::write(&program, "public function main():\n    print(\"hello\")\n").unwrap();
+    let exe = build(&program, &dir, true);
+    let made = unio::native::image::made_by_executable(&fs::read(&exe).unwrap())
+        .expect("the executable holds a program image");
+    assert_eq!(made.toolchain, identity);
+    assert_eq!(made.compiler, unio::native::image::compiler());
+    // The option builds nothing and takes no file.
+    let output = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
+        .args(["build", "--print-toolchain"])
+        .arg(&program)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", text(&output.stderr));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Without its linker `unio build` stops before compiling, names the linker, says what to
+/// install, and installs nothing; no executable is made. Linux and macOS take the linker from
+/// `CC`; on Windows `link.exe` is found in the Visual Studio installation, which the test
+/// cannot remove.
+#[cfg(unix)]
+#[test]
+fn a_missing_linker_is_named_and_not_installed() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("no-linker");
+    let program = dir.join("hello.unio");
+    fs::write(&program, "public function main():\n    print(\"hello\")\n").unwrap();
+    let missing = dir.join("no-such-cc");
+    let out = dir.join("hello");
+    for args in [
+        vec![
+            "build".as_ref(),
+            program.as_os_str(),
+            "-o".as_ref(),
+            out.as_os_str(),
+        ],
+        vec!["build".as_ref(), "--print-toolchain".as_ref()],
+    ] {
+        let output = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
+            .env("CC", &missing)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let err = text(&output.stderr);
+        assert!(
+            err.contains("no-such-cc") && err.contains("install"),
+            "{err}"
+        );
+        assert!(err.contains("unio does not install"), "{err}");
+        assert_eq!(text(&output.stdout), "");
+    }
+    assert!(!out.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A package of two modules with a manifest, written into `dir`: `main.unio` imports `shapes`
 /// and ends with a division by zero inside `shapes` when it gets the argument `fault`.
 fn write_package(dir: &Path) -> PathBuf {

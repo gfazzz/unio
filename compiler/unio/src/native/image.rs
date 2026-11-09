@@ -8,7 +8,9 @@
 //! or `std:` for the standard library ([`Program::trace_path`]).
 //!
 //! The format is versioned. It starts with [`MAGIC`], the format version [`FORMAT`] as a 32-bit
-//! little-endian number, and the identity of the compiler ([`compiler`]); then come sections in
+//! little-endian number, the identity of the compiler ([`compiler`]), and the identity of the
+//! toolchain that linked the executable ([`super::toolchain`]), which the run does not check and
+//! [`made_by`] reads back; then come sections in
 //! a fixed order: the declared permissions, the modules, the generic parameters, the types, the
 //! functions, the constants, the implementations, the diagnostic metadata, and the units of
 //! native code without the lambdas, which the executable finds inside them as the build did
@@ -40,8 +42,8 @@ use super::units::{Body, Key, Unit};
 /// The first bytes of an image.
 pub const MAGIC: &[u8; 8] = b"UNIOPRG\0";
 /// The version of the format; a change of the layout of the image or of the lowered form
-/// changes it.
-pub const FORMAT: u32 = 1;
+/// changes it. Format 2 added the identity of the toolchain after that of the compiler.
+pub const FORMAT: u32 = 2;
 
 /// The identity of this compiler and of the runtime built with it: the version and a hash of
 /// their sources (`build.rs`). An image is run only by the runtime of the compiler that made it.
@@ -858,11 +860,13 @@ pub(crate) fn encode(
     interp: &Interp,
     units: &[Unit],
     permissions: Option<&Declared>,
+    toolchain: &str,
 ) -> Result<Vec<u8>, String> {
     let mut w = W { out: Vec::new() };
     w.out.extend_from_slice(MAGIC);
     w.out.extend_from_slice(&FORMAT.to_le_bytes());
     w.s(&compiler());
+    w.s(toolchain);
     match permissions {
         Some(p) => {
             w.b(true);
@@ -1102,8 +1106,16 @@ pub(crate) struct Opened<'a> {
     pub rest: R<'a>,
 }
 
-/// Checks the header of an image and reads its declarations.
-pub(crate) fn open(data: &[u8]) -> Res<Opened<'_>> {
+/// What an image records of the build that made it (C-4): the identity of the compiler and that
+/// of the toolchain that linked the executable.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Made {
+    pub compiler: String,
+    pub toolchain: String,
+}
+
+/// Reads the header of an image of this format: the mark, the format, and the identities.
+fn header(data: &[u8]) -> Res<(Made, R<'_>)> {
     if data.get(..MAGIC.len()) != Some(&MAGIC[..]) {
         return damaged("it does not start with the mark of a Unio program");
     }
@@ -1116,9 +1128,36 @@ pub(crate) fn open(data: &[u8]) -> Res<Opened<'_>> {
     if format != FORMAT {
         return Err(Refusal::Format(format));
     }
-    let made_by = r.s().map_err(|_| Refusal::Compiler("unknown".into()))?;
-    if made_by != compiler() {
-        return Err(Refusal::Compiler(made_by));
+    let compiler = r.s().map_err(|_| Refusal::Compiler("unknown".into()))?;
+    let toolchain = r.s()?;
+    Ok((
+        Made {
+            compiler,
+            toolchain,
+        },
+        r,
+    ))
+}
+
+/// What the image `data` records of its build; an image of another format is refused.
+pub fn made_by(data: &[u8]) -> Result<Made, Refusal> {
+    header(data).map(|(made, _)| made)
+}
+
+/// What the program image inside an executable made by `unio build` records of its build: the
+/// first place in `bytes` that holds the header of an image of this format. The mark alone
+/// also occurs in the code of the runtime that compares it, which is passed over.
+pub fn made_by_executable(bytes: &[u8]) -> Option<Made> {
+    (0..bytes.len().saturating_sub(MAGIC.len()))
+        .filter(|&i| bytes[i..].starts_with(MAGIC))
+        .find_map(|i| made_by(&bytes[i..]).ok())
+}
+
+/// Checks the header of an image and reads its declarations.
+pub(crate) fn open(data: &[u8]) -> Res<Opened<'_>> {
+    let (made, mut r) = header(data)?;
+    if made.compiler != compiler() {
+        return Err(Refusal::Compiler(made.compiler));
     }
     let permissions = if r.b()? {
         Some(Declared {
@@ -1748,4 +1787,46 @@ pub(crate) fn read_units(mut r: R<'_>, interp: &Interp) -> Res<Vec<Unit>> {
         return damaged("bytes follow the last unit");
     }
     Ok(units)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_header(format: u32, compiler: &str, toolchain: &str) -> Vec<u8> {
+        let mut w = W { out: Vec::new() };
+        w.out.extend_from_slice(MAGIC);
+        w.out.extend_from_slice(&format.to_le_bytes());
+        w.s(compiler);
+        w.s(toolchain);
+        w.out
+    }
+
+    /// The header records the toolchain after the compiler; an image of format 1, which had no
+    /// toolchain, is refused as of another format (code 104).
+    #[test]
+    fn the_header_records_the_toolchain() {
+        let toolchain = "x86_64-unknown-linux-gnu; cc: gcc (GCC) 14.2.0";
+        let data = image_header(FORMAT, &compiler(), toolchain);
+        assert_eq!(
+            made_by(&data),
+            Ok(Made {
+                compiler: compiler(),
+                toolchain: toolchain.into()
+            })
+        );
+        let mut executable = b"code UNIOPRG\0 compared here; data: ".to_vec();
+        executable.extend_from_slice(&data);
+        executable.extend_from_slice(b"more of the image");
+        assert_eq!(
+            made_by_executable(&executable).map(|m| m.toolchain),
+            Some(toolchain.to_string())
+        );
+        assert_eq!(made_by_executable(b"no image"), None);
+        let old = image_header(1, &compiler(), toolchain);
+        assert_eq!(made_by(&old), Err(Refusal::Format(1)));
+        assert!(matches!(open(&old), Err(Refusal::Format(1))));
+        let cut = &data[..data.len() - 3];
+        assert!(matches!(made_by(cut), Err(Refusal::Damaged(_))));
+    }
 }
