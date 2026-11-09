@@ -60,7 +60,10 @@ pub struct Toolchain {
 /// for the children of a program (docs/runtime.md 9.5): the library directories and the cache
 /// of the dynamic loader may be read; exactly the programs, their interpreters and their
 /// dynamic loader may be executed, and the libraries they need outside the library directories
-/// may be read. Empty where no link step exists (only Linux makes executables so far).
+/// may be read. On macOS the programs come from the developer tools (Xcode or the command line
+/// tools), whose tree may be read and its libraries mapped, and the system libraries come from
+/// the dyld shared cache and `/usr/lib`. Empty where no link step exists (Windows links with
+/// the variables of Visual Studio and has no file system restrictions yet, SB-4).
 pub fn toolchain(programs: &std::collections::BTreeSet<String>) -> Toolchain {
     #[cfg(target_os = "linux")]
     {
@@ -93,7 +96,31 @@ pub fn toolchain(programs: &std::collections::BTreeSet<String>) -> Toolchain {
             execute: needs.execute.into_iter().collect(),
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let needs = super::children::needs(programs, &[]);
+        let mut read: Vec<Scope> = Vec::new();
+        for path in &needs.execute {
+            if let Some(root) = super::macos::developer_root(path) {
+                let scope = Scope {
+                    root,
+                    subtree: true,
+                };
+                if !read.contains(&scope) {
+                    read.push(scope);
+                }
+            }
+        }
+        read.extend(needs.read.into_iter().map(|root| Scope {
+            root,
+            subtree: false,
+        }));
+        Toolchain {
+            read,
+            execute: needs.execute.into_iter().collect(),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = programs;
         Toolchain::default()
@@ -131,10 +158,18 @@ pub fn apply(rules: &Rules) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        if rules.processes || !rules.execute.is_empty() {
-            return Err("a worker that runs processes exists only on Linux".into());
-        }
         apply_unix_limits(&rules.limits)?;
+        if rules.processes {
+            return super::macos::apply_link_worker(
+                &rules.read,
+                &rules.write,
+                super::working_directory(),
+                &rules.execute,
+            );
+        }
+        if !rules.execute.is_empty() {
+            return Err("a worker that starts no process executes nothing".into());
+        }
         super::macos::apply_worker(&rules.read, &rules.write, super::working_directory())
     }
     #[cfg(windows)]

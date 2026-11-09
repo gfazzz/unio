@@ -114,6 +114,21 @@ jobs:
           name: unio-vscode-extension
           path: editors/vscode/*.vsix
 
+  native-linux-arm:
+    # The fourth target of `unio build` (docs/runtime.md 8.4, R-8): the code generation tests
+    # of every target and the native suite, run on an AArch64 runner.
+    name: native executables on Linux AArch64
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: compiler
+    steps:
+      - uses: actions/checkout@v4
+      - name: Code generation for every target
+        run: cargo test --release -p unio --lib native::
+      - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
+        run: cargo test --release -p unio --test native
+
   compiler:
     name: compiler front end
     strategy:
@@ -136,14 +151,15 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests (corpus, all .unio sources, diagnostics, mutation)
         run: cargo test
-      - name: Seatbelt denials, when the tests fail on macOS
-        if: failure() && matrix.os == 'macos-latest'
-        run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -80
       - name: Formatter speed (T-3, release build)
         run: cargo test --release --test format thousand
+      # Linux x86-64, macOS on AArch64 (macos-latest), Windows x86-64 with the MSVC linker of
+      # the runner's Visual Studio (docs/runtime.md 8.4); Linux AArch64 in native-linux-arm.
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
-        if: matrix.os == 'ubuntu-latest'
         run: cargo test --release -p unio --test native
+      - name: Seatbelt denials, when the tests or the native link step fail on macOS
+        if: failure() && matrix.os == 'macos-latest'
+        run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -80
       - name: Unio sources are in the one style (docs/style.md)
         shell: bash
         working-directory: .

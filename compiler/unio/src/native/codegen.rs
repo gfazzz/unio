@@ -37,9 +37,10 @@ const VSIZE: i32 = layout::SIZE as i32;
 /// The smallest and the largest value an integer can have.
 type Bounds = (i64, i64);
 
-/// How code is generated: `release` optimises for speed.
+/// How code is generated: `release` optimises for speed; `target` is the machine and system.
 pub struct Options {
     pub release: bool,
+    pub target: super::Target,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -426,8 +427,8 @@ pub(crate) fn compile(
     set(&mut flags, "probestack_strategy", "inline")?;
     set(&mut flags, "preserve_frame_pointers", "true")?;
     set(&mut flags, "enable_verifier", "true")?;
-    let isa = cranelift_codegen::isa::lookup_by_name("x86_64-unknown-linux-gnu")
-        .map_err(|e| format!("no code generator for x86-64 Linux: {e}"))?
+    let isa = cranelift_codegen::isa::lookup_by_name(options.target.triple())
+        .map_err(|e| format!("no code generator for {}: {e}", options.target.name()))?
         .finish(settings::Flags::new(flags))
         .map_err(|e| format!("the code generator: {e}"))?;
     let builder = ObjectBuilder::new(isa, "unio", cranelift_module::default_libcall_names())

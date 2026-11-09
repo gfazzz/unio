@@ -21,7 +21,12 @@ path = "src/main.rs"
 unio-runtime = { path = "../unio-runtime" }
 # The code generator of `unio build` (requirements, section 10). Exact versions, so that builds
 # are reproducible (C-4); updates are deliberate, with Cargo.lock.
-cranelift-codegen = { version = "=0.137.1", default-features = false, features = ["std", "x86"] }
+cranelift-codegen = { version = "=0.137.1", default-features = false, features = ["std", "x86", "arm64"] }
 cranelift-frontend = { version = "=0.137.1", default-features = false, features = ["std"] }
 cranelift-module = { version = "=0.137.1", default-features = false, features = ["std"] }
 cranelift-object = { version = "=0.137.1", default-features = false }
+
+# On Windows `unio build` links with `link.exe` of Visual Studio, found as rustc finds it
+# (docs/runtime.md 8.4). No dependencies of its own; an exact version, as above (C-4).
+[target.'cfg(windows)'.dependencies]
+find-msvc-tools = "=0.1.15"

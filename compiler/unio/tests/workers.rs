@@ -558,8 +558,16 @@ fn the_environment_of_the_worker_process_has_no_secret() {
 
 /// `unio build`: the compile step runs in the worker and cannot write the output path; the
 /// executable reaches the path the operator chose, and nothing else outside the package or its
-/// temporary directory is written (Linux on x86-64, where executables are made).
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+/// temporary directory is written. Where executables are made and the operating system
+/// restricts the file system of the workers: Linux on x86-64 and AArch64, and macOS on AArch64,
+/// where it also runs the link step under its Seatbelt profile.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
 #[test]
 fn build_writes_the_output_only_through_the_tool() {
     let exe = Path::new(env!("CARGO_BIN_EXE_unio"));

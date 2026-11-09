@@ -1617,7 +1617,7 @@ extern "C" {
 #[no_mangle]
 pub unsafe extern "C" fn unio_native_main(
     argc: i32,
-    argv: *const *const i8,
+    argv: *const *const std::ffi::c_char,
     image: *const Image,
 ) -> i32 {
     // Started as the writer process of a sandbox, this serves and ends here (docs/runtime.md 9.2).
@@ -1627,9 +1627,20 @@ pub unsafe extern "C" fn unio_native_main(
     #[cfg(unix)]
     signal(13, 1);
     let mut args = Vec::new();
-    for i in 1..argc.max(0) as usize {
-        let s = std::ffi::CStr::from_ptr(*argv.add(i));
-        args.push(s.to_string_lossy().into_owned());
+    if cfg!(windows) {
+        // The `argv` of the C runtime on Windows is in the code page of the system; the
+        // arguments are those of the command line in UTF-16, as `unio run` reads them.
+        let _ = argv;
+        args.extend(
+            std::env::args_os()
+                .skip(1)
+                .map(|a| a.to_string_lossy().into_owned()),
+        );
+    } else {
+        for i in 1..argc.max(0) as usize {
+            let s = std::ffi::CStr::from_ptr(*argv.add(i));
+            args.push(s.to_string_lossy().into_owned());
+        }
     }
     let image = &*image;
     if image.magic != MAGIC || image.value_size as usize != unio_runtime::value::layout::SIZE {

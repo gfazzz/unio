@@ -204,6 +204,73 @@ pub fn worker_profile(read: &[Scope], write: &[Scope], cwd: &Path) -> String {
     p
 }
 
+/// The tree of the developer tools a program of the link step belongs to, which the link step
+/// may read and whose libraries it may map: `Xcode.app/Contents/Developer`, the command line
+/// tools, or the directory above `usr/bin` of another toolchain; `None` for a system program.
+pub fn developer_root(program: &Path) -> Option<std::path::PathBuf> {
+    for dir in program.ancestors().skip(1) {
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+        let parent = dir
+            .parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned());
+        if name.as_deref() == Some("Developer") && parent.as_deref() == Some("Contents") {
+            return Some(dir.to_path_buf());
+        }
+        if dir == Path::new("/Library/Developer/CommandLineTools") {
+            return Some(dir.to_path_buf());
+        }
+    }
+    let bin = program.parent()?;
+    let usr = bin.parent()?;
+    let root = usr.parent()?;
+    let system = [Path::new("/"), Path::new("/usr"), Path::new("/private")];
+    (bin.file_name()? == "bin" && usr.file_name()? == "usr" && !system.contains(&root))
+        .then(|| root.to_path_buf())
+}
+
+/// Applies the profile of the link step of `unio build` to this process (docs/runtime.md 9.7).
+pub fn apply_link_worker(
+    read: &[Scope],
+    write: &[Scope],
+    cwd: &Path,
+    execute: &[std::path::PathBuf],
+) -> Result<(), String> {
+    init(&link_profile(read, write, cwd, execute))
+}
+
+/// The profile of the link step: that of a worker, and it may start processes that execute
+/// exactly the listed programs (the compiler and the linker it runs), map the libraries of the
+/// read trees (the developer tools) and of the system, and signal its children. It still has
+/// no network and writes only its temporary directory.
+pub fn link_profile(
+    read: &[Scope],
+    write: &[Scope],
+    cwd: &Path,
+    execute: &[std::path::PathBuf],
+) -> String {
+    let mut p = worker_profile(read, write, cwd);
+    p.push_str(
+        "(allow process-fork)\n(allow signal (target children))\n\
+         (allow process-info* (target self))\n\
+         (allow file-read-data (literal \"/\"))\n\
+         (allow file-read* file-map-executable (subpath \"/usr/lib\") \
+         (subpath \"/System\") (subpath \"/Library/Apple\") (subpath \"/private/var/db/dyld\") \
+         (subpath \"/private/preboot/Cryptexes\") \
+         (literal \"/private/etc/localtime\"))\n",
+    );
+    for scope in read.iter().filter(|s| s.subtree) {
+        p.push_str(&format!("(allow file-map-executable {})\n", filter(scope)));
+    }
+    for path in execute {
+        p.push_str(&format!(
+            "(allow file-read* file-map-executable process-exec (literal {}))\n",
+            quoted(path)
+        ));
+    }
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +339,48 @@ mod tests {
         assert!(
             !k.contains("process-fork") && !k.contains("process-exec") && !k.contains("network")
         );
+    }
+
+    #[test]
+    fn the_link_step_executes_only_the_listed_programs() {
+        let clang = PathBuf::from(
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+        );
+        assert_eq!(
+            developer_root(&clang),
+            Some(PathBuf::from("/Applications/Xcode.app/Contents/Developer"))
+        );
+        assert_eq!(
+            developer_root(Path::new("/Library/Developer/CommandLineTools/usr/bin/ld")),
+            Some(PathBuf::from("/Library/Developer/CommandLineTools"))
+        );
+        assert_eq!(
+            developer_root(Path::new("/opt/llvm/usr/bin/clang")),
+            Some(PathBuf::from("/opt/llvm"))
+        );
+        assert_eq!(developer_root(Path::new("/usr/bin/cc")), None);
+        let read = [Scope {
+            root: PathBuf::from("/Applications/Xcode.app/Contents/Developer"),
+            subtree: true,
+        }];
+        let write = [Scope {
+            root: PathBuf::from("/t"),
+            subtree: true,
+        }];
+        let p = link_profile(&read, &write, Path::new("/c"), &[clang]);
+        assert!(p.contains("(deny default)"), "{p}");
+        assert!(p.contains("(allow process-fork)"), "{p}");
+        let exec: Vec<&str> = p.lines().filter(|l| l.contains("process-exec")).collect();
+        assert_eq!(exec.len(), 1, "{p}");
+        assert!(exec[0].contains("(literal ") && exec[0].ends_with("/usr/bin/clang\"))"));
+        let writes: Vec<&str> = p.lines().filter(|l| l.contains("file-write")).collect();
+        assert!(
+            writes
+                .iter()
+                .all(|l| l.contains("\"/t\"") || l.contains("\"/dev/null\"")),
+            "{p}"
+        );
+        assert!(!p.contains("network"), "{p}");
     }
 
     /// Seatbelt applies to the whole process, so it is tried in a child process: the test

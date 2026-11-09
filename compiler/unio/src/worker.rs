@@ -513,7 +513,13 @@ fn link_step(config: &Config, arguments: &[String]) -> ExitCode {
     let mut programs = std::collections::BTreeSet::new();
     let mut own_dirs: Vec<Scope> = Vec::new();
     programs.insert(cc.clone());
-    for tool in ["collect2", "ld"] {
+    // `link.exe` of Windows runs no programs to link; a C compiler names those it runs.
+    let tools: &[&str] = if cfg!(windows) {
+        &[]
+    } else {
+        &["collect2", "ld"]
+    };
+    for tool in tools {
         if let Ok(out) = Command::new(cc)
             .arg(format!("-print-prog-name={tool}"))
             .stdin(Stdio::null())
@@ -751,14 +757,29 @@ pub fn start(
     }
 }
 
-/// Links in the link step: runs the C compiler `cc` with `args` in its sandbox.
-pub fn link(cc: &str, args: &[OsString], spec: &Spec, temp: &TempDir) -> Result<Finished, u8> {
-    let mut arguments = vec![cc.to_string()];
-    arguments.extend(args.iter().map(|a| a.to_string_lossy().into_owned()));
-    let mut env: Vec<(&str, OsString)> = vec![("TMPDIR", temp.path().as_os_str().to_owned())];
-    if let Some(path) = std::env::var_os("PATH") {
-        env.push(("PATH", path));
+/// Links in the link step: runs the linker with its arguments in its sandbox, with `PATH`, the
+/// temporary directory, and the variables the linker needs (on Windows those that locate the
+/// libraries of Visual Studio and the Windows SDK).
+pub fn link(linker: &unio::native::Linker, spec: &Spec, temp: &TempDir) -> Result<Finished, u8> {
+    let mut arguments = vec![linker.program.clone()];
+    arguments.extend(linker.args.iter().map(|a| a.to_string_lossy().into_owned()));
+    let dir = temp.path().as_os_str().to_owned();
+    let mut env: Vec<(&str, OsString)> = vec![("TMPDIR", dir.clone())];
+    if cfg!(windows) {
+        env.push(("TMP", dir.clone()));
+        env.push(("TEMP", dir));
     }
+    let own: Vec<(String, OsString)> = linker
+        .env
+        .iter()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.clone()))
+        .collect();
+    if !own.iter().any(|(k, _)| k.eq_ignore_ascii_case("PATH")) {
+        if let Some(path) = std::env::var_os("PATH") {
+            env.push(("PATH", path));
+        }
+    }
+    env.extend(own.iter().map(|(k, v)| (k.as_str(), v.clone())));
     start("link", &arguments, spec, temp, false, &env)
 }
 

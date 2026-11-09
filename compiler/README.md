@@ -6,7 +6,8 @@ checks of [docs/semantics.md](../docs/semantics.md), `unio symbol`, and the inte
 [docs/runtime.md](../docs/runtime.md) behind `unio run` and `unio test`, which run every program
 in the sandbox of SB-1, and `unio build`, which compiles a program to one native executable
 through Cranelift (docs/runtime.md 8.4). These are sprints S1 to S5 of the plan, the sandbox
-part of S6, and the first part of its native code generation, for Linux on x86-64.
+part of S6, and its native code generation for Linux on x86-64 and AArch64, macOS on AArch64,
+and Windows on x86-64.
 
 ## Build and test
 
@@ -14,14 +15,20 @@ The front end, the interpreter and the runtime use the Rust standard library onl
 generator of `unio build` uses Cranelift (`cranelift-codegen`, `cranelift-frontend`,
 `cranelift-module`, `cranelift-object`, a stable release pinned to exact versions, with the
 crates they need recorded in `Cargo.lock`), the one dependency that requirements section 10 names;
-an executable contains none of it, because the linker drops what the runtime does not call. The
+an executable contains none of it, because the linker drops what the runtime does not call. On
+Windows the compiler also uses `find-msvc-tools` (pinned, no dependencies of its own), which
+finds `link.exe` of Visual Studio as rustc does. The
 sandbox calls Landlock, seccomp, resource limits and Seatbelt through `extern` declarations in
 `unio-runtime/src/sandbox/`, as the runtime already does for `fsync`, `getpwuid` and
 `MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6).
 
-The library crate `unio` is also built as a static library, `target/<profile>/libunio.a`: the
-runtime that `unio build` links into every executable, found next to the `unio` binary or
-through `UNIO_RUNTIME_LIB`. Linking needs the system C compiler (`cc`, or `CC`).
+The library crate `unio` is also built as a static library, `target/<profile>/libunio.a` (on
+Windows `unio.lib`): the runtime that `unio build` links into every executable, found next to
+the `unio` binary or through `UNIO_RUNTIME_LIB`. An executable is made for the machine the
+compiler runs on, since it links that machine's runtime. Linking needs the system linker: the C
+compiler on Linux (`cc`, or `CC`); on macOS the Xcode command line tools (`clang` and the SDK,
+found by `xcrun`, or `CC`); on Windows the Visual Studio Build Tools with the C++ workload
+(`link.exe` and a Windows SDK, found without a developer command prompt).
 
 ```sh
 cd compiler
@@ -49,7 +56,7 @@ The workspace has two crates: `unio` (this front end, the interpreter, and the c
 | `unio parse --ast FILE` | Prints the syntax tree as an S-expression without spans; the form is stable and is used to compare parses |
 | `unio explain CODE` | Prints the explanation of a diagnostic code with an example of the error and the example fixed (C-9) |
 | `unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`, in the sandbox described below. The sandbox options come before FILE, or between FILE and `--`. Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion (heap, stack, wall or CPU time of the policy), 103 when the policy or the manifest cannot be read or parsed or the sandbox cannot be applied, 1 if the program does not compile |
-| `unio build [--release] FILE [-o OUT]` | Checks the program like `unio run` and, without errors, compiles it to one executable OUT (by default the name of FILE without `.unio`), for Linux on x86-64 so far; `--release` optimises the generated code. The executable runs `main` with its arguments as `std.args.list()`, in the sandbox of the manifest of FILE's package narrowed by `UNIO_POLICY`, and ends with the codes of `unio run`, or with 104 when its program image is of another format, was made by another compiler than its runtime, or is damaged. `$CWD`, `$HOME` and `$TEMP` in the manifest are those of the run; a relative entry of `files.read` or `files.write` stops the build, since an installed executable has no directory of its manifest. A construct not compiled natively yet stops the build with its place (docs/runtime.md 8.4). Exit code 0 when built, 1 otherwise, 2 on wrong usage |
+| `unio build [--release] FILE [-o OUT]` | Checks the program like `unio run` and, without errors, compiles it to one executable OUT (by default the name of FILE without `.unio`, with `.exe` on Windows) for the machine the compiler runs on: Linux on x86-64 or AArch64, macOS on AArch64, Windows on x86-64; elsewhere it stops with a message naming these. `--release` optimises the generated code. The executable runs `main` with its arguments as `std.args.list()`, in the sandbox of the manifest of FILE's package narrowed by `UNIO_POLICY`, and ends with the codes of `unio run`, or with 104 when its program image is of another format, was made by another compiler than its runtime, or is damaged. `$CWD`, `$HOME` and `$TEMP` in the manifest are those of the run; a relative entry of `files.read` or `files.write` stops the build, since an installed executable has no directory of its manifest. A construct not compiled natively yet stops the build with its place (docs/runtime.md 8.4). Exit code 0 when built, 1 otherwise, 2 on wrong usage |
 | `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). Each file's tests run in the sandbox of its package, with the same options and codes as `unio run`. The effects analysis counts exactly the tests that run: those of the given files that FILTER selects, not those of imported modules or of the standard library unless their files are given; `unio check` and `unio run` count no test (RFC 0005, runtime 6.2). Exit code 0 when every test passed, 1 otherwise |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,
@@ -345,7 +352,10 @@ the remaining cost is the tree walk and allocation of environments, which S6 rep
   that own memory (methods, fields, construction, patterns, iteration, places), the hooks
   through which the interpreter's dispatch and the constants and defaults enter native code, and
   `unio_native_main`, the start of an executable.
-- `mod.rs` loads, checks, lowers, writes the image, compiles, and links.
+- `mod.rs` loads, checks, lowers, writes the image, compiles for the target of the machine
+  (`Target`: the Cranelift triple, the object format, the name of the runtime library), and
+  gives the linker and its arguments for that system. Its unit test generates the objects of
+  reference programs for all four targets on any machine.
 
 The executable reads its image, builds the interpreter's tables from the declarations
 (`Interp::prepared`, without the front end, so the parser, the checker and the lowering are not
@@ -421,8 +431,9 @@ The tests were written before the code (concept, section 1.2):
   or a directory, and reads and `Text.repeat` over the heap limit.
   `unio-runtime` has unit tests for the TOML subset, scopes, narrowing, the runtime checks,
   Landlock and seccomp on a thread, and Seatbelt in a child process.
-- `tests/native.rs` (Linux x86-64; skipped with a note elsewhere): every reference program that
-  the interpreter tests run, with the same inputs, is built with `unio build --release` and
+- `tests/native.rs` (Linux on x86-64 and AArch64, macOS on AArch64, Windows on x86-64; skipped
+  with a note elsewhere): every reference program that the interpreter tests run, with the same
+  inputs, is built with `unio build --release` and
   gives the same standard output, standard error and exit code as `unio run`: the utilities,
   the task list, faults of every kind with their traces, exit codes, exhaustion of the stack, the
   benchmarks, the four tools over the repository, and the types of one name in two modules of

@@ -516,10 +516,14 @@ fn build(arguments: &[String]) -> ExitCode {
         eprintln!("unio build: {m}");
         ExitCode::from(1)
     };
-    if !unio::native::supported() {
-        return fail("native executables are made for Linux on x86-64 only so far".into());
-    }
-    let out = out.unwrap_or_else(|| PathBuf::from(file.file_stem().unwrap_or_default()));
+    let Some(target) = unio::native::Target::host() else {
+        return fail(unio::native::unsupported());
+    };
+    let out = out.unwrap_or_else(|| {
+        let mut name = file.file_stem().unwrap_or_default().to_os_string();
+        name.push(target.executable_suffix());
+        PathBuf::from(name)
+    });
     let runtime = match unio::native::runtime_library() {
         Ok(runtime) => runtime,
         Err(m) => return fail(m),
@@ -542,13 +546,23 @@ fn build(arguments: &[String]) -> ExitCode {
         Ok(finished) => return ExitCode::from(finished.code),
         Err(code) => return ExitCode::from(code),
     }
-    let object = temp.path().join("program.o");
-    let executable = temp.path().join("program");
-    let (cc, args) = unio::native::link_command(&object, &runtime, &executable);
-    spec.read = Vec::new();
+    let object = temp.path().join(unio::native::object_file_name());
+    let executable = temp.path().join(unio::native::executable_file_name());
+    let linker = match unio::native::link_command(&object, &runtime, &executable) {
+        Ok(linker) => linker,
+        Err(m) => return fail(m),
+    };
+    spec.read = linker
+        .read
+        .iter()
+        .map(|dir| unio_runtime::sandbox::Scope {
+            root: unio_runtime::sandbox::resolve(dir),
+            subtree: true,
+        })
+        .collect();
     spec.read_files = vec![unio_runtime::sandbox::resolve(&runtime)];
     spec.stdlib = None;
-    match worker::link(&cc, &args, &spec, &temp) {
+    match worker::link(&linker, &spec, &temp) {
         Ok(finished) if finished.code == 0 => {}
         Ok(_) => return fail("linking failed".into()),
         Err(code) => return ExitCode::from(code),
@@ -565,7 +579,7 @@ fn build_object(file: &Path, release: bool) -> ExitCode {
         return ExitCode::from(worker::EXIT_SANDBOX);
     };
     match unio::native::compile_object(file, release) {
-        Ok(object) => match std::fs::write(dir.join("program.o"), object) {
+        Ok(object) => match std::fs::write(dir.join(unio::native::object_file_name()), object) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("unio build: the object file: {e}");

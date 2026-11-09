@@ -4,8 +4,10 @@
 //! their traces (C-14, C-15, C-17, C-18); two builds of one source are byte for byte the same
 //! (C-4); and a program that does not compile is not built.
 //!
-//! Executables are made for Linux on x86-64 only so far; elsewhere these tests are skipped
-//! with a note.
+//! Executables are made for Linux on x86-64 and AArch64, macOS on AArch64, and Windows on
+//! x86-64 (docs/runtime.md 8.4); on any other machine these tests are skipped with a note. On
+//! Windows, which has no sandbox of the operating system yet, the tests act as the operator
+//! who allows the weaker sandbox (SB-5), for `unio build`, `unio run`, and the executables.
 
 mod common;
 
@@ -16,12 +18,41 @@ use std::process::{Command, Output};
 use common::repo_root;
 
 fn supported() -> bool {
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    let host = cfg!(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(windows, target_env = "msvc", target_arch = "x86_64"),
+    ));
+    if host {
         runtime_library();
         return true;
     }
-    eprintln!("skipped: native executables are made for Linux on x86-64 only so far");
+    eprintln!("skipped: no native executables are made for this machine");
     false
+}
+
+/// The environment of the operator: no external policy, except on Windows the one that allows
+/// the weaker sandbox there (see `common::allow_weaker_on_windows`).
+fn operator(command: &mut Command) -> &mut Command {
+    command.env_remove("UNIO_POLICY");
+    common::allow_weaker_on_windows(command);
+    command
+}
+
+/// Standard error without the warnings that the operator allowed a weaker sandbox (Windows).
+fn errors(output: &Output) -> String {
+    text(&output.stderr)
+        .split_inclusive('\n')
+        .filter(|l| !l.starts_with("unio: warning: the operator allowed a weaker sandbox"))
+        .collect()
+}
+
+/// The file name of an executable on this system.
+fn exe_name(stem: &str) -> String {
+    format!("{stem}{}", std::env::consts::EXE_SUFFIX)
 }
 
 /// `unio build` links with `libunio.a` next to the compiler. `cargo test` builds only the rlib
@@ -36,8 +67,17 @@ fn runtime_library() {
         command
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .args(["build", "-p", "unio", "--lib"]);
-        if exe.parent().and_then(|d| d.file_name()) == Some("release".as_ref()) {
+        let profile = exe.parent().unwrap();
+        if profile.file_name() == Some("release".as_ref()) {
             command.arg("--release");
+        }
+        // Built for another target than the host's (target/<triple>/<profile>, as when the
+        // tests of Linux on AArch64 run under an emulator): the library of that target.
+        let above = profile.parent().unwrap();
+        let name = above.file_name().unwrap().to_string_lossy();
+        let root = above.parent().unwrap();
+        if name.matches('-').count() >= 2 && root.join("CACHEDIR.TAG").exists() {
+            command.arg("--target").arg(&*name);
         }
         let output = command.output().unwrap();
         assert!(
@@ -65,9 +105,12 @@ fn build(program: &Path, dir: &Path, release: bool) -> PathBuf {
     let stem = program.file_stem().unwrap().to_string_lossy().into_owned();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let out = bin.join(format!("{stem}{}", if release { "" } else { "-debug" }));
+    let out = bin.join(exe_name(&format!(
+        "{stem}{}",
+        if release { "" } else { "-debug" }
+    )));
     let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
-    command.current_dir(repo_root()).arg("build");
+    operator(&mut command).current_dir(repo_root()).arg("build");
     if release {
         command.arg("--release");
     }
@@ -115,9 +158,8 @@ fn reset(case: &Case) {
 fn interpreted(case: &Case) -> Output {
     reset(case);
     let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
-    command
+    operator(&mut command)
         .current_dir(&case.dir)
-        .env_remove("UNIO_POLICY")
         .arg("run")
         .arg(&case.program)
         .arg("--")
@@ -131,9 +173,8 @@ fn interpreted(case: &Case) -> Output {
 fn native(exe: &Path, case: &Case) -> Output {
     reset(case);
     let mut command = Command::new(exe);
-    command
+    operator(&mut command)
         .current_dir(&case.dir)
-        .env_remove("UNIO_POLICY")
         .args(&case.args);
     for (k, v) in &case.env {
         command.env(k, v);
@@ -162,9 +203,11 @@ fn compare(cases: &[Case], dir: &Path) -> Vec<String> {
             text(&expected.stderr)
         );
         let found = native(&exe, c);
+        // Without the warnings of the weaker sandbox (Windows): `unio run` also warns for the
+        // worker that compiles the program, which an executable does not have.
         if expected.status.code() != found.status.code()
             || expected.stdout != found.stdout
-            || expected.stderr != found.stderr
+            || errors(&expected) != errors(&found)
         {
             differences.push(format!(
                 "{} {:?}: interpreter exit {:?}, native exit {:?}\n--- interpreter stdout\n{}--- native stdout\n{}--- interpreter stderr\n{}--- native stderr\n{}",
@@ -434,7 +477,7 @@ public function main() returns Int:
         .collect();
     let differences = compare(&cases, &dir);
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
-    let exe = dir.join("bin").join("paths");
+    let exe = dir.join("bin").join(exe_name("paths"));
     for (c, (which, code)) in cases.iter().zip(expected) {
         let found = native(&exe, c);
         assert_eq!(
@@ -579,11 +622,10 @@ fn write_package(dir: &Path) -> PathBuf {
 fn build_in(cwd: &Path, program: &str, out: &Path, home: &Path) -> Output {
     let temp = home.join("tmp");
     fs::create_dir_all(&temp).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_unio"))
+    operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
         .current_dir(cwd)
         .env("HOME", home)
         .env("TMPDIR", &temp)
-        .env_remove("UNIO_POLICY")
         .args(["build", "--release", program, "-o"])
         .arg(out)
         .output()
@@ -604,7 +646,7 @@ fn builds_in_two_directories_are_byte_for_byte_the_same() {
         let project = dir.join(name).join("project");
         write_package(&project);
         let home = dir.join(name).join("home");
-        let out = dir.join(name).join("program");
+        let out = dir.join(name).join(exe_name("program"));
         let output = build_in(&project, "main.unio", &out, &home);
         assert!(output.status.success(), "{}", text(&output.stderr));
         let bytes = fs::read(&out).unwrap();
@@ -633,20 +675,20 @@ fn traces_show_paths_relative_to_the_package() {
     let main = write_package(&project);
     let exe = build(&main, &dir, true);
     let expected = "fault: division by zero\n    at geometry.shapes.ratio (geometry/shapes.unio:8)\n    at main.main (main.unio:14)\n";
-    let found = Command::new(&exe)
+    let found = operator(&mut Command::new(&exe))
         .current_dir(&project)
         .arg("fault")
         .output()
         .unwrap();
     assert_eq!(found.status.code(), Some(101));
-    assert_eq!(text(&found.stderr), expected);
-    let interpreted = Command::new(env!("CARGO_BIN_EXE_unio"))
+    assert_eq!(errors(&found), expected);
+    let interpreted = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
         .current_dir(&dir)
         .args(["run", "project/main.unio", "--", "fault"])
         .output()
         .unwrap();
     assert_eq!(interpreted.status.code(), Some(101));
-    assert_eq!(text(&interpreted.stderr), expected);
+    assert_eq!(errors(&interpreted), expected);
     // A module of the standard library is named by its logical root.
     let library = dir.join("library.unio");
     fs::write(
@@ -655,8 +697,11 @@ fn traces_show_paths_relative_to_the_package() {
     )
     .unwrap();
     let exe = build(&library, &dir, true);
-    let found = Command::new(&exe).current_dir(&dir).output().unwrap();
-    let err = text(&found.stderr);
+    let found = operator(&mut Command::new(&exe))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let err = errors(&found);
     assert!(
         err.contains("(library.unio:4)") && !err.contains(&*dir.to_string_lossy()),
         "{err}"
@@ -679,7 +724,7 @@ fn a_moved_executable_runs_with_the_permissions_of_its_manifest() {
     let exe = build(&main, &dir, true);
     let installed = dir.join("installed").join("bin");
     fs::create_dir_all(&installed).unwrap();
-    let moved = installed.join("portable");
+    let moved = installed.join(exe_name("portable"));
     fs::rename(&exe, &moved).unwrap();
     fs::remove_dir_all(&project).unwrap();
     let work = dir.join("work");
@@ -687,9 +732,8 @@ fn a_moved_executable_runs_with_the_permissions_of_its_manifest() {
     fs::create_dir_all(work.join("closed")).unwrap();
     fs::write(work.join("open/a.txt"), "alpha").unwrap();
     fs::write(work.join("closed/secret.txt"), "SECRET").unwrap();
-    let output = Command::new(&moved)
+    let output = operator(&mut Command::new(&moved))
         .current_dir(&work)
-        .env_remove("UNIO_POLICY")
         .output()
         .unwrap();
     let out = text(&output.stdout);
@@ -705,8 +749,8 @@ fn a_moved_executable_runs_with_the_permissions_of_its_manifest() {
         "[permissions]\nfiles.read = [\"data/**\"]\n",
     )
     .unwrap();
-    let out = dir.join("relative-program");
-    let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+    let out = dir.join(exe_name("relative-program"));
+    let output = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
         .args(["build"])
         .arg(&main)
         .arg("-o")
@@ -741,14 +785,28 @@ fn an_incompatible_image_is_refused() {
         })
         .expect("the executable holds a program image");
     let run = |bytes: &[u8], name: &str| {
-        let path = dir.join(name);
+        let path = dir.join(exe_name(name));
         fs::write(&path, bytes).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        Command::new(&path).current_dir(&dir).output().unwrap()
+        // macOS on AArch64 runs only signed code, and the linker's signature covers the image:
+        // the changed executable is signed again, as the build of another compiler would be.
+        #[cfg(target_os = "macos")]
+        {
+            let signed = Command::new("codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(signed.status.success(), "{}", text(&signed.stderr));
+        }
+        operator(&mut Command::new(&path))
+            .current_dir(&dir)
+            .output()
+            .unwrap()
     };
     let fine = run(&bytes, "fine");
     assert_eq!(text(&fine.stdout), "hello\n");
@@ -758,7 +816,7 @@ fn an_incompatible_image_is_refused() {
     let output = run(&other_format, "other-format");
     assert_eq!(output.status.code(), Some(104));
     assert_eq!(text(&output.stdout), "");
-    let err = text(&output.stderr);
+    let err = errors(&output);
     assert!(err.contains("format"), "{err}");
     // Then the identity of the compiler that made it.
     let mut other_compiler = bytes.clone();
@@ -790,8 +848,8 @@ fn a_program_that_does_not_compile_is_not_built() {
         "public function main() returns Int:\n    return missing\n",
     )
     .unwrap();
-    let out = dir.join("broken");
-    let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+    let out = dir.join(exe_name("broken"));
+    let output = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
         .arg("build")
         .arg(&broken)
         .arg("-o")
@@ -834,8 +892,11 @@ fn the_executable_applies_the_manifest_of_its_package() {
     let cases = vec![case(program, &[], &dir)];
     let differences = compare(&cases, &dir);
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
-    let exe = dir.join("bin").join("main");
-    let output = Command::new(&exe).current_dir(&dir).output().unwrap();
+    let exe = dir.join("bin").join(exe_name("main"));
+    let output = operator(&mut Command::new(&exe))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
     let out = text(&output.stdout);
     assert!(out.contains("read open/a.txt: alpha"), "{out}");
     assert!(!out.contains("SECRET"), "{out}");
@@ -873,12 +934,16 @@ fn run_both(dir: &Path, free: Option<usize>) -> (Output, Output) {
     let mut native = Command::new(&exe);
     prepare(&mut native);
     let found = native.output().unwrap();
-    for (what, a, b) in [
-        ("stdout", &interpreted.stdout, &found.stdout),
-        ("stderr", &interpreted.stderr, &found.stderr),
-    ] {
-        assert_eq!(text(a), text(b), "{what} of unio run and of the executable");
-    }
+    assert_eq!(
+        text(&interpreted.stdout),
+        text(&found.stdout),
+        "stdout of unio run and of the executable"
+    );
+    assert_eq!(
+        errors(&interpreted),
+        errors(&found),
+        "stderr of unio run and of the executable"
+    );
     assert_eq!(interpreted.status.code(), found.status.code());
     (interpreted, found)
 }
@@ -913,7 +978,7 @@ fn the_executable_releases_from_the_reserve_after_a_fault_on_a_full_heap() {
     let (_, filled) = run_both(&full, Some(0));
     assert_eq!(filled.status.code(), Some(102));
     let (_, found) = run_both(&dir, Some(0));
-    let err = text(&found.stderr);
+    let err = errors(&found);
     assert_eq!(found.status.code(), Some(101), "{err}");
     assert_eq!(
         text(&found.stdout),
@@ -959,7 +1024,7 @@ fn the_executable_does_not_release_on_exhaustion() {
     let (_, found) = run_both(&dir, Some(0));
     assert_eq!(found.status.code(), Some(102));
     assert_eq!(
-        text(&found.stderr),
+        errors(&found),
         "fault: memory exhausted; the program ends with code 102\n"
     );
     assert_eq!(text(&found.stdout), "releasing hungry\n");
