@@ -28,7 +28,19 @@ The language of messages is taken from --lang, then from UNIO_LANG, and is Engli
 Every command that reads sources takes --policy FILE (or UNIO_POLICY) for the limits of its
 worker and --allow-weaker-sandbox (docs/runtime.md 9.7).";
 
+/// Finds `link.exe` of Visual Studio as rustc does (compiler/README.md "The linker on Windows").
+#[cfg(windows)]
+fn find_msvc_linker() -> Option<unio::native::MsvcLinker> {
+    let tool = find_msvc_tools::find_tool("x86_64-pc-windows-msvc", "link.exe")?;
+    Some(unio::native::MsvcLinker {
+        path: tool.path().to_path_buf(),
+        env: tool.env().into_iter().cloned().collect(),
+    })
+}
+
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    unio::native::set_msvc_finder(find_msvc_linker);
     // Started as the writer process of a sandbox, this serves and ends here (docs/runtime.md 9.2).
     #[cfg(unix)]
     unio_runtime::sandbox::writer::serve_if_requested();

@@ -16,8 +16,7 @@ generator of `unio build` uses Cranelift (`cranelift-codegen`, `cranelift-fronte
 `cranelift-module`, `cranelift-object`, a stable release pinned to exact versions, with the
 crates they need recorded in `Cargo.lock`), the one dependency that requirements section 10 names;
 an executable contains none of it, because the linker drops what the runtime does not call. On
-Windows the compiler also uses `find-msvc-tools` (pinned, no dependencies of its own), which
-finds `link.exe` of Visual Studio as rustc does. The
+Windows the compiler also uses `find-msvc-tools`; see "The linker on Windows" below. The
 sandbox calls Landlock, seccomp, resource limits and Seatbelt through `extern` declarations in
 `unio-runtime/src/sandbox/`, as the runtime already does for `fsync`, `getpwuid` and
 `MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6).
@@ -44,6 +43,37 @@ The workspace has two crates: `unio` (this front end, the interpreter, and the c
 `unio-runtime` (values, faults, the release stack, and the externals; see its README).
 
 `UNIO_FUZZ_ITERATIONS=100000 cargo test --release --test fuzz` runs a longer mutation run.
+
+
+### The linker on Windows
+
+`unio build` links native executables with the system linker: `cc` on Linux, `clang` of the
+Xcode SDK on macOS, and `link.exe` of Microsoft Visual C++ (MSVC) on Windows. Windows has no
+`link.exe` on its search path outside a developer command prompt, so the compiler finds it
+with [`find-msvc-tools`](https://github.com/rust-lang/cc-rs) (the code rustc and `cc` use for
+the same task). It is a dependency only on Windows (`[target.'cfg(windows)'.dependencies]` in
+`unio/Cargo.toml`), pinned to `=0.1.15`, licensed `MIT OR Apache-2.0`, with no dependencies of
+its own; `Cargo.lock` records its checksum, and an update is a deliberate change of both.
+
+- What must be installed: the Visual Studio Build Tools (or Visual Studio) with the workload
+  "Desktop development with C++", which brings MSVC and a Windows SDK. When `link.exe` is not
+  found, `unio build` stops with a diagnostic that says what to install; it never installs
+  anything itself.
+- How the toolchain is chosen: run `unio build` from a developer command prompt
+  ("x64 Native Tools Command Prompt" of the chosen Visual Studio, or after `vcvarsall.bat x64`)
+  to use exactly that installation and its Windows SDK, as named by `VCINSTALLDIR`,
+  `VSCMD_ARG_TGT_ARCH`, `LIB` and `PATH`; without one, the newest installed Visual Studio with
+  the C++ workload is used, as `vswhere` reports it.
+- Reproducibility: pinning the search library does not pin what it finds. A build is
+  reproducible on the same `link.exe` and the same Windows SDK; their versions belong to the
+  record of a build together with the version of `unio` (C-4, R-6). `/Brepro` removes the time
+  stamp, so the same inputs and the same toolchain give the same bytes.
+- Its role is temporary: it belongs to the bootstrap compiler in Rust. It is reviewed when the
+  compiler moves to tools of its own (the self-hosted compiler of concept section 10, by 1.0),
+  or earlier if a linker is shipped with Unio; until then it is the only dependency besides
+  Cranelift. It is called by the `unio` tool only (`compiler/unio/src/main.rs`), not by the
+  library whose static form is the runtime, so it is not part of what `unio build` puts into
+  programs.
 
 ## Commands
 

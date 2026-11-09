@@ -305,12 +305,31 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
     }
 }
 
+/// `link.exe` of Visual Studio and the variables that locate its libraries (`LIB`, `LIBPATH`,
+/// `PATH`), as found on this machine.
+pub struct MsvcLinker {
+    pub path: PathBuf,
+    pub env: Vec<(OsString, OsString)>,
+}
+
+/// How the `unio` tool finds `link.exe` on Windows: set once by the tool at start
+/// (`find-msvc-tools`, compiler/README.md "The linker on Windows"). The finder lives in the tool
+/// and not in this library, because the static library of this crate is the runtime linked
+/// into every executable, and programs must not carry the search for a linker.
+static MSVC_FINDER: std::sync::OnceLock<fn() -> Option<MsvcLinker>> = std::sync::OnceLock::new();
+
+/// Sets the finder of `link.exe` (see [`MSVC_FINDER`]); a second call is ignored.
+pub fn set_msvc_finder(finder: fn() -> Option<MsvcLinker>) {
+    let _ = MSVC_FINDER.set(finder);
+}
+
 #[cfg(windows)]
 fn windows_linker(object: &Path, runtime: &Path, out: &Path) -> Result<Linker, String> {
-    let tool = find_msvc_tools::find_tool("x86_64-pc-windows-msvc", "link.exe").ok_or(
+    let tool = MSVC_FINDER.get().and_then(|find| find()).ok_or(
         "the linker link.exe of Visual Studio was not found; install the Visual Studio Build \
-         Tools with the workload for C++ (MSVC and a Windows SDK), or run from a developer \
-         command prompt",
+         Tools with the workload \"Desktop development with C++\" (MSVC and a Windows SDK), \
+         or run from a developer command prompt of the chosen installation; unio does not \
+         install it",
     )?;
     let mut out_arg = OsString::from("/OUT:");
     out_arg.push(out);
@@ -337,9 +356,9 @@ fn windows_linker(object: &Path, runtime: &Path, out: &Path) -> Result<Linker, S
     }
     // LIB and LIBPATH locate the libraries of MSVC and the Windows SDK; PATH starts with the
     // directories of the tool, followed by that of this process.
-    let env = tool.env().into_iter().cloned().collect();
+    let env = tool.env;
     Ok(Linker {
-        program: tool.path().to_string_lossy().into_owned(),
+        program: tool.path.to_string_lossy().into_owned(),
         args,
         env,
         read: Vec::new(),
