@@ -563,9 +563,19 @@ fn link_step(config: &Config, arguments: &[String]) -> ExitCode {
     if let Err(code) = apply(&rules, config.allow_weaker) {
         return code;
     }
-    match Command::new(cc).args(args).status() {
-        Ok(status) if status.success() => ExitCode::SUCCESS,
-        Ok(_) => ExitCode::from(1),
+    // The linker's own messages go to standard error: link.exe writes its errors to standard
+    // output, which a tool may read as data.
+    match Command::new(cc).args(args).stdin(Stdio::null()).output() {
+        Ok(out) if out.status.success() => ExitCode::SUCCESS,
+        Ok(out) => {
+            eprintln!(
+                "unio build: the linker {cc} failed ({}):\n{}{}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("unio build: the C compiler {cc} cannot be run: {e}");
             ExitCode::from(1)
