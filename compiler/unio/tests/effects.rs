@@ -910,3 +910,371 @@ public function main() returns Int:
     assert!(codes(&dir, "main.unio", Profile::Application).is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ------------------------------------------------------------------ the tests in the analysis
+
+/// A hook that ordinary code calls through a field, and a function that keeps a value in one.
+/// The program itself only ever stores `quiet`.
+const HOOKS: &str = "\
+import std.files as files
+
+public struct Spot:
+    public path as Path
+
+public struct Hook:
+    public run as Function[(Spot) fails with IoError]
+
+public function keep(f as Function[(Spot) fails with IoError]) returns Hook:
+    return Hook(run = f)
+
+public function fire(h as Hook, spot as Spot) fails with IoError:
+    try h.run(spot)
+
+public function fire_option(o as Option[Function[(Spot) fails with IoError]], spot as Spot) fails with IoError:
+    match o:
+        case some(f): try f(spot)
+        case none: return
+
+public function quiet(spot as Spot) fails with IoError:
+    return
+";
+
+const MANIFEST_OUT: &str =
+    "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.write = [\"$CWD/out/**\"]\n";
+
+/// Runs the compiler in the directory; the exit code and what it printed.
+fn unio_in(dir: &Path, args: &[&str], stdlib: Option<&Path>) -> (Option<i32>, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
+    command.current_dir(dir).env_remove("UNIO_POLICY");
+    if let Some(root) = stdlib {
+        command.env("UNIO_STDLIB", root);
+    }
+    let sandboxed = matches!(args.first(), Some(&"run") | Some(&"test"));
+    command.arg(args[0]);
+    if sandboxed && cfg!(windows) {
+        command.arg("--allow-weaker-sandbox");
+    }
+    let output = command.args(&args[1..]).output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.code(), text)
+}
+
+/// A test block that is not run does not add its function values to the program: `unio
+/// check` and `unio run` see only what the program stores (RFC 0005, tests in the analysis).
+#[test]
+fn values_made_in_tests_that_are_not_run_do_not_reach_the_program() {
+    let program = format!(
+        "{HOOKS}
+public function main() returns Int:
+    try:
+        try fire(Hook(run = quiet), Spot(path = Path(\"out/main.txt\")))
+        try fire_option(some(quiet), Spot(path = Path(\"out/main.txt\")))
+    on IoError as e:
+        return 1
+    return 0
+
+test \"a writer through a field and through any value of its type\":
+    let h = Hook(run = function (s as Spot) fails with IoError: try files.write_text(s.path, \"x\"))
+    let o = some(function (s as Spot) fails with IoError: try files.write_text(s.path, \"y\"))
+    assert true
+"
+    );
+    let dir = package(
+        "unrun",
+        &[("main.unio", &program), ("unio.toml", MANIFEST_NOTHING)],
+    );
+    let dir = fs::canonicalize(dir).unwrap();
+    let found = codes(&dir, "main.unio", Profile::Application);
+    assert!(found.is_empty(), "{found:?}");
+    assert!(!effects(&dir, "main.fire").contains(&"files.write"));
+    assert!(!effects(&dir, "main.fire_option").contains(&"files.write"));
+    let (code, text) = unio_in(&dir, &["run", "main.unio"], None);
+    assert_eq!(code, Some(0), "{text}");
+    // Under the core profile the estimated call sees no value of a test either.
+    let core = "\
+struct Meters:
+    n as Int
+
+function call_option(o as Option[Function[(Meters) -> Int]]) returns Int:
+    match o:
+        case some(f): return f(Meters(n = 1))
+        case none: return 0
+
+function double(m as Meters) returns Int:
+    return m.n * 2
+
+function use_option() returns Int:
+    return call_option(some(double))
+
+test \"a value that allocates, made in a test\":
+    assert call_option(some(function (m as Meters) returns Int: \"{m.n}\".length())) == 1
+";
+    fs::write(dir.join("core.unio"), core).unwrap();
+    let found = codes(&dir, "core.unio", Profile::Core);
+    assert!(found.is_empty(), "{found:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The standard library's private test helper `positive` (an `(Int) -> Int` value named only
+/// in tests of alloc/builtin/list.unio) is not a possible target of a user's estimated call.
+/// Functions are numbered before lambdas, so while it was a target the chain of E0087 named
+/// it first. Ordinary functions of the library still count, test helpers among them: the
+/// lambda in `sort_singleton_with_faulting_key` is made by an ordinary function.
+#[test]
+fn the_tests_of_the_library_do_not_reach_a_user_package() {
+    let core = "\
+function call_option(o as Option[Function[(Int) -> Int]]) returns Int:
+    match o:
+        case some(f): return f(1)
+        case none: return 0
+
+function inc(x as Int) returns Int:
+    return x + 1
+
+function use_option() returns Int:
+    return call_option(some(inc))
+";
+    let dir = package("positive", &[("core.unio", core)]);
+    let found = codes(&dir, "core.unio", Profile::Core);
+    assert!(!found.iter().any(|f| f.2.contains("positive")), "{found:?}");
+    assert!(
+        found.iter().all(|f| f.0 == "E0087"
+            && f.2
+                .contains("the lambda on line 247 in sort_singleton_with_faulting_key")),
+        "{found:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+const WRITER_TESTS: &str = "
+test \"a kept writer inside out\":
+    let h = keep(function (s as Spot) fails with IoError: try files.write_text(s.path, \"x\"))
+    try:
+        try fire(h, Spot(path = Path(\"out/test.txt\")))
+    on IoError as e: assert_fail(\"the write inside out failed\")
+
+test \"a kept writer outside out\":
+    let h = keep(function (s as Spot) fails with IoError: try files.write_text(s.path, \"x\"))
+    try:
+        try fire(h, Spot(path = Path(\"elsewhere.txt\")))
+        assert_fail(\"the sandbox let the write through\")
+    on IoError as e: assert true
+
+test \"a pure hook\":
+    assert true
+";
+
+/// When the test runs, its values count: the effect they bring into ordinary code is checked
+/// against the manifest (E0085, nothing runs), and with the permission the sandbox still
+/// denies what the manifest does not list. Only the tests that run are analysed.
+#[test]
+fn values_made_in_tests_that_run_are_checked() {
+    let program = format!(
+        "{HOOKS}
+public function main() returns Int:
+    try fire(keep(quiet), Spot(path = Path(\"out/main.txt\"))) on IoError as e:
+        return 1
+    return 0
+{WRITER_TESTS}"
+    );
+    let dir = package(
+        "tested",
+        &[("main.unio", &program), ("unio.toml", MANIFEST_NOTHING)],
+    );
+    fs::create_dir_all(dir.join("out")).unwrap();
+    let dir = fs::canonicalize(dir).unwrap();
+    assert!(codes(&dir, "main.unio", Profile::Application).is_empty());
+    let (code, text) = unio_in(&dir, &["test", "main.unio"], None);
+    assert_eq!(code, Some(1), "{text}");
+    assert!(
+        text.contains("E0085") && text.contains("files.write"),
+        "{text}"
+    );
+    assert!(text.contains("main.fire"), "{text}");
+    assert!(!dir.join("out/test.txt").exists());
+    // A filter that leaves out the writers leaves their values out of the analysis too.
+    let (code, text) = unio_in(&dir, &["test", "pure", "main.unio"], None);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
+
+    // With the permission the tests run, and the sandbox keeps its limits.
+    fs::write(dir.join("unio.toml"), MANIFEST_OUT).unwrap();
+    let (code, text) = unio_in(&dir, &["test", "main.unio"], None);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("3 passed, 0 failed"), "{text}");
+    assert!(dir.join("out/test.txt").exists());
+    assert!(!dir.join("elsewhere.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The tests of an imported module are not the user's tests: they count only when that module
+/// is itself the target of `unio test`.
+#[test]
+fn the_tests_of_an_imported_module_count_only_as_targets() {
+    let lib = format!(
+        "{HOOKS}
+test \"the library keeps a writer\":
+    let h = Hook(run = function (s as Spot) fails with IoError: try files.write_text(s.path, \"x\"))
+    let k = keep(function (s as Spot) fails with IoError: try files.write_text(s.path, \"y\"))
+    assert true
+"
+    );
+    let main = "\
+import std.files as files
+import lib
+
+public function main() returns Int:
+    try lib.fire(lib.keep(lib.quiet), lib.Spot(path = Path(\"out/main.txt\"))) on IoError as e:
+        return 1
+    return 0
+
+test \"the user's hook\":
+    try:
+        try lib.fire(lib.Hook(run = lib.quiet), lib.Spot(path = Path(\"out/user.txt\")))
+    on IoError as e: assert_fail(\"a pure hook failed\")
+";
+    let dir = package(
+        "imported",
+        &[
+            ("lib.unio", &lib),
+            ("main.unio", main),
+            ("unio.toml", MANIFEST_NOTHING),
+        ],
+    );
+    let dir = fs::canonicalize(dir).unwrap();
+    assert!(codes(&dir, "main.unio", Profile::Application).is_empty());
+    let (code, text) = unio_in(&dir, &["test", "main.unio"], None);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
+    let (code, text) = unio_in(&dir, &["test", "lib.unio"], None);
+    assert_eq!(code, Some(1), "{text}");
+    assert!(text.contains("E0085"), "{text}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The tests of the standard library run and are analysed when its modules are the targets,
+/// and stay out of a user package's analysis otherwise. A probe copy of the library, chosen
+/// by UNIO_STDLIB, has a module whose test keeps a writer.
+#[test]
+fn the_tests_of_the_library_run_and_count_as_targets() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = fs::canonicalize(root).unwrap();
+    let (code, text) = unio_in(&root, &["test", "stdlib/alloc/builtin/list.unio"], None);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(
+        text.contains("fallible mapping stops at the first error"),
+        "{text}"
+    );
+
+    let probe = std::env::temp_dir().join(format!("unio-effects-{}-probe", std::process::id()));
+    let _ = fs::remove_dir_all(&probe);
+    copy_dir(&root.join("stdlib"), &probe.join("stdlib"));
+    let stdlib = probe.join("stdlib");
+    // Inside the library the error of `std.files` is named through its module.
+    let hooks = HOOKS.replace("IoError", "files.IoError");
+    let module = format!(
+        "{hooks}
+test \"the probe keeps a writer\":
+    let h = Hook(run = function (s as Spot) fails with files.IoError: try files.write_text(s.path, \"x\"))
+    let k = keep(function (s as Spot) fails with files.IoError: try files.write_text(s.path, \"y\"))
+    try:
+        try fire(Hook(run = quiet), Spot(path = Path(\"probe.txt\")))
+    on files.IoError as e: assert_fail(\"a pure hook failed\")
+"
+    );
+    fs::write(stdlib.join("std/probe.unio"), module).unwrap();
+    let user = "\
+import std.files as files
+import std.probe as probe
+
+public function main() returns Int:
+    try probe.fire(probe.keep(probe.quiet), probe.Spot(path = Path(\"out/main.txt\"))) on IoError as e:
+        return 1
+    return 0
+
+test \"the user's hook\":
+    try:
+        try probe.fire(probe.Hook(run = probe.quiet), probe.Spot(path = Path(\"out/user.txt\")))
+    on IoError as e: assert_fail(\"a pure hook failed\")
+";
+    let app = probe.join("app");
+    fs::create_dir_all(&app).unwrap();
+    fs::write(app.join("main.unio"), user).unwrap();
+    fs::write(app.join("unio.toml"), MANIFEST_NOTHING).unwrap();
+    let (code, text) = unio_in(&app, &["check", "main.unio"], Some(&stdlib));
+    assert_eq!(code, Some(0), "{text}");
+    let (code, text) = unio_in(&app, &["test", "main.unio"], Some(&stdlib));
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
+    let (code, text) = unio_in(&stdlib, &["test", "std/probe.unio"], Some(&stdlib));
+    assert_eq!(code, Some(0), "{text}");
+    assert!(
+        text.contains("ok   std/probe.unio: the probe keeps a writer"),
+        "{text}"
+    );
+    // The analysis of the probe as a target counts the writer for `fire`; a check does not.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "probe_effects_in_a_child", "--nocapture"])
+        .env("UNIO_STDLIB", &stdlib)
+        .env("UNIO_PROBE_MODULE", stdlib.join("std/probe.unio"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("tested: files.write; checked: none"),
+        "{text}"
+    );
+    let _ = fs::remove_dir_all(&probe);
+}
+
+/// Run by `the_tests_of_the_library_run_and_count_as_targets` in a process of its own, so that
+/// UNIO_STDLIB names the probe copy; does nothing otherwise.
+#[test]
+fn probe_effects_in_a_child() {
+    let Some(module) = std::env::var_os("UNIO_PROBE_MODULE") else {
+        return;
+    };
+    let file = PathBuf::from(module);
+    let writes = |program: &unio::program::Program| {
+        let derived = unio::effects::derive(program);
+        let fire = program
+            .funcs
+            .iter()
+            .position(|f| f.name == "fire" && program.modules[f.module].name == "std.probe")
+            .expect("std.probe.fire");
+        if derived.effect_names(fire).contains(&"files.write") {
+            "files.write"
+        } else {
+            "none"
+        }
+    };
+    let (tested, checked) = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let tested = writes(&unio::load_for_test(std::slice::from_ref(&file), None));
+            let checked = writes(&unio::load_checked(&[file], Profile::Application));
+            (tested, checked)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    println!("tested: {tested}; checked: {checked}");
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}

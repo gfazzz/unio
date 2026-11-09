@@ -36,6 +36,9 @@ pub struct Module {
     pub prelude: bool,
     pub package: PathBuf,
     pub report: bool,
+    /// Whether the module is one of the files the command was given, not only imported: the
+    /// tests `unio test` runs are those of the given modules.
+    pub given: bool,
     pub symbols: HashMap<String, Symbol>,
     pub imports: HashMap<String, Binding>,
     /// Imported modules with the span of their import, for cycles.
@@ -154,6 +157,31 @@ pub struct GenericCall {
     pub span: Span,
 }
 
+/// The tests that run with the program, and so count in the effects analysis (RFC 0005, tests
+/// in the analysis): none for `unio check` and `unio run`; for `unio test`, the tests of the
+/// given modules whose description contains the filter. The tests of imported modules, of the
+/// same package or another, and of the standard library run only when their modules are given.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TestScope {
+    #[default]
+    None,
+    Given {
+        filter: Option<String>,
+    },
+}
+
+impl TestScope {
+    /// Whether a test of a given module with this description runs.
+    pub fn selects(&self, description: &str) -> bool {
+        match self {
+            TestScope::None => false,
+            TestScope::Given { filter } => filter
+                .as_ref()
+                .is_none_or(|f| description.contains(f.as_str())),
+        }
+    }
+}
+
 /// The layers of the standard library in order (S-11): each may use itself and those before it.
 pub const LAYER_NAMES: [&str; 3] = ["core", "alloc", "std"];
 
@@ -175,6 +203,8 @@ pub struct Program {
     /// What the effects need beyond `calls`: implicit calls through interfaces, uses of
     /// constants and field defaults, and allocating expressions (semantics 8.4).
     pub effect_facts: crate::effects::Facts,
+    /// The tests that run, whose values count in the effects analysis (RFC 0005).
+    pub tests: TestScope,
     by_path: HashMap<PathBuf, ModId>,
     stdlib_root: Option<PathBuf>,
 }
@@ -322,6 +352,7 @@ impl Program {
             generic_calls: Vec::new(),
             usages: Vec::new(),
             effect_facts: Default::default(),
+            tests: TestScope::None,
             by_path: HashMap::new(),
             stdlib_root,
         };
@@ -341,6 +372,7 @@ impl Program {
             let id = program.load_file(file, true);
             if let Some(id) = id {
                 program.modules[id].report = true;
+                program.modules[id].given = true;
             }
         }
         // Imports load further modules; follow them until nothing new appears.
@@ -401,6 +433,7 @@ impl Program {
             prelude,
             package,
             report,
+            given: false,
             symbols: HashMap::new(),
             imports: HashMap::new(),
             edges: Vec::new(),

@@ -407,7 +407,7 @@ fn test(arguments: &[String], json: bool, lang: Lang, sandbox: &sandbox_cli::Opt
     let (mut passed, mut failed) = (0, 0);
     for (index, file) in files.into_iter().enumerate() {
         let display = file.display().to_string();
-        let analyses = unio::check_files(std::slice::from_ref(&file));
+        let analyses = unio::check_files_for_test(std::slice::from_ref(&file), filter.as_deref());
         let Some(analysis) = analyses.into_iter().next() else {
             continue;
         };
@@ -459,7 +459,7 @@ fn test(arguments: &[String], json: bool, lang: Lang, sandbox: &sandbox_cli::Opt
         let filter = filter.clone();
         let plan = plan.clone();
         let results = on_run_stack(move || {
-            let program = unio::load_checked(&[path], unio::effects::Profile::Application);
+            let program = unio::load_for_test(&[path], filter.as_deref());
             // SB-1: each file's tests run in the sandbox of its package.
             let _sandbox = sandbox_cli::enter_or_exit(&plan, index);
             let module = program.modules.iter().position(|m| m.report).unwrap_or(0);

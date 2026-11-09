@@ -203,24 +203,41 @@ pub fn check_program(program: &mut Program) {
     externals(program);
 }
 
-/// The test blocks of every module.
+/// The test blocks of every module. Each is checked; only the tests that run are part of the
+/// effects analysis (RFC 0005, tests in the analysis): those of the modules `unio test` was
+/// given whose description the filter selects. What any other test records is forgotten, so
+/// its function values are not possible values of the program.
 fn tests(program: &mut Program, known: &Known, const_types: &HashMap<ConstId, Ty>) {
     for module in 0..program.modules.len() {
-        let tests: Vec<ast::Block> = program.modules[module]
+        let tests: Vec<(ast::Block, Span, String)> = program.modules[module]
             .analysis
             .file
             .items
             .iter()
             .filter_map(|i| match i {
-                ast::Item::Test(t) => Some(t.body.clone()),
+                ast::Item::Test(t) => Some((
+                    t.body.clone(),
+                    t.span,
+                    crate::interp::description(&t.description),
+                )),
                 _ => None,
             })
             .collect();
-        for body in tests {
+        for (body, span, name) in tests {
+            let runs = program.modules[module].given && program.tests.selects(&name);
+            let mark = program.effect_facts.mark();
             let mut checker = Checker::new(program, known, const_types, module);
             checker.ret = Ty::Unit;
+            if runs {
+                let facts = &mut checker.p.effect_facts;
+                facts.tests.push(effects::TestFact { module, span, name });
+                checker.holder = Some(Holder::Test(facts.tests.len() - 1));
+            }
             checker.scopes.push(Vec::new());
             checker.block(&body);
+            if !runs {
+                program.effect_facts.rewind(mark);
+            }
         }
     }
 }
@@ -1596,9 +1613,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// What has the effects of the code being checked: the innermost lambda, the function, or
-    /// the constant or type whose initializer or field defaults are checked. A test has none,
-    /// but a lambda in a test has its own.
+    /// What has the effects of the code being checked: the innermost lambda, the function,
+    /// the constant or type whose initializer or field defaults are checked, or the test that
+    /// runs (a test that does not run has none, and what it records is forgotten).
     fn effect_holder(&self) -> Option<Holder> {
         if let Some(&l) = self.lambda_stack.last() {
             return Some(Holder::Lambda(l));

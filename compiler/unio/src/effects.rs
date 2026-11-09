@@ -16,6 +16,11 @@
 //! exactly (read from a field, a collection, a pattern, or a parameter that escaped) is any
 //! value the program stores there, or any value of its type, and is called with unknown
 //! arguments.
+//!
+//! The tests of a program count only when they run (RFC 0005, "Tests in the analysis"): the
+//! checks record the values, calls and stores of the tests that `unio test` selects, each
+//! test a holder of its own, and nothing of the other tests, so that `unio check`, `unio run`
+//! and the tests of imported modules and of the standard library leave the program as it is.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -55,13 +60,15 @@ impl Allocation {
 }
 
 /// What has effects: a function, the initializer of a constant, the field defaults of a type,
-/// or the body of a lambda (an index into `Facts::lambdas`).
+/// the body of a lambda (an index into `Facts::lambdas`), or the body of a test that runs (an
+/// index into `Facts::tests`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Holder {
     Func(FnId),
     Const(usize),
     Def(DefId),
     Lambda(usize),
+    Test(usize),
 }
 
 impl From<Node> for Holder {
@@ -120,7 +127,7 @@ pub struct Site {
     pub span: Span,
 }
 
-/// A lambda: the holder that makes it (None in a test), its parameters and its type.
+/// A lambda: the holder that makes it, its parameters and its type.
 pub struct LambdaFact {
     pub parent: Option<Holder>,
     pub module: ModId,
@@ -129,10 +136,19 @@ pub struct LambdaFact {
     pub ty: Ty,
 }
 
+/// A test block that runs: its module, its place and its description.
+pub struct TestFact {
+    pub module: ModId,
+    pub span: Span,
+    pub name: String,
+}
+
 /// What the checks find for the effects.
 #[derive(Default)]
 pub struct Facts {
     pub uses: Vec<Use>,
+    /// The tests that run, each a holder (RFC 0005, tests in the analysis).
+    pub tests: Vec<TestFact>,
     pub sites: Vec<Site>,
     pub lambdas: Vec<LambdaFact>,
     /// Named functions used as values.
@@ -145,6 +161,51 @@ pub struct Facts {
     pub returns: HashMap<FnId, Flow>,
     /// The defaults of parameters that may hold function values.
     pub defaults: HashMap<(FnId, usize), Flow>,
+}
+
+/// How much the checks had recorded, to forget what a test that does not run adds.
+pub struct Mark {
+    uses: usize,
+    sites: usize,
+    lambdas: usize,
+    named: usize,
+    locals: usize,
+    stores: HashMap<(DefId, String), usize>,
+}
+
+impl Facts {
+    pub fn mark(&self) -> Mark {
+        Mark {
+            uses: self.uses.len(),
+            sites: self.sites.len(),
+            lambdas: self.lambdas.len(),
+            named: self.named.len(),
+            locals: self.locals.len(),
+            stores: self
+                .stores
+                .iter()
+                .map(|(k, v)| (k.clone(), v.len()))
+                .collect(),
+        }
+    }
+
+    /// Forgets what was recorded after the mark: the values, calls and stores of a test that
+    /// does not run are not possible values of the program (RFC 0005). A test has no function,
+    /// constant or parameter default of its own, so nothing else can have grown.
+    pub fn rewind(&mut self, mark: Mark) {
+        self.uses.truncate(mark.uses);
+        self.sites.truncate(mark.sites);
+        self.lambdas.truncate(mark.lambdas);
+        self.named.truncate(mark.named);
+        self.locals.truncate(mark.locals);
+        self.stores.retain(|k, v| match mark.stores.get(k) {
+            Some(&n) => {
+                v.truncate(n);
+                true
+            }
+            None => false,
+        });
+    }
 }
 
 /// Whether a value of the type may be a function value, so that its flow matters.
@@ -216,7 +277,7 @@ type Set = BTreeSet<usize>;
 /// What each holder needs, and for each need the use that brings it in, so that a diagnostic
 /// can show the chain of calls down to the function or expression that has it itself.
 /// Holders are numbered functions first, so `effects[f]` is the function `f`; then constants,
-/// then the field defaults of each declaration, then lambdas.
+/// then the field defaults of each declaration, then lambdas, then the tests that run.
 pub struct Derived {
     /// A bit per entry of EFFECTS: what a call of the holder needs, besides its latent effects.
     pub effects: Vec<u8>,
@@ -236,6 +297,7 @@ pub struct Derived {
     functions: usize,
     constants: usize,
     defs: usize,
+    lambdas: usize,
     /// The holder around each lambda.
     parents: Vec<Option<usize>>,
     // The values that may reach each place (RFC 0005).
@@ -344,6 +406,7 @@ impl Derived {
             Holder::Const(c) => self.functions + c,
             Holder::Def(d) => self.functions + self.constants + d,
             Holder::Lambda(l) => self.functions + self.constants + self.defs + l,
+            Holder::Test(t) => self.functions + self.constants + self.defs + self.lambdas + t,
         }
     }
 
@@ -355,8 +418,10 @@ impl Derived {
             Holder::Const(i - f)
         } else if i < f + c + d {
             Holder::Def(i - f - c)
-        } else {
+        } else if i < f + c + d + self.lambdas {
             Holder::Lambda(i - f - c - d)
+        } else {
+            Holder::Test(i - f - c - d - self.lambdas)
         }
     }
 
@@ -372,13 +437,13 @@ impl Derived {
         false
     }
 
-    /// The holder that is not a lambda around `h`, or None for a lambda of a test.
+    /// The holder that is not a lambda around `h`, or None for a test or a lambda in one.
     fn root(&self, h: usize) -> Option<usize> {
         let mut at = h;
         while matches!(self.holder(at), Holder::Lambda(_)) {
             at = self.parents[at]?;
         }
-        Some(at)
+        (!matches!(self.holder(at), Holder::Test(_))).then_some(at)
     }
 
     fn top(&mut self, p: &Program, t: &Ty) -> usize {
@@ -697,7 +762,7 @@ pub fn derive(p: &Program) -> Derived {
     let functions = p.funcs.len();
     let constants = p.consts.len();
     let defs = p.defs.len();
-    let n = functions + constants + defs + facts.lambdas.len();
+    let n = functions + constants + defs + facts.lambdas.len() + facts.tests.len();
     let mut d = Derived {
         effects: vec![0; n],
         effect_via: vec![[None; EFFECTS.len()]; n],
@@ -711,6 +776,7 @@ pub fn derive(p: &Program) -> Derived {
         functions,
         constants,
         defs,
+        lambdas: facts.lambdas.len(),
         parents: vec![None; n],
         locals: vec![Set::new(); facts.locals.len()],
         consts: HashMap::new(),
@@ -1045,6 +1111,10 @@ impl Derived {
                 let name = crate::symbol::node_name(p, Node::Def(d));
                 (name.clone(), name)
             }
+            Holder::Test(t) => {
+                let name = &p.effect_facts.tests[t].name;
+                (format!("the test \"{name}\""), format!("тест \"{name}\""))
+            }
             Holder::Lambda(l) => {
                 let line = p.effect_facts.lambdas[l].span.start.line;
                 match self.parents[h] {
@@ -1342,7 +1412,9 @@ pub fn report(p: &mut Program, profile: Profile) {
                 continue;
             }
             let from = d.idx(u.from);
-            // The lambdas of a test are checked as the test is: not against the manifest.
+            // A test and its lambdas are checked as the test runs: by the sandbox, not
+            // against the manifest. What their values bring into the program is checked
+            // where the program calls them.
             if d.root(from).is_none() {
                 continue;
             }

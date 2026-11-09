@@ -72,7 +72,33 @@ pub fn check_files(files: &[std::path::PathBuf]) -> Vec<Analysis> {
 /// Loads and checks a program: syntax, then, when every module parses, the semantic checks,
 /// the profile and the permissions of the manifest.
 pub fn load_checked(files: &[std::path::PathBuf], profile: effects::Profile) -> program::Program {
+    load_with(files, profile, program::TestScope::None)
+}
+
+/// Loads and checks a program for `unio test`: the tests of the given files whose description
+/// contains the filter run, so their function values count in the effects analysis; the tests
+/// of imported modules and of the standard library do not (RFC 0005, tests in the analysis).
+pub fn load_for_test(files: &[std::path::PathBuf], filter: Option<&str>) -> program::Program {
+    let scope = program::TestScope::Given {
+        filter: filter.map(str::to_string),
+    };
+    load_with(files, effects::Profile::Application, scope)
+}
+
+/// Like check_files, with the analysis of the tests that `unio test` runs with this filter.
+pub fn check_files_for_test(files: &[std::path::PathBuf], filter: Option<&str>) -> Vec<Analysis> {
+    let files = files.to_vec();
+    let filter = filter.map(str::to_string);
+    on_front_end_stack(move || analyses(load_for_test(&files, filter.as_deref())))
+}
+
+fn load_with(
+    files: &[std::path::PathBuf],
+    profile: effects::Profile,
+    tests: program::TestScope,
+) -> program::Program {
     let mut program = program::Program::load(files);
+    program.tests = tests;
     let syntax_ok = program.modules.iter().all(|m| !m.analysis.has_errors());
     if syntax_ok {
         check::check_program(&mut program);
