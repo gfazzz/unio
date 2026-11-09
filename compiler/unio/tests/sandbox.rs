@@ -416,6 +416,126 @@ public function main():
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Audit item 3, second part: a `process` permission lets a child run exactly the listed
+/// programs and read their libraries, nothing else (docs/runtime.md 9.5 and 9.6). The child is
+/// a shell that may run, so it tries the rest itself: running unlisted programs by path and by
+/// name, running one through the dynamic loader, and reading with its own redirections a file
+/// outside the read scopes and `/etc/passwd`. It still reads its permitted input.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_child_runs_and_reads_only_what_the_manifest_lists() {
+    let outside = std::env::temp_dir().join(format!("unio-outside-{}.txt", std::process::id()));
+    fs::write(&outside, SECRET).unwrap();
+    let outside_text = outside.to_string_lossy().into_owned();
+    let program = format!(
+        "{PROGRAM_HEAD}function child(name as Text, script as Text):
+    let output = try process.run(\"sh\", [\"-c\", script], timeout_seconds = 30) on ProcessError as e:
+        print(\"BREACH {{name}}: the child does not start: {{e.reason}}\")
+        return
+    print(output.stdout)
+    if output.status != 0:
+        print(\"denied {{name}}\")
+    else:
+        print(\"BREACH {{name}}\")
+
+public function main():
+    let output = try process.run(\"sh\", [\"-c\", \"exec 3< open/a.txt; IFS= read -r line <&3; printf %s \\\"$line\\\"\"]) on ProcessError as e:
+        print(\"BREACH sh does not start: {{e.reason}}\")
+        return
+    if output.stdout != \"alpha\":
+        print(\"BREACH sh ended with {{output.status}}: {{output.stdout}} {{output.stderr}}\")
+    granted(\"the listed program reads its input\", output.stdout == \"alpha\")
+    child(\"a child runs /bin/cat\", \"/bin/cat open/a.txt\")
+    child(\"a child runs cat through PATH\", \"cat open/a.txt\")
+    child(\"a child runs /usr/bin/env\", \"/usr/bin/env\")
+    child(\"a child runs a program through the loader\", \"for l in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1; do if [ -e $l ]; then exec $l /bin/cat open/a.txt; fi; done; exit 1\")
+    child(\"a child reads a file outside the scopes\", \"exec 3< {outside_text}; IFS= read -r line <&3; printf %s \\\"$line\\\"\")
+    child(\"a child reads /etc/passwd\", \"exec 3< /etc/passwd; IFS= read -r line <&3; printf %s \\\"$line\\\"\")
+"
+    );
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nprocess = [\"sh\"]\n";
+    let dir = package("child-exec", manifest, &program);
+    let output = run(&dir, &[], &[]);
+    let _ = fs::remove_file(&outside);
+    assert_denied(
+        &output,
+        &[
+            "the listed program reads its input",
+            "a child runs /bin/cat",
+            "a child runs cat through PATH",
+            "a child runs /usr/bin/env",
+            "a child runs a program through the loader",
+            "a child reads a file outside the scopes",
+            "a child reads /etc/passwd",
+        ],
+    );
+    assert!(
+        !text(&output.stdout).contains("root:"),
+        "{}",
+        text(&output.stdout)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A descendant of a child that tries to leave the process group with a double fork into a new
+/// session is stopped with the tree at the deadline and does not outlive the call (docs/runtime.md
+/// 9.5). Linux only: the test finds the process by a marker in its command line in `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_that_leaves_the_process_group_is_stopped_at_the_timeout() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("skipped: python3 is not available");
+        return;
+    }
+    let marker = format!("unio-escape-marker-{}", std::process::id());
+    let script = "import os, time\nif os.fork() == 0:\n    if os.fork() != 0:\n        os._exit(0)\n    try:\n        os.setsid()\n    except OSError:\n        pass\n    time.sleep(60)\n    os._exit(0)\ntime.sleep(60)\n";
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():
+    let output = try process.run(\"python3\", [\"-c\", \"{}\", \"{marker}\"], timeout_seconds = 2) on ProcessError as e:
+        report(\"a descendant outlives the deadline\", e.kind == ProcessErrorKind.TimedOut)
+        return
+    print(\"BREACH the call did not time out: {{output.status}} {{output.stderr}}\")
+",
+        script.replace('\n', "\\n")
+    );
+    let manifest = "[permissions]\nprocess = [\"python3\"]\n";
+    let dir = package("child-setsid", manifest, &program);
+    let output = run(&dir, &[], &[]);
+    assert_denied(&output, &["a descendant outlives the deadline"]);
+    let alive = || {
+        fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .bytes()
+                    .all(|b| b.is_ascii_digit())
+            })
+            .any(|e| {
+                fs::read(e.path().join("cmdline"))
+                    .is_ok_and(|c| String::from_utf8_lossy(&c).contains(&marker))
+            })
+    };
+    let mut still = alive();
+    for _ in 0..100 {
+        if !still {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        still = alive();
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !still,
+        "a descendant that left the process group still runs"
+    );
+}
+
 #[test]
 fn a_policy_narrows_the_manifest_and_warns_about_extra_permissions() {
     let program = format!(

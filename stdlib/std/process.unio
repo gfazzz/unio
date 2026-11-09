@@ -24,11 +24,14 @@ public struct Output:
 ## Runs the program with the arguments, waits at most timeout_seconds, and captures both outputs as
 ## UTF-8 text. A program that does not finish in time is stopped and the call fails with kind
 ## TimedOut; output that is not UTF-8 fails with kind InvalidOutput. A non-zero status is not an
-## error: the caller decides what it means. The child runs in the sandbox of the caller.
+## error: the caller decides what it means. The child runs in the sandbox of the caller: on Linux
+## and macOS it may execute only the programs the manifest lists under process (with the
+## interpreters of listed scripts) and read only the read scopes and the system libraries those
+## programs need (docs/runtime.md 9.5).
 ##
 ## The child sees only the environment variables the manifest grants under env, and PATH (on
-## Windows also SystemRoot). It runs in a process tree of its own: a process group on Unix, a Job
-## Object on Windows. When it ends, the processes it started that still run in that tree are
+## Windows also SystemRoot). It runs in a process tree of its own: a process group on Unix, which
+## its descendants cannot leave on Linux, a Job Object on Windows. When it ends, the processes it started that still run in that tree are
 ## stopped; on a timeout the whole tree is stopped. The deadline covers reading the outputs too: if
 ## a process keeps them open after the program ended, the call fails with kind TimedOut at the
 ## deadline. Each of stdout and stderr holds at most 16 MiB (16_777_216 bytes); more fails with

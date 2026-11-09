@@ -6,9 +6,11 @@
 //! - the environment of the child is built, not inherited: the variables the sandbox grants
 //!   under `env` and `PATH` (and `SystemRoot` on Windows), see
 //!   [`crate::sandbox::child_environment`];
-//! - the child runs in a process tree of its own: a new process group on Unix, a Job Object
-//!   with kill-on-close on Windows. When the child ends, what is left of the tree is stopped;
-//!   on timeout, on output over the limit, and on exhaustion the whole tree is stopped;
+//! - the child runs in a process tree of its own: a new process group on Unix, which no
+//!   descendant can leave on Linux (a seccomp filter denies `setsid` and `setpgid`) and whose
+//!   leavers macOS finds through their parents; a Job Object with kill-on-close and without
+//!   breakaway on Windows. When the child ends, what is left of the tree is stopped; on
+//!   timeout, on output over the limit, and on exhaustion the whole tree is stopped;
 //! - the deadline covers the whole call, including reading the outputs: a process that keeps a
 //!   pipe open after leaving the tree cannot make the call wait longer;
 //! - each captured stream holds at most [`OUTPUT_LIMIT`] bytes, and what is captured counts
@@ -75,6 +77,7 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         command.env_clear().envs(environment);
     }
     tree::own_tree(&mut command);
+    crate::sandbox::keep_in_tree(&mut command);
     let child = command
         .args(&args)
         .stdin(Stdio::null())
@@ -294,8 +297,8 @@ mod tree {
     #[cfg(not(target_os = "linux"))]
     const WNOWAIT: i32 = 0x20;
 
-    /// The child leads a new process group, which its descendants join unless they leave it
-    /// (setsid, setpgid).
+    /// The child leads a new process group, which its descendants join; on Linux they cannot
+    /// leave it (`sandbox::keep_in_tree`), on macOS they can (setsid, setpgid).
     pub fn own_tree(command: &mut Command) {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
@@ -323,13 +326,68 @@ mod tree {
         /// runs, so the number of the group still belongs to this tree.
         pub fn stop(&mut self) {
             if self.live {
-                // SAFETY: kill with a negative number signals the process group; it has no
-                // memory effects.
-                unsafe {
-                    kill(-self.group, SIGKILL);
-                }
+                stop_group(self.group);
                 super::unregister(self.group);
                 self.live = false;
+            }
+        }
+    }
+
+    /// Stops a tree: on Linux its descendants cannot leave the group (the filter of
+    /// `sandbox::keep_in_tree`), so SIGKILL to the group stops them all.
+    #[cfg(not(target_os = "macos"))]
+    fn stop_group(group: i32) {
+        // SAFETY: kill with a negative number signals the process group; it has no memory
+        // effects.
+        unsafe {
+            kill(-group, SIGKILL);
+        }
+    }
+
+    /// Stops a tree on macOS, where a descendant can leave the group: the group is frozen with
+    /// SIGSTOP, the descendants of the child are found through their parents and frozen in
+    /// turn, so that none starts another process meanwhile, and then all of them and the group
+    /// get SIGKILL. A descendant whose parent has already ended belongs to launchd and is not
+    /// found (docs/runtime.md 9.5).
+    #[cfg(target_os = "macos")]
+    fn stop_group(group: i32) {
+        const SIGSTOP: i32 = 17;
+        const PROC_PPID_ONLY: u32 = 6;
+        const MOST: usize = 4096;
+        extern "C" {
+            fn proc_listpids(kind: u32, info: u32, buffer: *mut i32, size: i32) -> i32;
+        }
+        // SAFETY: kill has no memory effects.
+        unsafe {
+            kill(-group, SIGSTOP);
+        }
+        let mut found = vec![group];
+        let mut next = 0;
+        let mut buffer = vec![0i32; 1024];
+        while next < found.len() && found.len() < MOST {
+            let parent = found[next];
+            next += 1;
+            let size = i32::try_from(buffer.len() * 4).unwrap_or(i32::MAX);
+            // SAFETY: the buffer holds size bytes; the call writes at most that many and
+            // returns how many it wrote.
+            let bytes =
+                unsafe { proc_listpids(PROC_PPID_ONLY, parent as u32, buffer.as_mut_ptr(), size) };
+            let count = usize::try_from(bytes).unwrap_or(0) / 4;
+            for &pid in &buffer[..count.min(buffer.len())] {
+                if pid > 0 && !found.contains(&pid) {
+                    // SAFETY: as above.
+                    unsafe {
+                        kill(pid, SIGSTOP);
+                    }
+                    found.push(pid);
+                }
+            }
+        }
+        // SAFETY: as above.
+        unsafe {
+            kill(-group, SIGKILL);
+            for &pid in &found[1..] {
+                kill(pid, SIGKILL);
             }
         }
     }
@@ -358,10 +416,7 @@ mod tree {
     /// limits, which ends the process.
     pub fn stop_groups(groups: &[i32]) {
         for &group in groups {
-            // SAFETY: as in Tree::stop.
-            unsafe {
-                kill(-group, SIGKILL);
-            }
+            stop_group(group);
         }
     }
 }
@@ -413,6 +468,11 @@ mod tree {
     }
     const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    /// The flags of the job: kill-on-close only. Neither JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    /// (0x800) nor JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK (0x1000) is set, so a process in the
+    /// job cannot start a child outside it with CREATE_BREAKAWAY_FROM_JOB.
+    const JOB_FLAGS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    const _: () = assert!(JOB_FLAGS & (0x800 | 0x1000) == 0);
 
     /// Nothing to set before the start: the child joins its Job Object right after it starts.
     pub fn own_tree(_: &mut Command) {}
@@ -435,7 +495,7 @@ mod tree {
                     return Tree { job };
                 }
                 let mut limits = ExtendedLimits::default();
-                limits.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                limits.basic.flags = JOB_FLAGS;
                 let set = SetInformationJobObject(
                     job,
                     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,

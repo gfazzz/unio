@@ -4,7 +4,7 @@
 //! every child process (SB-1). The interfaces are declared here by hand, as in the rest of the
 //! runtime, so that the sandbox needs no dependency.
 
-use super::{apply_rlimits, program_paths, Limits, Permissions, Scope};
+use super::{apply_rlimits, children, Limits, Permissions, Scope};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -135,6 +135,26 @@ fn restrict(rules: &[(PathBuf, u64)], denied: &[u32]) -> Result<(), String> {
     Ok(())
 }
 
+/// The directories of shared libraries a child may read, but not execute, when the manifest
+/// lists any program (docs/runtime.md 9.5): the dynamic loader searches them, and programs load
+/// further libraries and modules from them at run time (for example the NSS and `gconv`
+/// modules of the C library, or the library of an interpreter).
+pub const LIBRARY_DIRS: &[&str] = &[
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+    "/usr/libx32",
+    "/usr/local/lib",
+];
+
+/// Single files a child may read when the manifest lists any program: the cache of the dynamic
+/// loader and the time zone of the system.
+const CHILD_FILES: &[&str] = &["/etc/ld.so.cache", "/etc/localtime"];
+
 /// The paths and rights of the Landlock rules of a program. The write scopes grant nothing
 /// here: the program and its children write no file; the writer process writes for the program
 /// and checks the scopes itself (docs/runtime.md 9.2).
@@ -143,46 +163,30 @@ fn rules(permissions: &Permissions) -> Vec<(PathBuf, u64)> {
     for scope in &permissions.read {
         rules.push((scope.root.clone(), READ));
     }
-    // A child of the sandbox can only start: it inherits the rules, so the programs, their
-    // libraries and the files of the dynamic linker must be readable and executable. What a
-    // child reads or writes beyond that is bounded by the scopes of the program (SB-1).
+    // A child inherits these rules. It may execute exactly the listed programs, the interpreters
+    // of listed scripts, and the dynamic loader; it may read the library directories and the
+    // libraries the listed programs need, and otherwise only what the read scopes grant
+    // (docs/runtime.md 9.5 and 9.6). No directory of programs (/usr/bin, the directories of
+    // PATH) is readable or executable as a whole.
     if !permissions.process.is_empty() {
-        let mut system: Vec<PathBuf> = [
-            "/usr",
-            "/bin",
-            "/sbin",
-            "/lib",
-            "/lib32",
-            "/lib64",
-            "/libx32",
-            "/opt",
-            "/nix/store",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-        if let Some(path) = std::env::var_os("PATH") {
-            system.extend(std::env::split_paths(&path));
+        let library_dirs: Vec<PathBuf> = LIBRARY_DIRS
+            .iter()
+            .map(Path::new)
+            .filter(|d| d.is_dir())
+            .map(super::resolve)
+            .collect();
+        for dir in &library_dirs {
+            rules.push((dir.clone(), READ));
         }
-        for dir in system {
-            rules.push((dir, READ | EXECUTE));
+        for file in CHILD_FILES {
+            rules.push((PathBuf::from(file), READ_FILE));
         }
-        for file in [
-            "/etc/ld.so.cache",
-            "/etc/ld.so.conf",
-            "/etc/ld.so.conf.d",
-            "/etc/localtime",
-            "/etc/nsswitch.conf",
-            "/etc/passwd",
-            "/etc/group",
-            "/etc/alternatives",
-        ] {
-            rules.push((PathBuf::from(file), READ | EXECUTE));
+        let needs = children::needs(&permissions.process, &library_dirs);
+        for path in needs.execute {
+            rules.push((path, READ_FILE | EXECUTE));
         }
-        for program in &permissions.process {
-            for path in program_paths(program) {
-                rules.push((path, READ_FILE | EXECUTE));
-            }
+        for path in needs.read {
+            rules.push((path, READ_FILE));
         }
         rules.push((PathBuf::from("/dev/null"), READ_FILE | WRITE_FILE));
     }
@@ -342,6 +346,8 @@ mod nr {
     pub const SOCKET: u32 = 41;
     pub const CLONE: u32 = 56;
     pub const IOCTL: u32 = 16;
+    pub const SETPGID: u32 = 109;
+    pub const SETSID: u32 = 112;
     /// What the writer process does not need besides [`DENIED`]: exec, new processes and
     /// threads, and sockets of any kind.
     pub const WRITER_DENIED: &[u32] = &[
@@ -375,6 +381,8 @@ mod nr {
     pub const SOCKET: u32 = 198;
     pub const CLONE: u32 = 220;
     pub const IOCTL: u32 = 29;
+    pub const SETPGID: u32 = 154;
+    pub const SETSID: u32 = 157;
     pub const WRITER_DENIED: &[u32] = &[
         221, 281, // execve, execveat
         220, // clone
@@ -470,6 +478,65 @@ fn seccomp(extra: &[u32]) -> Result<(), String> {
         return Err(format!("seccomp: {}", std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- the tree of a child
+
+/// The seccomp filter a child of `process.run` installs on itself after it has made its own
+/// process group and before it runs the program (docs/runtime.md 9.5): it and every process it
+/// starts may not call `setsid` or `setpgid`, so no descendant can leave the group, and stopping
+/// the group stops the whole tree. Other architectures than the native one are ended, as in the
+/// filter of the program, since their system calls have other numbers.
+pub struct TreeFilter(Vec<SockFilter>);
+
+/// The filter, or `None` when the kernel has no seccomp; the tree is then ended by its process
+/// group only, which a descendant can leave.
+pub fn tree_filter() -> Option<TreeFilter> {
+    if !seccomp_available() {
+        return None;
+    }
+    let mut f = vec![
+        stmt(LD_W_ABS, OFFSET_ARCH),
+        jump(JEQ_K, nr::ARCH, 1, 0),
+        stmt(RET_K, RET_KILL_PROCESS),
+        stmt(LD_W_ABS, OFFSET_NR),
+    ];
+    if cfg!(target_arch = "x86_64") {
+        f.push(jump(JGE_K, 0x4000_0000, 0, 1));
+        f.push(stmt(RET_K, RET_ERRNO | EPERM));
+    }
+    for number in [nr::SETSID, nr::SETPGID] {
+        f.push(jump(JEQ_K, number, 0, 1));
+        f.push(stmt(RET_K, RET_ERRNO | EPERM));
+    }
+    f.push(stmt(RET_K, RET_ALLOW));
+    Some(TreeFilter(f))
+}
+
+impl TreeFilter {
+    /// Installs the filter on the calling process. It runs in the child between `fork` and
+    /// `exec`, so it only makes system calls on memory prepared before the fork. A child of a
+    /// program without a sandbox gets `no_new_privs` here, which seccomp requires.
+    pub fn install(&self) -> std::io::Result<()> {
+        let program = SockFprog {
+            len: self.0.len() as u16,
+            filter: self.0.as_ptr(),
+        };
+        // SAFETY: integer arguments; then a pointer to the filter, which lives in this process
+        // until exec and is copied by the kernel.
+        unsafe {
+            if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || prctl(
+                    PR_SET_SECCOMP,
+                    SECCOMP_MODE_FILTER,
+                    &program as *const SockFprog,
+                ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 //! permissions of its programs and the sources it still has to load, and the runtime keeps the
 //! exact permissions of each program.
 
-use super::{apply_rlimits, program_paths, Limits, Permissions, Scope};
+use super::{apply_rlimits, children, Limits, Permissions, Scope};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -98,23 +98,27 @@ pub fn profile(permissions: &Permissions) -> String {
     }
     // The write scopes grant nothing here: the program and its children write no file; the
     // writer process writes for the program (docs/runtime.md 9.2, writer_profile).
+    // A child may execute exactly the listed programs and the interpreters of listed scripts
+    // (children.rs), and read and map the system libraries: the dyld shared cache and /usr/lib.
+    // Nothing else may be executed (docs/runtime.md 9.5 and 9.6). Listing the descendants of a
+    // child lets the runtime stop those that left its process group (9.5).
     if !permissions.process.is_empty() {
         p.push_str("(allow process-fork)\n(allow signal (target same-sandbox))\n");
         p.push_str(
-            "(allow file-read* file-map-executable process-exec (subpath \"/usr/lib\") (subpath \"/usr/libexec\") \
+            "(allow file-read* file-map-executable (subpath \"/usr/lib\") \
              (subpath \"/System\") (subpath \"/Library/Apple\") (subpath \"/private/var/db/dyld\") \
-             (subpath \"/private/preboot/Cryptexes\") (subpath \"/usr/share\") \
+             (subpath \"/private/preboot/Cryptexes\") \
              (literal \"/private/etc/localtime\"))\n\
              (allow process-info* (target self))\n\
+             (allow process-info-listpids)\n\
              (allow file-read-data (literal \"/\"))\n",
         );
-        for program in &permissions.process {
-            for path in program_paths(program) {
-                p.push_str(&format!(
-                    "(allow file-read* file-map-executable process-exec (literal {}))\n",
-                    quoted(&path)
-                ));
-            }
+        let needs = children::needs(&permissions.process, &[]);
+        for path in needs.execute {
+            p.push_str(&format!(
+                "(allow file-read* file-map-executable process-exec (literal {}))\n",
+                quoted(&path)
+            ));
         }
     }
     p
@@ -200,6 +204,20 @@ mod tests {
         );
         assert!(p.contains("(allow signal (target children))"), "{p}");
         assert!(!p.contains("process-fork"));
+        let mut with_sh = permissions.clone();
+        with_sh.process.insert("sh".into());
+        let p = profile(&with_sh);
+        let exec: Vec<&str> = p.lines().filter(|l| l.contains("process-exec")).collect();
+        assert!(!exec.is_empty(), "{p}");
+        assert!(
+            exec.iter()
+                .all(|l| l.contains("(literal ") && !l.contains("(subpath ")),
+            "only listed files may be executed: {p}"
+        );
+        assert!(
+            !p.contains("/usr/libexec") && !p.contains("/usr/share"),
+            "{p}"
+        );
         let w = writer_profile(&permissions.write);
         assert!(w.contains("(deny default)"));
         assert!(w.contains("(allow file-read* file-write* (literal \"/h/a.json\"))"));

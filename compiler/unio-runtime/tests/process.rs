@@ -147,3 +147,90 @@ fn captured_output_counts_against_the_heap_limit() {
         "{outcome:?}"
     );
 }
+
+/// Whether python3 can run here; the tests of leaving the process group need `os.setsid`.
+fn python() -> bool {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// A descendant that calls `setsid` to leave the process group of the child is still stopped at
+/// the deadline (docs/runtime.md 9.5). The grandchild writes its number first and then tries to
+/// leave; on Linux the attempt fails, on macOS the runtime finds it through its parent.
+#[test]
+fn a_descendant_that_calls_setsid_is_stopped_at_the_timeout() {
+    if !python() {
+        eprintln!("skipped: python3 is not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("unio-process-setsid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("pid");
+    let script = "import os, sys, time
+if os.fork() == 0:
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    with open(sys.argv[1] + '.tmp', 'w') as f:
+        f.write(str(os.getpid()))
+    os.rename(sys.argv[1] + '.tmp', sys.argv[1])
+    time.sleep(60)
+    os._exit(0)
+time.sleep(60)
+";
+    let path = pid_file.to_string_lossy().into_owned();
+    assert_eq!(kind(run("python3", &["-c", script, &path], 2)), "TimedOut");
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    assert!(
+        gone(&pid),
+        "the grandchild {pid} left the group and still runs"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A double fork into a new session: the grandchild exits at once, so the great-grandchild is
+/// orphaned before it calls `setsid`. Linux denies `setsid` and `setpgid` to every descendant
+/// of a child, so it stays in the group and is stopped with it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_double_fork_into_a_new_session_does_not_escape_the_tree() {
+    if !python() {
+        eprintln!("skipped: python3 is not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("unio-process-daemon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("pid");
+    let script = "import os, sys, time
+if os.fork() == 0:
+    if os.fork() != 0:
+        os._exit(0)
+    left = 'left'
+    try:
+        os.setsid()
+    except OSError:
+        left = 'stayed'
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        pass
+    with open(sys.argv[1] + '.tmp', 'w') as f:
+        f.write(str(os.getpid()) + ' ' + left)
+    os.rename(sys.argv[1] + '.tmp', sys.argv[1])
+    time.sleep(60)
+    os._exit(0)
+time.sleep(60)
+";
+    let path = pid_file.to_string_lossy().into_owned();
+    assert_eq!(kind(run("python3", &["-c", script, &path], 2)), "TimedOut");
+    let record = std::fs::read_to_string(&pid_file).unwrap();
+    let (pid, left) = record.split_once(' ').unwrap();
+    assert_eq!(left, "stayed", "setsid is not denied to a descendant");
+    assert!(gone(pid), "the orphaned descendant {pid} still runs");
+    let _ = std::fs::remove_dir_all(&dir);
+}

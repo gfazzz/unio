@@ -24,6 +24,8 @@
 pub mod toml;
 
 #[cfg(unix)]
+mod children;
+#[cfg(unix)]
 mod fdio;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -899,6 +901,27 @@ pub fn limit_child(command: &mut std::process::Command) {
 
 #[cfg(not(unix))]
 pub fn limit_child(_: &mut std::process::Command) {}
+
+/// Keeps every descendant of a child in the process group the child leads (docs/runtime.md
+/// 9.5): on Linux the child installs a seccomp filter without `setsid` and `setpgid` before it
+/// runs the program. Elsewhere this does nothing; macOS finds descendants that left the group
+/// through their parents when it stops the tree, and Windows uses a Job Object.
+#[cfg(target_os = "linux")]
+pub fn keep_in_tree(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    let Some(filter) = linux::tree_filter() else {
+        return;
+    };
+    // SAFETY: the closure makes two prctl calls on memory owned by the closure, which are
+    // async-signal-safe. The standard library puts the child in its process group before
+    // the closures run, so the filter does not deny that step.
+    unsafe {
+        command.pre_exec(move || filter.install());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn keep_in_tree(_: &mut std::process::Command) {}
 
 #[cfg(unix)]
 const RLIMIT_CPU: i32 = 0;
