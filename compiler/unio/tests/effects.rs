@@ -1040,13 +1040,9 @@ function use_option() returns Int:
 ";
     let dir = package("positive", &[("core.unio", core)]);
     let found = codes(&dir, "core.unio", Profile::Core);
-    assert!(!found.iter().any(|f| f.2.contains("positive")), "{found:?}");
-    assert!(
-        found.iter().all(|f| f.0 == "E0087"
-            && f.2
-                .contains("the lambda on line 247 in sort_singleton_with_faulting_key")),
-        "{found:?}"
-    );
+    // Neither a value made in the library's tests nor a helper that only its tests use is
+    // a call target of the user's program, so the core profile accepts the package.
+    assert!(found.is_empty(), "{found:?}");
     let _ = fs::remove_dir_all(&dir);
 }
 

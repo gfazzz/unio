@@ -243,11 +243,8 @@ test "sorting by key is stable and does not change the input":
     let empty as List[Text] = []
     assert empty.sorted_by(function (item as Text) returns Int: item.length()) == []
 
-function sort_singleton_with_faulting_key():
-    let result = [1].sorted_by(function (item as Int) returns Int: 1 / (item - 1))
-
 test "a singleton still evaluates its sorting key":
-    expect_fault(sort_singleton_with_faulting_key)
+    expect_fault(function (): [1].sorted_by(function (item as Int) returns Int: 1 / (item - 1)))
 
 test "fold, partition and grouping preserve input order":
     let items = [1, 2, 3, 4]
