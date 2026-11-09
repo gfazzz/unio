@@ -1146,15 +1146,6 @@ impl Derived {
             }
         }
     }
-
-    fn holder_module(&self, p: &Program, h: usize) -> ModId {
-        match self.holder(h) {
-            Holder::Func(f) => p.funcs[f].module,
-            Holder::Const(c) => p.consts[c].module,
-            Holder::Def(d) => p.defs[d].module,
-            Holder::Lambda(l) => p.effect_facts.lambdas[l].module,
-        }
-    }
 }
 
 /// The effects an external function of a standard-library module has itself, as bits. An
@@ -1298,12 +1289,17 @@ pub fn report(p: &mut Program, profile: Profile) {
                 let (en, ru) = d.show_chain(p, &chain);
                 let layer = LAYER_NAMES[d.layer[f]];
                 // A chain through a value whose possible values are only estimated cannot show
-                // that the call stays in core (RFC 0005): E0087 at that call.
+                // that the call stays in core (RFC 0005): E0087 at that call when the function
+                // makes it, else at the call of the function that leads to it, so that every
+                // function is reported at a place of its own.
                 if let Some((at, span)) = d.first_uncertain(f, d.layer_via[f], None) {
-                    let span = if d.holder_module(p, at) == def.module {
+                    let span = if d.root(at) == Some(f) {
                         span
                     } else {
-                        def.span
+                        match d.layer_via[f] {
+                            Some(Via::Node(_, s) | Via::Value { span: s, .. }) => s,
+                            _ => def.span,
+                        }
                     };
                     let message = catalog::unproven_value_call(&def.name, layer, (&en, &ru));
                     found.push((def.module, Diagnostic::error("E0087", span, message)));

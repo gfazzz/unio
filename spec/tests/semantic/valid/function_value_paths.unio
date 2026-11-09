@@ -1,0 +1,52 @@
+## RFC 0005: function values travel through parameters, returns, locals, fields, collections,
+## patterns and interfaces; each path is checked, and the tests run every call.
+function double(x as Int) returns Int:
+    return x * 2
+
+function apply(f as Function[(Int) -> Int], x as Int) returns Int:
+    return f(x)
+
+function twice(f as Function[(Int) -> Int], x as Int) returns Int:
+    return apply(f, apply(f, x))
+
+function adder(n as Int) returns Function[(Int) -> Int]:
+    return function (x as Int) returns Int: x + n
+
+function choose(big as Bool) returns Function[(Int) -> Int]:
+    return double if big else adder(1)
+
+struct Step:
+    run as Function[(Int) -> Int]
+
+interface Action:
+    function act(self, x as Int) returns Int
+
+extend Step with Action:
+    function act(self, x as Int) returns Int:
+        return self.run(x)
+
+function act_all(actions as List[Step], x as Int) returns Int:
+    var total = x
+    for a in actions:
+        total = a.act(total)
+    return total
+
+function first_or(steps as List[Function[(Int) -> Int]], x as Int) returns Int:
+    match steps.get(0):
+        case some(f): return f(x)
+        case none: return x
+
+function count_down(n as Int, f as Function[(Int) -> Int], x as Int) returns Int:
+    if n == 0: return x
+    return count_down(n - 1, f, f(x))
+
+test "values passed through parameters are called":
+    assert twice(double, 3) == 12
+    assert count_down(3, adder(2), 0) == 6
+
+test "values returned, stored and read back are called":
+    assert choose(true)(5) == 10
+    assert choose(false)(5) == 6
+    assert act_all([Step(run = double), Step(run = adder(3))], 1) == 5
+    assert first_or([adder(10)], 1) == 11
+    assert first_or([], 1) == 1

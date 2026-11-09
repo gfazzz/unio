@@ -223,7 +223,10 @@ for it (named functions, lambdas, locals, constants, the values stored in a fiel
 a named function), a call through a parameter is a latent effect replaced at each call by the
 argument (`unio symbol` shows it as `argument effects`), and any other value has every function
 value of the program of a matching type, which under `--profile=core` or in a `core` module is
-E0087 when one of them needs more than core; a constant counts for the functions
+E0087 when one of them needs more than core; the sets are complete only for the closed program
+checked (the sources `unio check` reads and the standard library), and a function value from
+outside it is never treated as effect-free, a rule that stays when packages arrive (S7); a
+constant counts for the functions
 that use it, a parameter default for its function, and field defaults for the functions that
 build the type; list, map and comprehension literals, interpolation, `+` on texts and lambdas that
 capture values give `allocates` and the layer `alloc`. A library module that calls a higher
