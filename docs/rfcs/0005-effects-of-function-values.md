@@ -1,6 +1,6 @@
 # RFC 0005: Effects of function values are carried by calls
 
-- Status: proposed (implemented in `unio check` and `unio symbol` for review)
+- Status: accepted (decided by the project lead; the semantics is in docs/semantics.md 8.4 and implemented in `unio check` and `unio symbol`; the tests that confirm the implementation on passing, returning, storing and calling function values, including recursive chains, are being added, see Verification)
 - Author: Unio project, with Claude
 - Date: 2026-11-08
 - Affects: requirements / semantics / compiler
@@ -12,7 +12,7 @@ The effects of a function value are attributed to the calls of the value, not to
 
 ## Motivation
 
-Before this RFC, docs/semantics.md 8.4 charged a function value where it was made: naming a function as a value counted as calling it, and the body of a lambda belonged to the function containing it. That rule is sound for one run, because a value is made before it is called, but it is false for the person reading the effects:
+Before this RFC, docs/semantics.md 8.4 charged a function value where it was made: naming a function as a value counted as calling it, and the body of a lambda belonged to the function containing it. That rule assumed that a value is made before it is called, so that charging the place of creation would cover every later call; it was never shown that this coverage reaches every path a function value travels (fields, collections, returned lambdas, other modules), so the rule was proven neither sound nor complete. It is also false for the person reading the effects:
 
 ```unio
 import std.files as files
@@ -99,6 +99,8 @@ None of these is silent: the chain of E0085 or E0087 names the field, the parame
 
 A function value exists only because a function is named as a value or a lambda is evaluated, and both are recorded. A value moves only by the forms of the table: a binding, an assignment, an argument, a `return`, a field store, or an operation on a collection or a pattern. Each of them is either followed exactly or falls back to the type, whose set contains every value of the program of a type that may be the type at that place, so the value that a run calls is in the set the check uses. A latent effect is replaced at every call of its function; when the call is through a value, the arguments are not known and the escaped set is used. The analysis is a fixpoint over finite sets, so it ends.
 
+This argument, and the completeness of the analysis, hold only for a closed set: the functions, lambdas and interface implementations of the current program, that is, the sources `unio check` reads together with the standard library. In release 0.1 that is the whole program, because dependencies cannot be imported yet (E0048). A function value from a source outside that set is never treated as having no effects: its set is unknown, and a call through it, or through a parameter that may receive it, cannot be accepted as pure where effects are checked (a manifest permission, the core profile). This rule is part of the accepted semantics and must be kept when packages arrive (sprint S7 of docs/plan.md section 12).
+
 ## Migration
 
 Not needed. Programs that were E0085 or E0084 only because they made a value they never called are accepted. A program can become rejected only through a conservative case above; in the repository no program changed (see Verification).
@@ -106,11 +108,13 @@ Not needed. Programs that were E0085 or E0084 only because they made a value the
 ## Alternatives
 
 - **Effect annotations on function types** (`Function[(Path) -> Text uses files.read]`). Declared effects would make every case precise, but L-9b keeps effects out of signatures and the word `uses` is reserved for a later decision; the annotation would also need grammar and corpus work. The inference above covers the cases of the library and the reference programs, and the estimate is visible where it is taken.
-- **Keep charging the place of creation.** Sound for one run, but it describes the wrong function and rejects references that are never called; the project lead does not accept it as the final rule.
+- **Keep charging the place of creation.** Its coverage of the paths a function value travels was never proven, it describes the wrong function, and it rejects references that are never called; the project lead does not accept it as the final rule.
 - **Type-only fallback for fields.** The first draft gave every field read the union of all function values of the field's type. Following the stores of each field is as sound (every write to a field is a construction, a default or an assignment) and much more precise: `std.files` keeps its system calls in fields, and the type-only union mixed the read and write steps of the library.
 - **Context-sensitive analysis of closures.** A lambda returned from a function could keep the arguments of that call. It would remove false rejection 3 for closures, at the cost of a much larger analysis; it can be added later without changing the rule.
 
 ## Verification
+
+Acceptance fixes the semantics of this RFC. The correctness of the implementation is confirmed separately, by tests on passing, returning, storing and calling function values, including recursive chains of calls; these tests are being added. Until they land, the items below are the checks that exist.
 
 - `compiler/unio/tests/symbol.rs`: a stored function value has no effect; `apply` carries the effects of its argument to the caller, with the E0085 chain `app.reading -> app.apply (argument f) -> std.files.read_text`; `List.map`, `List.sorted_by` and `List.try_map` carry the callback's effects to the caller and show `argument effects`; a call through a struct field has the stored values, and under the core profile is E0087 when one of them allocates; the body of a returned lambda counts where it is called, a capturing lambda still allocates where it is made; a constant holding a lambda and a parameter default count where they are called.
 - The catalog has E0087 with an example and its fix (`compiler/unio/tests/catalog.rs`).

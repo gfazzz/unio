@@ -25,4 +25,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 | [0002](0002-brevity-without-implicitness.md) | Brevity without implicitness: lambda parameter types, one-line branches, `is` | accepted |
 | [0003](0003-native-speed-against-go.md) | Native speed and memory measured against Go | accepted |
 | [0004](0004-external-functions-and-unsafe-modules.md) | External functions and unsafe modules in 0.1 | accepted |
-| [0005](0005-effects-of-function-values.md) | Effects of function values are carried by calls | proposed |
+| [0005](0005-effects-of-function-values.md) | Effects of function values are carried by calls | accepted (semantics implemented in `unio check` and `unio symbol`; tests of the implementation being added) |
