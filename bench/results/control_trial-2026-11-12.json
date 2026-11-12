@@ -1,0 +1,54 @@
+{
+  "model": "claude-opus-5-5",
+  "commit": "5563349d0cce705d0357378cd9226914998fefc1",
+  "started": "2026-11-12T14:23:17+00:00",
+  "programs": 200,
+  "criterion": "at least 160 of 200 within 3 attempts",
+  "after": {
+    "1": {
+      "categories": {
+        "types": {
+          "fixed": 42,
+          "programs": 54
+        },
+        "errors": {
+          "fixed": 37,
+          "programs": 50
+        },
+        "resources": {
+          "fixed": 38,
+          "programs": 49
+        },
+        "style": {
+          "fixed": 44,
+          "programs": 47
+        }
+      },
+      "fixed": 161,
+      "programs": 200
+    },
+    "3": {
+      "categories": {
+        "types": {
+          "fixed": 52,
+          "programs": 54
+        },
+        "errors": {
+          "fixed": 46,
+          "programs": 50
+        },
+        "resources": {
+          "fixed": 48,
+          "programs": 49
+        },
+        "style": {
+          "fixed": 46,
+          "programs": 47
+        }
+      },
+      "fixed": 192,
+      "programs": 200
+    }
+  },
+  "met": true
+}
