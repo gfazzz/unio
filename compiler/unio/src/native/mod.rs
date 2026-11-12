@@ -360,6 +360,19 @@ fn find_msvc() -> Option<MsvcLinker> {
     MSVC_FINDER.get().and_then(|find| find())
 }
 
+/// A path without the prefix `\\?\` that canonical paths have, as `C:\...`. Inside the
+/// AppContainer of the link step `link.exe` given the runtime library as `\\?\C:\...` linked
+/// none of its symbols (its own normalization of that form needs the drive letter, which the
+/// container cannot ask for, docs/runtime.md 9.4); the plain form links.
+#[cfg(windows)]
+fn plain_path(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 #[cfg(windows)]
 fn windows_linker(object: &Path, runtime: &Path, out: &Path) -> Result<Linker, String> {
     let tool = find_msvc().ok_or(MSVC_MISSING)?;
@@ -374,10 +387,12 @@ fn windows_linker(object: &Path, runtime: &Path, out: &Path) -> Result<Linker, S
         // The same executable from the same inputs (C-4): no time stamp.
         "/Brepro".into(),
         object.into(),
-        runtime.into(),
+        plain_path(runtime).into(),
     ];
     for lib in [
         "kernel32.lib",
+        // The AppContainers, the access control lists, and the tokens of the sandbox.
+        "advapi32.lib",
         "ntdll.lib",
         "userenv.lib",
         "ws2_32.lib",

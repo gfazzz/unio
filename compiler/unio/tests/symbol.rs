@@ -446,10 +446,6 @@ fn a_core_module_of_the_library_may_not_allocate() {
     .unwrap();
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_unio"));
     command.env("UNIO_STDLIB", &copy).arg("check");
-    if cfg!(windows) {
-        // The operator allows the weaker sandbox of the tool's worker (SB-5, SB-10).
-        command.arg("--allow-weaker-sandbox");
-    }
     let output = command
         .arg("--diagnostics=json")
         .arg(&extra)

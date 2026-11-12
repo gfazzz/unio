@@ -29,10 +29,13 @@ use crate::runtime::Runtime;
 use crate::sandbox::tree;
 use crate::value::Value;
 use std::io::{ErrorKind, Read};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
+#[cfg(not(windows))]
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+use tree::Child;
 
 pub const BINDINGS: &[(&str, ExternFn)] = &[("std.process.run", run)];
 
@@ -102,29 +105,17 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         .unwrap_or(started + Duration::from_secs(u32::MAX.into()));
     crate::sandbox::may_run(program)
         .map_err(|reason| process_error(program, "PermissionDenied", reason))?;
-    let mut command = Command::new(program);
-    crate::sandbox::limit_child(&mut command);
-    if let Some(environment) = crate::sandbox::child_environment() {
-        command.env_clear().envs(environment);
-    }
-    tree::prepare(&mut command);
     // The output on the way counts against the heap limit before the child starts.
     runtime.reserve_heap(IN_FLIGHT)?;
     let in_flight = Counted::new(InFlight);
-    let mut child = command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            let kind = match e.kind() {
-                ErrorKind::NotFound => "NotFound",
-                ErrorKind::PermissionDenied => "PermissionDenied",
-                _ => "Other",
-            };
-            process_error(program, kind, e.to_string())
-        })?;
+    let mut child = spawn(program, &args).map_err(|e| {
+        let kind = match e.kind() {
+            ErrorKind::NotFound => "NotFound",
+            ErrorKind::PermissionDenied => "PermissionDenied",
+            _ => "Other",
+        };
+        process_error(program, kind, e.to_string())
+    })?;
     let tree = tree::Tree::start(&mut child, tree::applied_marker().cloned()).map_err(|e| {
         process_error(
             program,
@@ -178,6 +169,17 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         }
         if status.is_some() && open == 0 {
             break;
+        }
+        if running.tree.over_limit() {
+            let limit = crate::sandbox::process_budget().map_or(0, |(limit, _)| limit);
+            return Err(process_error(
+                program,
+                "PermissionDenied",
+                format!(
+                    "denied by the sandbox: the process tree started more processes than the \
+                     policy allows the program ({limit}) and was stopped"
+                ),
+            ));
         }
         let now = Instant::now();
         if now >= deadline {
@@ -238,6 +240,66 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     );
     runtime.check_heap()?;
     Ok(result)
+}
+
+/// Starts the child suspended in its tree where the system needs that (Windows), with the
+/// environment the sandbox grants, standard input empty and both outputs piped.
+#[cfg(not(windows))]
+fn spawn(program: &str, args: &[String]) -> std::io::Result<Child> {
+    let mut command = Command::new(program);
+    crate::sandbox::limit_child(&mut command);
+    if let Some(environment) = crate::sandbox::child_environment() {
+        command.env_clear().envs(environment);
+    }
+    tree::prepare(&mut command);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+/// Windows: the program is found as `windows::find_program` finds it, through the `PATH` the
+/// child receives, and created suspended in the AppContainer of the running program (none
+/// without a sandbox). A batch file is not started: Windows runs it through `cmd.exe`, which
+/// then reads its arguments as commands.
+#[cfg(windows)]
+fn spawn(program: &str, args: &[String]) -> std::io::Result<Child> {
+    use crate::sandbox::windows as w;
+    use std::ffi::{OsStr, OsString};
+    let env: Option<Vec<(OsString, OsString)>> = crate::sandbox::child_environment().map(|vars| {
+        vars.into_iter()
+            .map(|(k, v)| (OsString::from(k), v))
+            .collect()
+    });
+    let path = match &env {
+        Some(vars) => vars
+            .iter()
+            .find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.clone()),
+        None => std::env::var_os("PATH"),
+    };
+    let found = w::find_program(OsStr::new(program), path.as_deref())
+        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "the program is not found"))?;
+    let extension = found
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    if matches!(extension.as_deref(), Some("bat" | "cmd")) {
+        return Err(std::io::Error::other(
+            "a batch file runs only through cmd.exe, which must be listed and run instead",
+        ));
+    }
+    crate::sandbox::with_container(|container| {
+        let mut command = w::Command::new(&found);
+        command.args = args.iter().map(OsString::from).collect();
+        command.env = env;
+        command.stdin = w::Stdio::Null;
+        command.stdout = w::Stdio::Piped;
+        command.stderr = w::Stdio::Piped;
+        command.container = container;
+        w::spawn(&command)
+    })
 }
 
 /// The bytes of a counted buffer; the value that receives them counts them again.

@@ -21,7 +21,8 @@ fn directory_of(path: &Path) -> PathBuf {
 
 /// Whether the file system that holds the path keeps the guarantees of S-9.
 pub fn supports_durability(path: &Path) -> bool {
-    let directory = match std::fs::canonicalize(crate::sandbox::absolute(&directory_of(path))) {
+    let directory = match crate::sandbox::canonical(&crate::sandbox::absolute(&directory_of(path)))
+    {
         Ok(d) => d,
         Err(_) => return false,
     };
@@ -144,49 +145,11 @@ pub fn file_system_name(directory: &Path) -> Option<String> {
     String::from_utf8(name).ok()
 }
 
+/// Windows: asked through a handle of the directory itself, which needs no access to the root
+/// of the volume (`sandbox::windows::file_system_name`).
 #[cfg(windows)]
 pub fn file_system_name(directory: &Path) -> Option<String> {
-    use std::os::windows::ffi::OsStrExt;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetVolumePathNameW(file_name: *const u16, volume_path: *mut u16, length: u32) -> i32;
-        fn GetVolumeInformationW(
-            root: *const u16,
-            volume_name: *mut u16,
-            volume_name_size: u32,
-            serial_number: *mut u32,
-            maximum_component_length: *mut u32,
-            flags: *mut u32,
-            file_system_name: *mut u16,
-            file_system_name_size: u32,
-        ) -> i32;
-    }
-
-    let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut root = vec![0u16; 1024];
-    let mut name = vec![0u16; 64];
-    // SAFETY: the buffers are as long as the lengths passed, and the strings end with 0.
-    unsafe {
-        if GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) == 0 {
-            return None;
-        }
-        if GetVolumeInformationW(
-            root.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            name.as_mut_ptr(),
-            name.len() as u32,
-        ) == 0
-        {
-            return None;
-        }
-    }
-    let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-    String::from_utf16(&name[..end]).ok()
+    crate::sandbox::windows::file_system_name(directory)
 }
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]

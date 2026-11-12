@@ -33,35 +33,11 @@ pub fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// Windows has no sandbox of the operating system for programs or for the workers of the tools
-/// yet, so `unio` refuses there with code 103 unless the operator allows a weaker sandbox
-/// (SB-5, SB-10). The functional tests act as that operator through the external policy; the
-/// refusal itself is tested separately without it.
+/// Windows has the sandbox of the operating system now (AppContainers, docs/runtime.md 9.4), so
+/// the operator no longer allows a weaker one for the tests there; this does nothing and stays
+/// for the callers that still name it.
 #[allow(dead_code)]
-pub fn allow_weaker_on_windows(command: &mut std::process::Command) {
-    if cfg!(windows) {
-        command.env("UNIO_POLICY", weaker_policy());
-    }
-}
-
-/// A policy file that only allows the weaker sandbox.
-#[allow(dead_code)]
-pub fn weaker_policy() -> PathBuf {
-    // Written once per test process and put in place by a rename: tests run in parallel, and
-    // rewriting the file for each of them let a `unio` started by another test read it while
-    // it was empty, a policy without `allow_weaker` (code 103 on Windows).
-    static POLICY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    POLICY
-        .get_or_init(|| {
-            let dir = std::env::temp_dir();
-            let policy = dir.join(format!("unio-weaker-{}.toml", std::process::id()));
-            let partial = dir.join(format!("unio-weaker-{}.toml.partial", std::process::id()));
-            fs::write(&partial, "allow_weaker = true\n").unwrap();
-            fs::rename(&partial, &policy).unwrap();
-            policy
-        })
-        .clone()
-}
+pub fn allow_weaker_on_windows(_: &mut std::process::Command) {}
 
 /// The resources of the programs of the reserve for `release` (C-17): `Log` builds 2,000 texts
 /// in its `release`, more than a full heap allows, so that it can only run from the reserve;
@@ -141,7 +117,7 @@ public function main() returns Int:
 
 /// A fresh package for a program of the reserve: `RESERVE_PRELUDE` and `body` in `main.unio`,
 /// a manifest that lets it write `open/`, `open/target.txt` holding "old content", and
-/// `policy.toml` with a heap limit of 8 MiB (on Windows also allowing the weaker sandbox).
+/// `policy.toml` with a heap limit of 8 MiB.
 #[allow(dead_code)]
 pub fn reserve_package(prefix: &str, name: &str, body: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-reserve-{name}", std::process::id()));
@@ -154,33 +130,23 @@ pub fn reserve_package(prefix: &str, name: &str, body: &str) -> PathBuf {
     )
     .unwrap();
     fs::write(dir.join("main.unio"), format!("{RESERVE_PRELUDE}{body}")).unwrap();
-    let weaker = if cfg!(windows) {
-        "allow_weaker = true\n"
-    } else {
-        ""
-    };
     fs::write(
         dir.join("policy.toml"),
-        format!("{weaker}[limits]\nheap_bytes = 8_388_608\n"),
+        "[limits]\nheap_bytes = 8_388_608\n",
     )
     .unwrap();
     fs::canonicalize(dir).unwrap()
 }
 
 /// Writes the policy of a reserve package with a heap limit of `heap` bytes, or without a heap
-/// limit for `None` (on Windows also allowing the weaker sandbox).
+/// limit for `None`.
 #[allow(dead_code)]
 pub fn set_heap_limit(dir: &Path, heap: Option<usize>) {
-    let weaker = if cfg!(windows) {
-        "allow_weaker = true\n"
-    } else {
-        ""
-    };
     let limits = match heap {
         Some(bytes) => format!("[limits]\nheap_bytes = {bytes}\n"),
         None => String::new(),
     };
-    fs::write(dir.join("policy.toml"), format!("{weaker}{limits}")).unwrap();
+    fs::write(dir.join("policy.toml"), limits).unwrap();
 }
 
 /// Puts a reserve package back as it was made: no temporary file, the old target.

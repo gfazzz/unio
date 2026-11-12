@@ -33,15 +33,18 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod tree;
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod windows;
 pub mod worker;
 #[cfg(unix)]
 pub mod writer;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -221,7 +224,7 @@ fn resolve_lexically(absolute: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut prefix = lexical.as_path();
     loop {
-        if let Ok(real) = std::fs::canonicalize(prefix) {
+        if let Ok(real) = canonical(prefix) {
             let mut out = real;
             for part in rest.iter().rev() {
                 out.push(part);
@@ -236,6 +239,18 @@ fn resolve_lexically(absolute: &Path) -> PathBuf {
             _ => return lexical,
         }
     }
+}
+
+/// `std::fs::canonicalize`, also where an AppContainer cannot normalize a name the usual way
+/// (`windows::canonicalize`).
+#[cfg(windows)]
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    windows::canonicalize(path)
+}
+
+#[cfg(not(windows))]
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
 }
 
 /// The path without `.`, and with each `..` removing the name before it, by the text alone.
@@ -698,9 +713,49 @@ fn apply_writer_os(scopes: &[Scope]) -> Result<(), String> {
 
 struct Active {
     sandbox: Sandbox,
-    processes: Cell<u64>,
+    /// The processes the program has started: its calls of `process.run`, and, where the
+    /// system lets the runtime see them, every process a child or its descendants created
+    /// (docs/runtime.md 9.5). Shared with the thread or the Job Object that counts the trees.
+    processes: Arc<AtomicU64>,
     #[cfg(unix)]
     writer: Option<writer::Session>,
+    /// The AppContainers of the program and the tokens of its thread (Windows).
+    #[cfg(windows)]
+    windows: Option<windows::Program>,
+}
+
+/// The limit of processes of the running program and the count it is checked against; `None`
+/// without a sandbox or without a limit.
+pub fn process_budget() -> Option<(u64, Arc<AtomicU64>)> {
+    let a = active()?;
+    let limit = a.sandbox.limits.processes?;
+    Some((limit, Arc::clone(&a.processes)))
+}
+
+/// Runs a write-class operation of `std.files`. On Windows the thread of a program takes the
+/// token of its writer for it, the AppContainer that holds the write grants, and returns to
+/// the token of the program afterwards (docs/runtime.md 9.2); elsewhere it just runs.
+pub(crate) fn writing<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(windows)]
+    if let Some(a) = active() {
+        if let Some(program) = &a.windows {
+            return program.as_writer(f);
+        }
+    }
+    f()
+}
+
+/// The AppContainer the children of the running program are created in, with the thread's own
+/// token set aside while it creates them (Windows); `None` without a sandbox.
+#[cfg(windows)]
+pub(crate) fn with_container<R>(f: impl FnOnce(Option<&windows::Container>) -> R) -> R {
+    match active() {
+        Some(a) => match &a.windows {
+            Some(program) => program.without_token(|| f(Some(program.container()))),
+            None => f(None),
+        },
+        None => f(None),
+    }
 }
 
 /// Calls `f` with the writer of the running program; `None` without a sandbox or without
@@ -769,7 +824,7 @@ pub fn may_write(path: &str) -> bool {
 
 /// The path that [`read_target`] returned, split at the scope that covers it, when a sandbox
 /// is active on this thread; `None` without one, where the path is used as given.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 fn below_scope(target: &Path) -> std::io::Result<Option<beneath::Anchored>> {
     let Some(a) = active() else {
         return Ok(None);
@@ -783,15 +838,20 @@ fn below_scope(target: &Path) -> std::io::Result<Option<beneath::Anchored>> {
 // docs/runtime.md 9.2). In a sandbox on Linux and macOS each opens the checked path from the
 // directory of its scope without following a link in any component ([`fdio::open_checked`]),
 // so a link that another process puts on the path after the check makes the operation fail
-// instead of leading it out of the scope. On Windows the checked path is still opened by its
-// name: handle-relative opening plugs in here through [`beneath::Beneath`] and
-// [`beneath::walk`], with [`below_scope`] giving the anchor.
+// instead of leading it out of the scope. On Windows the same walk opens each name relative to
+// the handle of the one before (`NtCreateFile` with `RootDirectory` and
+// `FILE_OPEN_REPARSE_POINT`) and refuses a handle whose attributes name a reparse point
+// ([`windows::open_checked`]).
 
 /// Opens a file for reading at a path that [`read_target`] returned.
 pub fn open_for_reading(target: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     if let Some(anchored) = below_scope(target)? {
         return fdio::open_checked(&anchored, fdio::Want::Read).map(std::fs::File::from);
+    }
+    #[cfg(windows)]
+    if let Some(anchored) = below_scope(target)? {
+        return windows::open_checked(&anchored, windows::Want::Read).map(std::fs::File::from);
     }
     std::fs::File::open(target)
 }
@@ -802,6 +862,10 @@ pub fn entry_kind(target: &Path) -> std::io::Result<beneath::Kind> {
     #[cfg(unix)]
     if let Some(anchored) = below_scope(target)? {
         return fdio::kind_checked(&anchored);
+    }
+    #[cfg(windows)]
+    if let Some(anchored) = below_scope(target)? {
+        return windows::kind_checked(&anchored);
     }
     let metadata = std::fs::metadata(target)?;
     Ok(if metadata.is_dir() {
@@ -822,6 +886,11 @@ pub fn list_directory(
         let dir = fdio::open_checked(&anchored, fdio::Want::Directory)?;
         return fdio::list_names(dir, each);
     }
+    #[cfg(windows)]
+    if let Some(anchored) = below_scope(target)? {
+        let dir = windows::open_checked(&anchored, windows::Want::Directory)?;
+        return windows::list_names(&dir, each);
+    }
     for entry in std::fs::read_dir(target)? {
         if !each(&entry?.file_name()) {
             break;
@@ -834,12 +903,90 @@ pub fn list_directory(
 /// a sandbox the check has resolved it already, so it is confirmed to exist without following a
 /// link and returned as it is: the name of a place outside the scope is never reported.
 pub fn resolve_existing(target: &Path) -> std::io::Result<PathBuf> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     if below_scope(target)?.is_some() {
         entry_kind(target)?;
         return Ok(target.to_path_buf());
     }
-    std::fs::canonicalize(absolute(target))
+    canonical(&absolute(target))
+}
+
+/// The directory that holds an entry of a write-class operation, opened from the directory of
+/// the write scope that covers the entry without following a link in any component, and the
+/// last name of the entry. On Windows, which has no writer process, the writes of the runtime
+/// use it, so that a link put on the path after the check cannot lead them out of the scope
+/// (release condition 5, docs/runtime.md 9.2). A temporary file of a commit next to a target of
+/// a scope of one file is opened from the directory of that target. `None` without a sandbox.
+#[cfg(windows)]
+fn write_parent(
+    entry: &Path,
+) -> std::io::Result<Option<(std::os::windows::io::OwnedHandle, std::ffi::OsString)>> {
+    let Some(a) = active() else {
+        return Ok(None);
+    };
+    let write = &a.sandbox.permissions.write;
+    let anchored = match beneath::anchor(entry, write) {
+        Some(anchored) => anchored,
+        None => match (entry.parent(), entry.file_name()) {
+            (Some(dir), Some(name))
+                if write
+                    .iter()
+                    .any(|s| !s.subtree && s.root.parent() == Some(dir)) =>
+            {
+                beneath::Anchored {
+                    anchor: dir.to_path_buf(),
+                    rest: vec![name.to_os_string()],
+                }
+            }
+            _ => return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        },
+    };
+    windows::open_parent(&anchored).map(Some)
+}
+
+/// Creates a new file for writing at an entry the checks permitted, relative to its directory
+/// opened below its scope (Windows); `None` without a sandbox.
+#[cfg(windows)]
+pub(crate) fn create_new_checked(entry: &Path) -> Option<std::io::Result<std::fs::File>> {
+    match write_parent(entry) {
+        Ok(Some((dir, name))) => Some(windows::create_new_in(&dir, &name)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// Creates a directory at an entry the checks permitted, as [`create_new_checked`].
+#[cfg(windows)]
+pub(crate) fn make_directory_checked(entry: &Path) -> Option<std::io::Result<()>> {
+    match write_parent(entry) {
+        Ok(Some((dir, name))) => Some(windows::make_directory_in(&dir, &name)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// Removes the file at an entry the checks permitted, as [`create_new_checked`].
+#[cfg(windows)]
+pub(crate) fn remove_checked(entry: &Path) -> Option<std::io::Result<()>> {
+    match write_parent(entry) {
+        Ok(Some((dir, name))) => Some(windows::remove_in(&dir, &name)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// Renames one entry the checks permitted to another, each opened relative to its directory
+/// below its scope; with `replace` an existing target is replaced, written through.
+#[cfg(windows)]
+pub(crate) fn rename_checked(from: &Path, to: &Path, replace: bool) -> Option<std::io::Result<()>> {
+    let parents = write_parent(from).and_then(|f| Ok((f, write_parent(to)?)));
+    match parents {
+        Ok((Some((from_dir, from_name)), Some((to_dir, to_name)))) => Some(windows::rename_in(
+            &from_dir, &from_name, &to_dir, &to_name, replace,
+        )),
+        Ok(_) => None,
+        Err(e) => Some(Err(e)),
+    }
 }
 
 /// Whether the path is a temporary file `.<name>.unio-tmp-<id>` of the atomic commit protocol
@@ -913,7 +1060,7 @@ pub fn may_run(program: &str) -> Result<(), String> {
             "denied by the sandbox: the manifest does not permit process {program}"
         ));
     }
-    let started = a.processes.get();
+    let started = a.processes.load(Ordering::SeqCst);
     if let Some(limit) = a.sandbox.limits.processes {
         if started >= limit {
             return Err(format!(
@@ -921,7 +1068,7 @@ pub fn may_run(program: &str) -> Result<(), String> {
             ));
         }
     }
-    a.processes.set(started + 1);
+    a.processes.fetch_add(1, Ordering::SeqCst);
     Ok(())
 }
 
@@ -1018,8 +1165,9 @@ pub fn enter(
     // The writer starts before the restrictions apply, so that it does not inherit them.
     #[cfg(unix)]
     sandbox.start_writer()?;
-    let missing = apply_os(&sandbox, process_wide, allow_weaker)?;
     let stop = Arc::new(AtomicBool::new(false));
+    let processes = Arc::new(AtomicU64::new(0));
+    let applied = apply_os(&sandbox, process_wide, allow_weaker, &processes, &stop)?;
     if sandbox.limits.wall_seconds.is_some() || sandbox.limits.cpu_seconds.is_some() {
         watchdog(&sandbox.limits, Arc::clone(&stop));
     }
@@ -1028,12 +1176,17 @@ pub fn enter(
     ACTIVE.with(|a| {
         *a.borrow_mut() = Some(Rc::new(Active {
             sandbox,
-            processes: Cell::new(0),
+            processes,
             #[cfg(unix)]
             writer,
+            #[cfg(windows)]
+            windows: applied.windows,
         }))
     });
-    Ok(Guard { stop, missing })
+    Ok(Guard {
+        stop,
+        missing: applied.missing,
+    })
 }
 
 /// Enters only the runtime part of the sandbox on this thread: its checks and its limits,
@@ -1046,9 +1199,11 @@ pub fn enter_checks_only(sandbox: Sandbox) -> Guard {
     ACTIVE.with(|a| {
         *a.borrow_mut() = Some(Rc::new(Active {
             sandbox,
-            processes: Cell::new(0),
+            processes: Arc::new(AtomicU64::new(0)),
             #[cfg(unix)]
             writer: None,
+            #[cfg(windows)]
+            windows: None,
         }))
     });
     Guard {
@@ -1057,8 +1212,16 @@ pub fn enter_checks_only(sandbox: Sandbox) -> Guard {
     }
 }
 
+/// What the restrictions of the operating system left: what is missing (SB-5), and on Windows
+/// the AppContainers of the program.
+struct Applied {
+    missing: Vec<String>,
+    #[cfg(windows)]
+    windows: Option<windows::Program>,
+}
+
 /// What a weaker sandbox lacks, as words for the operator.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn refuse(missing: &[String]) -> Refused {
     Refused(format!(
         "the sandbox cannot be applied on this system; missing: {}. The operator can allow a \
@@ -1072,14 +1235,24 @@ fn apply_os(
     sandbox: &Sandbox,
     _process_wide: &Permissions,
     allow_weaker: bool,
-) -> Result<Vec<String>, Refused> {
+    processes: &Arc<AtomicU64>,
+    stop: &Arc<AtomicBool>,
+) -> Result<Applied, Refused> {
     working_directory();
     let missing = linux::missing();
     if !missing.is_empty() && !allow_weaker {
         return Err(refuse(&missing));
     }
     linux::apply(&sandbox.permissions, &sandbox.limits).map_err(Refused)?;
-    Ok(missing)
+    // The limit of processes holds for the whole tree of every child: each process a
+    // descendant creates is counted, and creations past the limit fail (docs/runtime.md 9.5).
+    if let Some(limit) = sandbox.limits.processes {
+        if missing.is_empty() {
+            linux::count_processes(limit, Arc::clone(processes), Arc::clone(stop))
+                .map_err(Refused)?;
+        }
+    }
+    Ok(Applied { missing })
 }
 
 #[cfg(target_os = "macos")]
@@ -1087,31 +1260,59 @@ fn apply_os(
     sandbox: &Sandbox,
     process_wide: &Permissions,
     _allow_weaker: bool,
-) -> Result<Vec<String>, Refused> {
+    _processes: &Arc<AtomicU64>,
+    _stop: &Arc<AtomicBool>,
+) -> Result<Applied, Refused> {
     working_directory();
     macos::apply(process_wide, &sandbox.limits).map_err(Refused)?;
-    Ok(Vec::new())
+    Ok(Applied {
+        missing: Vec::new(),
+    })
 }
 
-/// Windows and other systems: AppContainer and Job Objects are not implemented yet (SB-4), so
-/// only the checks of the runtime and the limits of the watchdog apply.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: the thread of the program impersonates a token of a fresh AppContainer that holds
+/// grants on exactly the read scopes and the listed programs; a second AppContainer holds the
+/// write grants for the writes of the runtime; children are created in the first one
+/// (`windows.rs`, docs/runtime.md 9.4).
+#[cfg(windows)]
+fn apply_os(
+    sandbox: &Sandbox,
+    _process_wide: &Permissions,
+    _allow_weaker: bool,
+    _processes: &Arc<AtomicU64>,
+    _stop: &Arc<AtomicBool>,
+) -> Result<Applied, Refused> {
+    working_directory();
+    let program = windows::Program::enter(&sandbox.permissions).map_err(|e| {
+        Refused(format!(
+            "the AppContainer of the program cannot be set up: {e}"
+        ))
+    })?;
+    Ok(Applied {
+        missing: Vec::new(),
+        windows: Some(program),
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn apply_os(
     _sandbox: &Sandbox,
     _process_wide: &Permissions,
     allow_weaker: bool,
-) -> Result<Vec<String>, Refused> {
-    let missing = vec![
-        "file system restrictions of the operating system (AppContainer is not implemented)"
-            .to_string(),
-        "restrictions of child processes and the network (Job Object and AppContainer are not \
-         implemented)"
-            .to_string(),
-    ];
+    _processes: &Arc<AtomicU64>,
+    _stop: &Arc<AtomicBool>,
+) -> Result<Applied, Refused> {
+    let missing =
+        vec!["restrictions of the operating system (no sandbox for this system)".to_string()];
     if !allow_weaker {
-        return Err(refuse(&missing));
+        return Err(Refused(format!(
+            "the sandbox cannot be applied on this system; missing: {}. The operator can allow \
+             a weaker sandbox with --allow-weaker-sandbox or allow_weaker = true in the policy \
+             (SB-5)",
+            missing.join("; ")
+        )));
     }
-    Ok(missing)
+    Ok(Applied { missing })
 }
 
 /// Ends the process with code 102 when the wall or CPU time of the policy is used up (C-18:
@@ -1556,9 +1757,11 @@ mod tests {
                 ACTIVE.with(|a| {
                     *a.borrow_mut() = Some(Rc::new(Active {
                         sandbox,
-                        processes: Cell::new(0),
+                        processes: Arc::new(AtomicU64::new(0)),
                         #[cfg(unix)]
                         writer: None,
+                        #[cfg(windows)]
+                        windows: None,
                     }))
                 });
                 assert!(may_read(&text(dir.join("in"))));

@@ -596,6 +596,197 @@ impl TreeFilter {
     }
 }
 
+// ---------------------------------------------------------------- the limit of processes
+
+/// `SECCOMP_RET_USER_NOTIF`: the call waits until the listener answers.
+const RET_USER_NOTIF: u32 = 0x7fc0_0000;
+const SECCOMP_SET_MODE_FILTER: u32 = 1;
+const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
+const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
+/// `SECCOMP_IOCTL_NOTIF_RECV` and `SECCOMP_IOCTL_NOTIF_SEND`: `_IOWR('!', 0 and 1, ...)` of
+/// the structures below (80 and 24 bytes).
+const NOTIF_RECV: u64 = 0xC050_2100;
+const NOTIF_SEND: u64 = 0xC018_2101;
+const EAGAIN: i32 = 11;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_SECCOMP: i64 = 317;
+#[cfg(target_arch = "aarch64")]
+const SYS_SECCOMP: i64 = 277;
+#[cfg(target_arch = "x86_64")]
+const SYS_GETTID: i64 = 186;
+#[cfg(target_arch = "aarch64")]
+const SYS_GETTID: i64 = 178;
+/// The calls that always make a process: `fork` and `vfork` (x86_64 only).
+#[cfg(target_arch = "x86_64")]
+const FORKS: &[u32] = &[57, 58];
+#[cfg(target_arch = "aarch64")]
+const FORKS: &[u32] = &[];
+
+#[repr(C)]
+#[derive(Default)]
+struct Notification {
+    id: u64,
+    pid: u32,
+    flags: u32,
+    nr: i32,
+    arch: u32,
+    instruction_pointer: u64,
+    args: [u64; 6],
+}
+
+#[repr(C)]
+struct Response {
+    id: u64,
+    value: i64,
+    error: i32,
+    flags: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<Notification>() == 80);
+const _: () = assert!(std::mem::size_of::<Response>() == 24);
+
+/// The filter that makes every creation of a process wait for the listener: `fork`, `vfork`,
+/// and `clone` without `CLONE_THREAD` (`clone3` already fails with ENOSYS in the filter of the
+/// program, and the C library then uses `clone`). Threads are not affected.
+fn process_filter() -> Vec<SockFilter> {
+    let n = FORKS.len();
+    let allow = 6 + n;
+    let notify = 7 + n;
+    let mut f = vec![
+        stmt(LD_W_ABS, OFFSET_ARCH),
+        // Another architecture is ended by the filter of the program.
+        jump(JEQ_K, nr::ARCH, 0, (allow - 2) as u8),
+        stmt(LD_W_ABS, OFFSET_NR),
+    ];
+    for (i, &number) in FORKS.iter().enumerate() {
+        f.push(jump(JEQ_K, number, (notify - (3 + i) - 1) as u8, 0));
+    }
+    f.push(jump(JEQ_K, nr::CLONE, 0, 2));
+    f.push(stmt(LD_W_ABS, offset_arg(0)));
+    f.push(jump(JSET_K, CLONE_THREAD, 0, 1));
+    f.push(stmt(RET_K, RET_ALLOW));
+    f.push(stmt(RET_K, RET_USER_NOTIF));
+    f
+}
+
+/// Enforces the limit of processes of the program on the trees of its children (A11,
+/// docs/runtime.md 9.5). The calling thread, the thread of the program, installs a filter
+/// that makes it and every process it starts wait for this process before a new process is
+/// made; a thread of this process answers. A creation by the program itself is a call of
+/// `process.run`, which the runtime counted already; every other creation, by any process of a
+/// tree, counts one more and fails with EAGAIN once `limit` processes have been counted. The
+/// filter cannot be removed and is inherited by every descendant, so no process of a tree
+/// escapes the count. When the program ends, the thread stops, and a creation that would still
+/// ask fails.
+pub fn count_processes(
+    limit: u64,
+    counted: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let filter = process_filter();
+    let program = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+    // SAFETY: gettid has no arguments; seccomp copies the filter, which lives until it
+    // returns, and returns a new descriptor that is owned from here on.
+    let (tid, listener) = unsafe {
+        let tid = syscall(SYS_GETTID) as u32;
+        let fd = syscall(
+            SYS_SECCOMP,
+            SECCOMP_SET_MODE_FILTER as i64,
+            SECCOMP_FILTER_FLAG_NEW_LISTENER as i64,
+            &program as *const SockFprog,
+        );
+        if fd < 0 {
+            return Err(format!(
+                "the limit of processes of the policy needs seccomp user notification (Linux 5.5): \
+                 {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        (tid, OwnedFd::from_raw_fd(fd as i32))
+    };
+    let spawned = std::thread::Builder::new()
+        .name("unio-processes".into())
+        .spawn(move || answer(listener, tid, limit, &counted, &stop));
+    // Without the thread every creation would wait for nothing: fail closed.
+    spawned
+        .map(|_| ())
+        .map_err(|e| format!("the limit of processes cannot be kept: {e}"))
+}
+
+/// Answers the requests of the filter until the program ends.
+fn answer(
+    listener: std::os::fd::OwnedFd,
+    program: u32,
+    limit: u64,
+    counted: &std::sync::atomic::AtomicU64,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::Ordering;
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    extern "C" {
+        fn poll(fds: *mut PollFd, count: u64, timeout: i32) -> i32;
+        fn ioctl(fd: i32, request: u64, ...) -> i32;
+    }
+    const POLLIN: i16 = 1;
+    let fd = listener.as_raw_fd();
+    while !stop.load(Ordering::SeqCst) {
+        let mut waiting = PollFd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd that lives through the call.
+        let ready = unsafe { poll(&mut waiting, 1, 50) };
+        if ready <= 0 || waiting.revents & POLLIN == 0 {
+            if waiting.revents & !POLLIN != 0 {
+                return;
+            }
+            continue;
+        }
+        let mut request = Notification::default();
+        // SAFETY: the kernel fills the zeroed structure of the size the request names.
+        if unsafe { ioctl(fd, NOTIF_RECV, &mut request as *mut Notification) } != 0 {
+            // The process that asked has ended meanwhile.
+            continue;
+        }
+        let allowed = if request.pid == program {
+            true
+        } else {
+            counted
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    (n < limit).then_some(n + 1)
+                })
+                .is_ok()
+        };
+        let mut response = Response {
+            id: request.id,
+            value: 0,
+            error: if allowed { 0 } else { -EAGAIN },
+            flags: if allowed {
+                SECCOMP_USER_NOTIF_FLAG_CONTINUE
+            } else {
+                0
+            },
+        };
+        // SAFETY: the structure of the size the request names; a request whose process has
+        // ended fails, which needs nothing.
+        unsafe {
+            ioctl(fd, NOTIF_SEND, &mut response as *mut Response);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,9 +801,11 @@ mod tests {
         for f in [
             filter(nr::WRITER_DENIED, false),
             filter(nr::WORKER_DENIED, true),
+            process_filter(),
         ] {
             assert!(f.len() < 200);
-            assert_eq!(f.last().map(|s| (s.code, s.k)), Some((RET_K, RET_ALLOW)));
+            let last = f.last().map(|s| (s.code, s.k));
+            assert!(last == Some((RET_K, RET_ALLOW)) || last == Some((RET_K, RET_USER_NOTIF)));
             for (i, s) in f.iter().enumerate() {
                 if s.code & 0x07 == 0x05 {
                     assert!(i + 1 + (s.jt.max(s.jf) as usize) < f.len());

@@ -191,4 +191,4 @@ Accepted are regular files and directories with portable relative names: ASCII l
 - An upload service: a registry is a directory that its publisher serves or copies.
 - Target and runtime requirements in manifests (language-contracts section 6 asks installation to validate them); 0.1 manifests declare none.
 - Yanking, which the requirements do not ask for, and removing old cache entries.
-- On Windows the workers have no restriction of files and the network yet (SB-4), so the download worker connects itself and the tools need the weaker sandbox there ([runtime.md](runtime.md) 9.7).
+- On Windows each worker is a process of its own AppContainer without network (SB-4), and the download worker inherits the connection the tool opened, as on Linux and macOS ([runtime.md](runtime.md) 9.4, 9.7).

@@ -13,9 +13,10 @@
 //!   make), and resource limits: address space, CPU time, file size, no core files;
 //! - macOS: a deny-by-default Seatbelt profile (read and write trees, no process, no network)
 //!   and resource limits; the tool watches the memory footprint, which macOS does not limit;
-//! - Windows: a Job Object with the memory limit and one active process, so the worker cannot
-//!   start another one. The file system and the network are not restricted there yet
-//!   (AppContainer is not implemented, SB-4); the tool says so.
+//! - Windows: the tool creates the worker in an AppContainer of its own (`windows.rs`), with
+//!   grants on exactly its scopes and no capability, so no network; the worker checks that it
+//!   runs in one and joins a Job Object with the memory limit and one active process, so it
+//!   cannot start another one.
 //!
 //! The wall-time limit is kept by the tool, which stops the worker.
 
@@ -65,8 +66,9 @@ pub struct Toolchain {
 /// dynamic loader may be executed, and the libraries they need outside the library directories
 /// may be read. On macOS the programs come from the developer tools (Xcode or the command line
 /// tools), whose tree may be read and its libraries mapped, and the system libraries come from
-/// the dyld shared cache and `/usr/lib`. Empty where no link step exists (Windows links with
-/// the variables of Visual Studio and has no file system restrictions yet, SB-4).
+/// the dyld shared cache and `/usr/lib`. Empty on Windows: `link.exe`, the libraries of Visual
+/// Studio, and the Windows SDK are under `Program Files`, which every application package may
+/// read and execute.
 pub fn toolchain(programs: &std::collections::BTreeSet<String>) -> Toolchain {
     #[cfg(target_os = "linux")]
     {
@@ -136,12 +138,10 @@ pub fn missing() -> Vec<String> {
     return super::linux::missing();
     #[cfg(target_os = "macos")]
     return Vec::new();
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return vec![
-        "file system and network restrictions of the operating system for the worker \
-         (AppContainer is not implemented)"
-            .to_string(),
-    ];
+    #[cfg(windows)]
+    return Vec::new();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    return vec!["restrictions of the operating system for the worker".to_string()];
 }
 
 /// Applies the rules to the calling process. On Linux the restrictions hold for the calling
@@ -178,6 +178,11 @@ pub fn apply(rules: &Rules) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
+        // The AppContainer is set up by the tool, which grants exactly the scopes of the rules;
+        // a worker started any other way fails closed (SB-5).
+        if !super::windows::in_app_container() {
+            return Err("the worker does not run in an AppContainer".into());
+        }
         windows::join_job(&rules.limits, rules.processes)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

@@ -9,20 +9,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{allow_weaker_on_windows, repo_root, unio_files};
+use common::{repo_root, unio_files};
 
 fn unio() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
     command.current_dir(repo_root());
-    allow_weaker_on_windows(&mut command);
     command
 }
 
-/// Windows has no sandbox of the operating system yet (SB-4), so `unio run` and `unio test`
-/// refuse to start there (SB-5); the tests act as the operator and allow the weaker sandbox
-/// through a policy.
 /// Standard error of a program without the warnings that the operator allowed a weaker
-/// sandbox, which Windows prints before every program and every worker of the tools.
+/// sandbox, which a system without a mechanism of SB-4 prints before every program and every
+/// worker of the tools.
 fn program_err(output: &std::process::Output) -> String {
     text(&output.stderr)
         .lines()
@@ -152,7 +149,6 @@ fn run(program: &Path, args: &[&str], dir: &Path, env: &[(&str, &Path)]) -> Outp
         .arg(program)
         .arg("--")
         .args(args);
-    allow_weaker_on_windows(&mut command);
     for (name, value) in env {
         command.env(name, value);
     }

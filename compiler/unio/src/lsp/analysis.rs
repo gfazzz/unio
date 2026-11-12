@@ -87,13 +87,14 @@ struct Paths {
 }
 
 impl Paths {
-    /// The canonical path, as the loader computes it; for a file not saved yet, its directory's.
+    /// The canonical path, as the loader computes it (inside the AppContainer of a worker on
+    /// Windows too, docs/runtime.md 9.4); for a file not saved yet, its directory's.
     fn canonical(&self, path: &Path) -> PathBuf {
-        if let Ok(p) = std::fs::canonicalize(path) {
+        if let Ok(p) = unio_runtime::sandbox::canonical(path) {
             return p;
         }
         match (path.parent(), path.file_name()) {
-            (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            (Some(dir), Some(name)) => unio_runtime::sandbox::canonical(dir)
                 .map(|d| d.join(name))
                 .unwrap_or_else(|_| path.to_path_buf()),
             _ => path.to_path_buf(),

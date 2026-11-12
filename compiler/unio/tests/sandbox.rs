@@ -52,16 +52,10 @@ fn with_decoys(manifest: &str) -> String {
     out
 }
 
-/// A policy file; on Windows, where the operating system part of the sandbox is missing, the
-/// tests act as the operator and allow the weaker sandbox (SB-5).
+/// A policy file.
 fn policy(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("policy.toml");
-    let weaker = if cfg!(windows) {
-        "allow_weaker = true\n"
-    } else {
-        ""
-    };
-    fs::write(&path, format!("{weaker}{body}")).unwrap();
+    fs::write(&path, body).unwrap();
     path
 }
 
@@ -72,9 +66,6 @@ fn run(dir: &Path, options: &[&str], envs: &[(&str, &str)]) -> Output {
         .current_dir(dir)
         .env_remove("UNIO_POLICY")
         .arg("run");
-    if cfg!(windows) && !options.iter().any(|o| o.starts_with("--policy")) {
-        command.arg("--allow-weaker-sandbox");
-    }
     command.args(options).arg("main.unio");
     for (name, value) in envs {
         command.env(name, value);
@@ -420,6 +411,59 @@ public function main():
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// On Windows a child runs in the AppContainer of the program: it reads only the read scopes,
+/// writes nothing, reaches no network, and its own children are in the same container
+/// (docs/runtime.md 9.4). The child is `cmd`, which tries the rest itself.
+#[cfg(windows)]
+#[test]
+fn child_processes_inherit_the_appcontainer_on_windows() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let program = format!(
+        "{PROGRAM_HEAD}function child(name as Text, arguments as List[Text]):
+    let output = try process.run(\"cmd\", arguments, timeout_seconds = 30) on ProcessError as e:
+        print(\"BREACH {{name}}: the child does not start: {{e.reason}}\")
+        return
+    if output.status != 0:
+        print(\"denied {{name}}\")
+    else:
+        print(\"BREACH {{name}}: {{output.stdout}}\")
+
+public function main():
+    let output = try process.run(\"cmd\", [\"/c\", \"type\", \"open\\\\a.txt\"]) on ProcessError as e:
+        print(\"BREACH cmd does not start: {{e.reason}}\")
+        return
+    granted(\"process.run\", output.stdout == \"alpha\")
+    child(\"a child reads a closed file\", [\"/c\", \"type\", \"closed\\\\secret.txt\"])
+    child(\"a child writes a closed file\", [\"/c\", \"echo x> closed\\\\new.txt\"])
+    child(\"a child writes in a read scope\", [\"/c\", \"echo x> open\\\\new.txt\"])
+    child(\"a child writes the file the program may write\", [\"/c\", \"echo x> open\\\\out.txt\"])
+    child(\"a grandchild reads a closed file\", [\"/c\", \"cmd /c type closed\\\\secret.txt\"])
+    child(\"a child connects to the network\", [\"/c\", \"curl.exe -s -m 5 http://127.0.0.1:{port}/\"])
+"
+    );
+    let manifest = "[permissions]\nfiles.read = [\"$CWD/open/**\"]\nfiles.write = [\"$CWD/open/out.txt\"]\nprocess = [\"cmd\"]\n";
+    let dir = package("children-windows", manifest, &program);
+    let output = run(&dir, &[], &[]);
+    assert_denied(
+        &output,
+        &[
+            "process.run",
+            "a child reads a closed file",
+            "a child writes a closed file",
+            "a child writes in a read scope",
+            "a child writes the file the program may write",
+            "a grandchild reads a closed file",
+            "a child connects to the network",
+        ],
+    );
+    assert!(!dir.join("closed/new.txt").exists());
+    assert!(!dir.join("open/new.txt").exists());
+    assert!(!dir.join("open/out.txt").exists());
+    drop(listener);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Audit item 3, second part: a `process` permission lets a child run exactly the listed
 /// programs and read their libraries, nothing else (docs/runtime.md 9.5 and 9.6). The child is
 /// a shell that may run, so it tries the rest itself: running unlisted programs by path and by
@@ -746,6 +790,72 @@ fn the_limits_of_a_policy_end_the_program_or_fail_the_operation() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Audit item A11: `limits.processes` holds for the whole tree of a child, not only for the
+/// calls of `process.run` (docs/runtime.md 9.5). The child starts five processes that compute
+/// for a while; under a limit of three (the child and two more) the third start fails on Linux
+/// (the shell cannot fork), and on macOS and Windows the tree is stopped and the call fails;
+/// under a limit of ten every process runs. On Unix the processes are subshells of a listed
+/// `sh`, on Windows `cmd` instances of a listed `cmd`.
+#[test]
+fn a_child_that_starts_more_processes_than_the_limit_is_stopped_or_its_starts_fail() {
+    let (program, arguments, manifest) = if cfg!(windows) {
+        (
+            "cmd",
+            "[\"/c\", \"cmd /c echo 1 & cmd /c echo 2 & cmd /c echo 3 & cmd /c echo 4 & cmd /c echo 5 & echo all\"]",
+            "[permissions]\nprocess = [\"cmd\"]\n",
+        )
+    } else {
+        (
+            "sh",
+            "[\"-c\", \"for n in 1 2 3 4 5; do (i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done; echo $n) & done; wait; echo all\"]",
+            "[permissions]\nprocess = [\"sh\"]\n",
+        )
+    };
+    let source = format!(
+        "{PROGRAM_HEAD}public function main():
+    let output = try process.run(\"{program}\", {arguments}, timeout_seconds = 120) on ProcessError as e:
+        print(\"stopped {{e.kind == ProcessErrorKind.PermissionDenied}}: {{e.reason}}\")
+        return
+    print(\"status {{output.status}}\")
+    print(output.stdout)
+    print(output.stderr)
+"
+    );
+    for (limit, all_run) in [(3, false), (10, true)] {
+        let dir = package(&format!("tree-limit-{limit}"), manifest, &source);
+        let file = policy(&dir, &format!("[limits]\nprocesses = {limit}\n"));
+        let output = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+        let out = text(&output.stdout);
+        let err = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{out}{err}");
+        let finished = out.lines().any(|l| l.trim() == "all");
+        if all_run {
+            assert!(
+                finished,
+                "under a limit of {limit} every process runs:\n{out}{err}"
+            );
+            assert!(out.contains("status 0"), "{out}{err}");
+        } else {
+            assert!(
+                !finished,
+                "the tree went past the limit of {limit}:\n{out}{err}"
+            );
+            if cfg!(target_os = "linux") {
+                assert!(
+                    out.contains("fork"),
+                    "the shell reports the failed fork:\n{out}{err}"
+                );
+            } else if out.starts_with("stopped") {
+                assert!(
+                    out.starts_with("stopped true: denied by the sandbox"),
+                    "{out}{err}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 #[test]
 fn a_policy_or_manifest_that_cannot_be_used_stops_the_start_with_code_103() {
     let program = "public function main():\n    print(\"ran\")\n";
@@ -814,8 +924,10 @@ fn a_policy_or_manifest_that_cannot_be_used_stops_the_start_with_code_103() {
 }
 
 /// Without the mechanisms of the operating system the sandbox fails closed unless the operator
-/// allows a weaker one, which then names what is missing (SB-5).
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// allows a weaker one, which then names what is missing (SB-5). Linux, macOS, and Windows have
+/// every mechanism; on Linux the refusal is tested where Landlock is missing
+/// (`unio-runtime`).
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[test]
 fn a_missing_mechanism_fails_closed() {
     let dir = package(
@@ -852,9 +964,6 @@ fn tests_run_in_the_sandbox_of_their_package() {
         .current_dir(&dir)
         .env_remove("UNIO_POLICY")
         .arg("test");
-    if cfg!(windows) {
-        command.arg("--allow-weaker-sandbox");
-    }
     let output = command.arg("main.unio").output().unwrap();
     let out = text(&output.stdout);
     assert!(output.status.success(), "{out}{}", text(&output.stderr));
@@ -864,19 +973,24 @@ fn tests_run_in_the_sandbox_of_their_package() {
 
 /// A child sees only the variables the manifest grants under `env`, and PATH (docs/runtime.md
 /// 9.5): a secret in the environment of `unio run` does not reach it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_child_sees_only_the_granted_environment() {
-    let program = format!(
+    // `env` on Unix; on Windows `cmd /c set`, which also shows the variables cmd sets itself.
+    let (program, lister) = if cfg!(windows) {
+        ("cmd", "\"cmd\", [\"/c\", \"set\"]")
+    } else {
+        ("env", "\"env\", []")
+    };
+    let program_text = format!(
         "{PROGRAM_HEAD}public function main():
-    let output = try process.run(\"env\", []) on ProcessError as e:
-        print(\"BREACH env does not start: {{e.reason}}\")
+    let output = try process.run({lister}) on ProcessError as e:
+        print(\"BREACH the child does not start: {{e.reason}}\")
         return
     print(output.stdout)
 "
     );
-    let manifest = "[permissions]\nenv = [\"UNIO_ALLOWED\"]\nprocess = [\"env\"]\n";
-    let dir = package("child-env", manifest, &program);
+    let manifest = format!("[permissions]\nenv = [\"UNIO_ALLOWED\"]\nprocess = [\"{program}\"]\n");
+    let dir = package("child-env", &manifest, &program_text);
     let output = run(
         &dir,
         &[],
@@ -889,8 +1003,26 @@ fn a_child_sees_only_the_granted_environment() {
         .iter()
         .filter_map(|l| l.split_once('=').map(|(name, _)| name))
         .collect();
+    // On Windows also SystemRoot, which system libraries need, the folders of the
+    // AppContainer's own profile, which the system sets, and what cmd sets itself.
+    let permitted: &[&str] = if cfg!(windows) {
+        &[
+            "UNIO_ALLOWED",
+            "Path",
+            "PATH",
+            "SystemRoot",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+            "COMSPEC",
+            "PATHEXT",
+            "PROMPT",
+        ]
+    } else {
+        &["UNIO_ALLOWED", "PATH"]
+    };
     assert!(
-        names.iter().all(|n| ["UNIO_ALLOWED", "PATH"].contains(n)),
+        names.iter().all(|n| permitted.contains(n)),
         "the child sees variables that are not granted: {names:?}"
     );
     let _ = fs::remove_dir_all(&dir);

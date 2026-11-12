@@ -77,13 +77,6 @@ impl Project {
             .env_remove("UNIO_WORKER_PROBE")
             .env("HOME", self.path("home"))
             .args(args);
-        if cfg!(windows) {
-            // The operator allows the weaker sandbox through the external policy (SB-5, SB-10);
-            // the refusal without it is tested on its own below.
-            let policy = self.path("weaker.toml");
-            fs::write(&policy, "allow_weaker = true\n").unwrap();
-            command.env("UNIO_POLICY", policy);
-        }
         for (name, value) in envs {
             command.env(name, value);
         }
@@ -100,13 +93,7 @@ impl Project {
 
     fn policy(&self, body: &str) -> PathBuf {
         let path = self.path("policy.toml");
-        // On Windows the operator must allow the weaker sandbox (SB-5, SB-10).
-        let weaker = if cfg!(windows) {
-            "allow_weaker = true\n"
-        } else {
-            ""
-        };
-        fs::write(&path, format!("{weaker}{body}")).unwrap();
+        fs::write(&path, body).unwrap();
         path
     }
 }
@@ -207,49 +194,47 @@ fn a_linked_source_outside_the_package_cannot_be_read() {
 }
 
 /// (b) A manifest that is a link to a key of the operator, and the key by its path: neither can
-/// be read, and nothing of the key reaches the output.
-#[cfg(unix)]
+/// be read, and nothing of the key reaches the output. On Windows, where making a link needs a
+/// privilege, the key is read by its path only.
 #[test]
 fn files_of_the_home_directory_cannot_be_read() {
     let p = Project::new("home");
-    fs::remove_file(p.pkg().join("unio.toml")).unwrap();
-    std::os::unix::fs::symlink(p.path("home/.ssh/id_rsa"), p.pkg().join("unio.toml")).unwrap();
-    let output = p.unio(&["check", "main.unio"], &[]);
-    assert!(!all(&output).contains(SECRET), "{}", all(&output));
     let key = p.path("home/.ssh/id_rsa");
-    let output = p.probe(&[
-        op("read", &key),
-        op("read", &p.pkg().join("unio.toml")),
-        op("list", &p.path("home")),
-        "read=/etc/passwd".into(),
-    ]);
-    assert_denied(
-        &output,
-        &[
-            op("read", &key),
-            op("read", &p.pkg().join("unio.toml")),
-            op("list", &p.path("home")),
-            "read=/etc/passwd".into(),
-        ],
-    );
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut probes = vec![op("read", &key), op("list", &p.path("home"))];
+    #[cfg(unix)]
+    {
+        fs::remove_file(p.pkg().join("unio.toml")).unwrap();
+        std::os::unix::fs::symlink(&key, p.pkg().join("unio.toml")).unwrap();
+        let output = p.unio(&["check", "main.unio"], &[]);
+        assert!(!all(&output).contains(SECRET), "{}", all(&output));
+        probes.push(op("read", &p.pkg().join("unio.toml")));
+        probes.push("read=/etc/passwd".into());
+    }
+    let output = p.probe(&probes);
+    assert!(!all(&output).contains(SECRET), "{}", all(&output));
+    assert_denied(&output, &probes);
 }
 
 /// (c) The worker writes nothing but its temporary directory: not the package, not a `target/`
-/// that is a link to elsewhere, not the home directory.
-#[cfg(unix)]
+/// that is a link to elsewhere (Unix), not the home directory.
 #[test]
 fn the_worker_writes_only_its_temporary_directory() {
     let p = Project::new("write");
-    std::os::unix::fs::symlink(p.path("outside"), p.pkg().join("target")).unwrap();
-    let denied = vec![
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut denied = vec![
         op("write", &p.pkg().join("new.unio")),
         op("write", &p.pkg().join("main.unio")),
         op("mkdir", &p.pkg().join("build")),
-        op("write", &p.pkg().join("target/escaped.txt")),
         op("write", &p.path("outside/escaped.txt")),
         op("write", &p.path("home/.bashrc")),
         op("remove", &p.pkg().join("main.unio")),
     ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(p.path("outside"), p.pkg().join("target")).unwrap();
+        denied.push(op("write", &p.pkg().join("target/escaped.txt")));
+    }
     let mut probes = denied.clone();
     probes.push("write-temp".into());
     let output = p.probe(&probes);
@@ -260,20 +245,22 @@ fn the_worker_writes_only_its_temporary_directory() {
     assert!(p.pkg().join("main.unio").exists());
 }
 
-/// (c) `unio fmt` replaces exactly the files it was given, through the writer process; the
-/// worker cannot write them itself, nor any other file, and a given link is not followed.
-#[cfg(unix)]
+/// (c) `unio fmt` replaces exactly the files it was given, through the writer process on Unix;
+/// the worker cannot write them itself, nor any other file, and a given link is not followed.
+/// On Windows the worker's AppContainer may write exactly the given files in place, and no
+/// other.
 #[test]
 fn fmt_writes_only_the_given_files_through_the_writer() {
     let p = Project::new("fmt");
     let ugly = "public function main():\n    let x = 1+2\n    print(\"{x}\")\n";
     fs::write(p.pkg().join("a.unio"), ugly).unwrap();
     fs::write(p.pkg().join("b.unio"), ugly).unwrap();
-    std::os::unix::fs::symlink(p.path("outside/secret.unio"), p.pkg().join("link.unio")).unwrap();
-    let probes = [
-        op("write", &p.pkg().join("a.unio")),
-        op("write", &p.pkg().join("b.unio")),
-    ];
+    // On Windows the worker may write the given file itself, so a probe of it would replace
+    // the source before it is formatted: only the other file is probed there.
+    let mut probes = vec![op("write", &p.pkg().join("b.unio"))];
+    if cfg!(unix) {
+        probes.insert(0, op("write", &p.pkg().join("a.unio")));
+    }
     let output = p.unio(
         &["fmt", "a.unio"],
         &[("UNIO_WORKER_PROBE", &probes.join(";"))],
@@ -283,6 +270,11 @@ fn fmt_writes_only_the_given_files_through_the_writer() {
     let formatted = fs::read_to_string(p.pkg().join("a.unio")).unwrap();
     assert!(formatted.contains("1 + 2"), "{formatted}");
     assert_eq!(fs::read_to_string(p.pkg().join("b.unio")).unwrap(), ugly);
+    if cfg!(windows) {
+        return;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(p.path("outside/secret.unio"), p.pkg().join("link.unio")).unwrap();
     // A given link is read through the sandbox, which refuses its target outside the package.
     let before = fs::read_to_string(p.path("outside/secret.unio")).unwrap();
     let output = p.unio(&["fmt", "link.unio"], &[]);
@@ -294,15 +286,19 @@ fn fmt_writes_only_the_given_files_through_the_writer() {
     );
 }
 
-/// (d) No network: neither TCP to a listening port of this machine nor a UDP socket.
-#[cfg(unix)]
+/// (d) No network: neither TCP to a listening port of this machine nor, on Unix, a UDP socket.
+/// On Windows the AppContainer may create and bind a socket but reaches no address, not even
+/// the loopback; the connection is what is checked there.
 #[test]
 fn the_worker_has_no_network() {
     let p = Project::new("net");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
-    let probes = vec![format!("connect={address}"), "udp".to_string()];
+    let mut probes = vec![format!("connect={address}")];
+    if cfg!(unix) {
+        probes.push("udp".to_string());
+    }
     let output = p.probe(&probes);
     assert_denied(&output, &probes);
     assert!(
@@ -342,10 +338,7 @@ fn the_worker_cannot_start_a_process() {
     )
     .unwrap();
     for command in [&["test", "main.unio"][..], &["run", "main.unio"][..]] {
-        let mut args = command.to_vec();
-        if cfg!(windows) {
-            args.insert(1, "--allow-weaker-sandbox");
-        }
+        let args = command.to_vec();
         let output = p.unio(&args, &[("UNIO_WORKER_PROBE", &probes.join(";"))]);
         assert_denied(&output, &probes);
         assert_eq!(output.status.code(), Some(0), "{}", all(&output));
@@ -353,54 +346,76 @@ fn the_worker_cannot_start_a_process() {
     assert!(!marker.exists());
 }
 
-/// On Windows the worker cannot restrict files and the network, so the tools refuse with code
-/// 103 before they read the project, unless the operator allows a weaker sandbox by the flag or
-/// the external policy; a project cannot allow it in its manifest (SB-5, SB-10).
+/// On Windows the tool creates every worker in an AppContainer of its own; a worker started any
+/// other way, here directly with a valid configuration, stops with code 103 before it reads the
+/// project, even when the configuration allows a weaker sandbox (SB-5, SB-10).
 #[cfg(windows)]
 #[test]
-fn the_tools_refuse_a_weaker_sandbox_on_windows_unless_the_operator_allows_it() {
-    let p = Project::new("refuse");
+fn a_worker_outside_its_appcontainer_fails_closed() {
+    use std::io::Write;
+    let p = Project::new("outside");
+    let hex = |path: &std::path::Path| -> String {
+        path.as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let temp = p.path("worker-temp");
+    fs::create_dir_all(&temp).unwrap();
+    for weaker in ["0", "1"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_unio"))
+            .current_dir(p.pkg())
+            .args(["__unio-worker", "tool", "check", "main.unio"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let config = format!(
+            "unio-worker 1\nparent {}\ntemp {}\nstdlib -\nread 1 {}\nmemory {}\nweaker {weaker}\nend\n",
+            std::process::id(),
+            hex(&temp),
+            hex(&p.pkg()),
+            1u64 << 30
+        );
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(config.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(103), "{}", all(&output));
+        assert!(
+            text(&output.stderr).contains("does not run in an AppContainer"),
+            "{}",
+            all(&output)
+        );
+    }
+}
+
+/// A project cannot allow a weaker sandbox in its manifest (SB-5, SB-10): the key grants
+/// nothing, `fmt` runs as without it, and `check` reports the key itself as a mistake of the
+/// manifest (RFC 0008, E0088).
+#[test]
+fn a_manifest_cannot_allow_a_weaker_sandbox() {
+    let p = Project::new("manifest-weaker");
     fs::write(
         p.pkg().join("unio.toml"),
         "[package]\nname = \"refuse\"\nversion = \"0.1.0\"\nallow_weaker = true\n",
     )
     .unwrap();
-    for args in [
-        &["check", "main.unio"][..],
-        &["fmt", "--check", "main.unio"][..],
-    ] {
-        let mut command = p.command(args, &[("UNIO_WORKER_PROBE", "marker")]);
-        command.env_remove("UNIO_POLICY");
-        let output = command.output().unwrap();
-        assert_eq!(output.status.code(), Some(103), "{}", all(&output));
-        assert!(
-            text(&output.stderr).contains("--allow-weaker-sandbox"),
-            "{}",
-            all(&output)
-        );
-        let mut allowed: Vec<&str> = args.to_vec();
-        allowed.insert(1, "--allow-weaker-sandbox");
-        let mut command = p.command(&allowed, &[]);
-        command.env_remove("UNIO_POLICY");
-        let output = command.output().unwrap();
-        // The key grants nothing: with the operator's flag `fmt` runs, and `check` reports the
-        // key itself as a mistake of the manifest (RFC 0008), at its line.
-        if args[0] == "check" {
-            assert_eq!(output.status.code(), Some(1), "{}", all(&output));
-            assert!(
-                all(&output).contains("E0088") && all(&output).contains("allow_weaker"),
-                "{}",
-                all(&output)
-            );
-        } else {
-            assert_eq!(output.status.code(), Some(0), "{}", all(&output));
-        }
-        assert!(
-            text(&output.stderr).contains("weaker sandbox"),
-            "{}",
-            all(&output)
-        );
-    }
+    let output = p.unio(&["check", "main.unio"], &[]);
+    assert_eq!(output.status.code(), Some(1), "{}", all(&output));
+    assert!(
+        all(&output).contains("E0088") && all(&output).contains("allow_weaker"),
+        "{}",
+        all(&output)
+    );
+    let output = p.unio(&["fmt", "--check", "main.unio"], &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+    assert!(!all(&output).contains("weaker sandbox"), "{}", all(&output));
 }
 
 /// (e) On Windows the Job Object of the worker allows one process: the worker itself.
@@ -729,6 +744,7 @@ fn the_worker_sees_only_the_language_variables() {
         .split(',')
         .filter(|n| !n.is_empty())
         .collect();
+    // On Windows the system sets the folders of the AppContainer's own profile as well.
     let permitted = [
         "UNIO_LANG",
         "LANG",
@@ -736,6 +752,12 @@ fn the_worker_sees_only_the_language_variables() {
         "LC_ALL",
         "LC_MESSAGES",
         "SystemRoot",
+        #[cfg(windows)]
+        "LOCALAPPDATA",
+        #[cfg(windows)]
+        "TEMP",
+        #[cfg(windows)]
+        "TMP",
     ];
     assert!(
         names.iter().all(|n| permitted.contains(n)),

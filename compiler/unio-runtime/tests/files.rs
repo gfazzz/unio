@@ -446,7 +446,7 @@ fn repeating_a_text_over_the_heap_limit_is_exhaustion() {
 /// Runs `f` on a thread with only the runtime checks of a sandbox whose read and write scope is
 /// `scope/**`: the weaker sandbox of SB-5, where nothing but the runtime stands between the
 /// program and the file system, and writes run in the runtime as on Windows.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn in_checks_only_sandbox(scope: PathBuf, f: impl FnOnce(&mut Runtime) + Send + 'static) {
     use unio_runtime::sandbox::{self, Limits, Permissions, Sandbox, Scope};
     std::thread::spawn(move || {
@@ -711,8 +711,11 @@ fn reading_a_file_of_unknown_size_counts_the_buffer_it_grows() {
 /// or the real entry, but whatever it saw, the operation must not reach what lies outside:
 /// nothing outside is read, listed, reported as existing, or named. Only the runtime checks
 /// stand between the program and the file system here (the weaker sandbox), so that the rules
-/// of the operating system do not hide the race.
-#[cfg(unix)]
+/// of the operating system do not hide the race. On Windows the links are symbolic links where
+/// the account may make them, else the directory is a junction (and the file is not swapped),
+/// and the writes race too: the runtime writes there itself, relative to the directory of the
+/// scope, so a write through the swapped directory must not land outside.
+#[cfg(any(unix, windows))]
 #[test]
 fn a_link_swapped_in_after_the_check_reveals_nothing_outside_the_scope() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -726,8 +729,8 @@ fn a_link_swapped_in_after_the_check_reveals_nothing_outside_the_scope() {
     std::fs::write(root.join("open/f.txt"), "inside").unwrap();
     std::fs::write(root.join("outside/f.txt"), "SECRET").unwrap();
     std::fs::write(root.join("outside/only-outside.txt"), "SECRET").unwrap();
-    std::os::unix::fs::symlink(root.join("outside"), root.join("open/d-link")).unwrap();
-    std::os::unix::fs::symlink(root.join("outside/f.txt"), root.join("open/f-link")).unwrap();
+    link_directory(&root.join("outside"), &root.join("open/d-link"));
+    link_file(&root.join("outside/f.txt"), &root.join("open/f-link"));
     let stop = Arc::new(AtomicBool::new(false));
     let swapper = {
         let (stop, open) = (Arc::clone(&stop), root.join("open"));
@@ -799,6 +802,16 @@ fn a_link_swapped_in_after_the_check_reveals_nothing_outside_the_scope() {
                     leak(format!("resolve {r:?}"));
                 }
             }
+            if cfg!(windows) {
+                let target = root.join("open/d/written.txt");
+                let _ = call(
+                    rt,
+                    "std.files.write_text",
+                    &mut [p(&target), Value::text("x")],
+                );
+                let made = root.join("open/d/made");
+                let _ = call(rt, "std.files.create_directory", &mut [p(&made)]);
+            }
             for (name, path) in [
                 ("std.files.exists", "open/d/only-outside.txt"),
                 ("std.files.is_directory", "open/d/only-outside-dir"),
@@ -815,7 +828,43 @@ fn a_link_swapped_in_after_the_check_reveals_nothing_outside_the_scope() {
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
     let mut leaks = leaks.lock().unwrap().clone();
+    for written in ["written.txt", "made"] {
+        if root.join("outside").join(written).exists() {
+            leaks.push(format!("a write made outside/{written}"));
+        }
+    }
     leaks.sort();
     leaks.dedup();
     assert!(leaks.is_empty(), "outside the scope: {leaks:?}");
+}
+
+/// A link to a directory: a symbolic link, or on Windows, where making one needs a privilege
+/// the account may lack, a junction.
+#[cfg(any(unix, windows))]
+fn link_directory(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_dir(target, link).is_err() {
+        let status = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "a junction cannot be made");
+    }
+}
+
+/// A link to a file; on Windows without the privilege of symbolic links a copy stands in, so
+/// that the swap still moves an entry but reaches nothing outside.
+#[cfg(any(unix, windows))]
+fn link_file(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_file(target, link).is_err() {
+        eprintln!("no symbolic link for a file here: the file is not swapped for a link");
+        std::fs::write(link, "inside").unwrap();
+    }
 }
