@@ -383,7 +383,19 @@ fn the_tools_refuse_a_weaker_sandbox_on_windows_unless_the_operator_allows_it() 
         let mut command = p.command(&allowed, &[]);
         command.env_remove("UNIO_POLICY");
         let output = command.output().unwrap();
-        assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+        // The key grants nothing: with the operator's flag `fmt` runs, and `check` reports the
+        // key itself as a mistake of the manifest (RFC 0008), at its line.
+        if args[0] == "check" {
+            assert_eq!(output.status.code(), Some(1), "{}", all(&output));
+            assert!(
+                text(&output.stdout).contains("E0088")
+                    && text(&output.stdout).contains("allow_weaker"),
+                "{}",
+                all(&output)
+            );
+        } else {
+            assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+        }
         assert!(
             text(&output.stderr).contains("weaker sandbox"),
             "{}",
