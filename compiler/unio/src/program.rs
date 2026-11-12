@@ -46,6 +46,37 @@ pub struct Module {
     pub failed_imports: HashSet<String>,
     /// Imported modules with the span of their import, for cycles.
     pub edges: Vec<(ModId, Span)>,
+    /// For a module of a locked dependency (T-14): the package it belongs to, which is part
+    /// of the identity of the module and of its types; `None` for the packages of the given
+    /// files and the standard library.
+    pub dependency: Option<DependencyOf>,
+}
+
+/// The package a module of a dependency belongs to (T-14).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DependencyOf {
+    /// The identity of the package (`registry+...`, `path+...`, `archive+...`).
+    pub id: String,
+    /// The root package whose `unio.lock` locked it.
+    pub root: PathBuf,
+    /// `name@version`, for traces and messages.
+    pub label: String,
+}
+
+/// Why an import found no module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Missing {
+    NotFound,
+    /// The file lies outside the root it was searched in (E0053).
+    Outside,
+    /// `deps.<alias>...` could not be resolved (E0048).
+    Dependency(catalog::DependencyProblem),
+}
+
+/// Where an import leads: the file and the package it belongs to.
+struct Located {
+    file: PathBuf,
+    dependency: Option<DependencyOf>,
 }
 
 pub struct FieldDef {
@@ -211,8 +242,12 @@ pub struct Program {
     /// The `or` expressions on an Option whose right side is an Option too, by module and
     /// place: they give an Option, the others the inner value (semantics 4.3).
     pub option_ors: HashSet<(ModId, (usize, usize))>,
-    by_path: HashMap<PathBuf, ModId>,
+    /// Modules by their package and canonical path: the same file of two locked packages is
+    /// two modules with types of their own (T-14).
+    by_path: HashMap<(Option<String>, PathBuf), ModId>,
     stdlib_root: Option<PathBuf>,
+    /// The lock of each root package, as the loader reads it (T-14).
+    locks: HashMap<PathBuf, Result<Option<crate::package::Resolved>, String>>,
 }
 
 /// The directory of the trusted standard library, chosen by its origin only (RFC 0004): the
@@ -388,6 +423,7 @@ impl Program {
                 imports: HashMap::new(),
                 failed_imports: HashSet::new(),
                 edges: Vec::new(),
+                dependency: None,
             })
             .collect();
         Program {
@@ -407,6 +443,7 @@ impl Program {
             option_ors: HashSet::new(),
             by_path: HashMap::new(),
             stdlib_root: None,
+            locks: HashMap::new(),
         }
     }
 
@@ -416,8 +453,12 @@ impl Program {
     /// wherever the program was built or runs.
     pub fn trace_path(&self, module: ModId) -> String {
         let m = &self.modules[module];
+        let label;
         let (prefix, root) = if m.stdlib {
             ("std:", self.stdlib_root.as_deref())
+        } else if let Some(dependency) = &m.dependency {
+            label = format!("{}:", dependency.label);
+            (label.as_str(), Some(m.package.as_path()))
         } else {
             ("", Some(m.package.as_path()))
         };
@@ -475,6 +516,7 @@ impl Program {
             option_ors: HashSet::new(),
             by_path: HashMap::new(),
             stdlib_root,
+            locks: HashMap::new(),
         };
         if let Some(root) = program.stdlib_root.clone() {
             for layer in LAYERS {
@@ -483,13 +525,13 @@ impl Program {
                 preludes.extend(crate::vfs::unio_files_in(&dir.join("builtin")));
                 for path in preludes {
                     if crate::vfs::is_file(&path) {
-                        program.load_file(&path, false);
+                        program.load_file(&path, false, None);
                     }
                 }
             }
         }
         for file in files {
-            let id = program.load_file(file, true);
+            let id = program.load_file(file, true, None);
             if let Some(id) = id {
                 program.modules[id].report = true;
                 program.modules[id].given = true;
@@ -524,23 +566,40 @@ impl Program {
         Some((format!("std.{}", rest.join(".")), false))
     }
 
-    fn load_file(&mut self, file: &Path, report: bool) -> Option<ModId> {
+    fn load_file(
+        &mut self,
+        file: &Path,
+        report: bool,
+        dependency: Option<DependencyOf>,
+    ) -> Option<ModId> {
         let canonical = crate::vfs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-        if let Some(id) = self.by_path.get(&canonical) {
+        let key = (dependency.as_ref().map(|d| d.id.clone()), canonical.clone());
+        if let Some(id) = self.by_path.get(&key) {
             return Some(*id);
         }
         let source = crate::vfs::read_to_string(&canonical).ok()?;
         let analysis = crate::analyse(&file.to_string_lossy(), &source);
-        let (name, prelude, stdlib, package) = match self.stdlib_name(&canonical) {
+        let stdlib_name = match dependency {
+            Some(_) => None,
+            None => self.stdlib_name(&canonical),
+        };
+        let (name, prelude, stdlib, package) = match stdlib_name {
             Some((name, prelude)) => (name, prelude, true, self.stdlib_root.clone().unwrap()),
             None => {
                 let package = package_root(&canonical);
                 let relative = canonical.strip_prefix(&package).unwrap_or(&canonical);
-                let name = relative
+                let mut name = relative
                     .iter()
                     .map(|p| p.to_string_lossy().trim_end_matches(".unio").to_string())
                     .collect::<Vec<_>>()
                     .join(".");
+                if let Some(dependency) = &dependency {
+                    name = format!("{}:{name}", dependency.label);
+                } else if !self.locks.contains_key(&package) {
+                    // The lock of a root package, read once (T-14).
+                    let lock = crate::package::resolved(&package);
+                    self.locks.insert(package.clone(), lock);
+                }
                 (name, false, false, package)
             }
         };
@@ -558,48 +617,112 @@ impl Program {
             imports: HashMap::new(),
             failed_imports: HashSet::new(),
             edges: Vec::new(),
+            dependency,
         });
-        self.by_path.insert(canonical, id);
+        self.by_path.insert(key, id);
         Some(id)
     }
 
     /// The file of a module path written in an import, if it exists and stays inside the root
     /// it was found in.
-    fn module_file(&self, from: ModId, path: &[String]) -> Option<PathBuf> {
+    fn module_file(&self, from: ModId, path: &[String]) -> Option<Located> {
         self.locate_module(from, path).ok()
     }
 
-    /// Finds the file of a module path: below the standard library for `std.*`, below the
-    /// package otherwise. A file whose resolved path (links followed) leaves that root is
-    /// `Err(true)`: an import cannot lead out of the package or the standard library through
-    /// a link. A missing file is `Err(false)`.
-    fn locate_module(&self, from: ModId, path: &[String]) -> Result<PathBuf, bool> {
+    /// The module of a locked dependency: `deps.<alias>.<module>` through the aliases of the
+    /// importing package in the lock of its root package (T-14).
+    fn locate_dependency(&self, from: ModId, path: &[String]) -> Result<Located, Missing> {
+        use catalog::DependencyProblem as P;
+        let module = &self.modules[from];
+        let alias = &path[1];
+        let (root, id) = match &module.dependency {
+            Some(d) => (d.root.clone(), Some(d.id.as_str())),
+            None => (module.package.clone(), None),
+        };
+        let declared = || declares_dependency(&module.package, alias);
+        let lock = match self.locks.get(&root) {
+            Some(Ok(Some(lock))) => lock,
+            Some(Err(e)) => return Err(Missing::Dependency(P::BadLock(e.clone()))),
+            _ if declared() => return Err(Missing::Dependency(P::NotLocked)),
+            _ => return Err(Missing::Dependency(P::NotDeclared)),
+        };
+        let table = match id {
+            Some(id) => lock.packages.get(id),
+            None => Some(&lock.root),
+        };
+        let Some(target) = table.and_then(|t| t.get(alias)) else {
+            return Err(Missing::Dependency(if declared() {
+                P::NotLocked
+            } else {
+                P::NotDeclared
+            }));
+        };
+        let label = lock
+            .labels
+            .get(&target.id)
+            .cloned()
+            .unwrap_or_else(|| target.id.clone());
+        if path.len() < 3 {
+            return Err(Missing::Dependency(P::NoModule(label, String::new())));
+        }
+        if !crate::vfs::is_file(&target.entry.join("unio.toml")) {
+            return Err(Missing::Dependency(P::NotInstalled(label)));
+        }
+        let rest = path[2..].join(".");
+        let file = target.entry.join(path[2..].join("/") + ".unio");
+        if !crate::vfs::is_file(&file) {
+            return Err(Missing::Dependency(P::NoModule(label, rest)));
+        }
+        let entry =
+            crate::vfs::canonicalize(&target.entry).unwrap_or_else(|_| target.entry.clone());
+        match crate::vfs::canonicalize(&file) {
+            Ok(real) if real.starts_with(&entry) => Ok(Located {
+                file,
+                dependency: Some(DependencyOf {
+                    id: target.id.clone(),
+                    root,
+                    label,
+                }),
+            }),
+            _ => Err(Missing::Outside),
+        }
+    }
+
+    /// Finds the file of a module path: below the standard library for `std.*`, in the cache
+    /// entry of a locked dependency for `deps.*`, below the package otherwise. A file whose
+    /// resolved path (links followed) leaves that root is [`Missing::Outside`]: an import
+    /// cannot lead out of the package or the standard library through a link.
+    fn locate_module(&self, from: ModId, path: &[String]) -> Result<Located, Missing> {
         // `deps` is reserved as the root of manifest dependencies (T-14), never a directory of
         // the package.
         if path.len() > 1 && path[0] == "deps" {
-            return Err(false);
+            return self.locate_dependency(from, path);
         }
+        let mut dependency = None;
         let (root, file) = if path.first().is_some_and(|p| p == "std") && path.len() > 1 {
-            let root = self.stdlib_root.as_ref().ok_or(false)?;
+            let root = self.stdlib_root.as_ref().ok_or(Missing::NotFound)?;
             let rest = path[1..].join("/") + ".unio";
             let file = LAYERS
                 .iter()
                 .map(|layer| root.join(layer).join(&rest))
                 .find(|p| crate::vfs::is_file(p))
-                .ok_or(false)?;
+                .ok_or(Missing::NotFound)?;
             (root, file)
         } else {
-            let root = &self.modules[from].package;
+            let module = &self.modules[from];
+            // A module of a dependency imports the modules of its own package.
+            dependency = module.dependency.clone();
+            let root = &module.package;
             let file = root.join(path.join("/") + ".unio");
             if !crate::vfs::is_file(&file) {
-                return Err(false);
+                return Err(Missing::NotFound);
             }
             (root, file)
         };
         let root = crate::vfs::canonicalize(root).unwrap_or_else(|_| root.clone());
         match crate::vfs::canonicalize(&file) {
-            Ok(real) if real.starts_with(&root) => Ok(file),
-            _ => Err(true),
+            Ok(real) if real.starts_with(&root) => Ok(Located { file, dependency }),
+            _ => Err(Missing::Outside),
         }
     }
 
@@ -616,9 +739,9 @@ impl Program {
             .collect();
         let report = self.modules[id].report && !self.modules[id].stdlib;
         for path in imports {
-            if let Some(file) = self.module_file(id, &path) {
+            if let Some(located) = self.module_file(id, &path) {
                 let before = self.modules.len();
-                if let Some(loaded) = self.load_file(&file, false) {
+                if let Some(loaded) = self.load_file(&located.file, false, located.dependency) {
                     if loaded >= before && report && !self.modules[loaded].stdlib {
                         self.modules[loaded].report = true;
                     }
@@ -875,11 +998,11 @@ impl Program {
                 let path: Vec<String> = import.module.iter().map(|n| n.text.clone()).collect();
                 let dotted = path.join(".");
                 let located = self.locate_module(module, &path);
-                let target = located
-                    .as_ref()
-                    .ok()
-                    .and_then(|f| crate::vfs::canonicalize(f).ok())
-                    .and_then(|f| self.by_path.get(&f).copied());
+                let target = located.as_ref().ok().and_then(|l| {
+                    let file = crate::vfs::canonicalize(&l.file).ok()?;
+                    let key = (l.dependency.as_ref().map(|d| d.id.clone()), file);
+                    self.by_path.get(&key).copied()
+                });
                 let Some(target) = target else {
                     // The names the import would bind are poisoned (semantics 2.8).
                     let bound: Vec<String> = if import.names.is_empty() {
@@ -897,20 +1020,29 @@ impl Program {
                         .last()
                         .unwrap()
                         .span);
+                    let problem = match located {
+                        Err(Missing::Dependency(problem)) => problem,
+                        // `deps.<alias>.<module>` names a locked dependency (T-14).
+                        Ok(_) if path.len() > 1 && path[0] == "deps" => {
+                            catalog::DependencyProblem::NoModule(path[1].clone(), String::new())
+                        }
+                        Err(Missing::Outside) => {
+                            let message = catalog::module_outside(&dotted);
+                            self.error(module, Diagnostic::error("E0053", span, message));
+                            continue;
+                        }
+                        _ => {
+                            let message = catalog::module_not_found(&dotted);
+                            self.error(module, Diagnostic::error("E0053", span, message));
+                            continue;
+                        }
+                    };
                     if path.len() > 1 && path[0] == "deps" {
-                        // `deps.<alias>.<module>` names a manifest dependency (T-14); none is
-                        // installed in release 0.1.
-                        let alias = &path[1];
-                        let declared = declares_dependency(&self.modules[module].package, alias);
-                        let message = catalog::dependency_missing(alias, declared);
+                        let message = catalog::dependency_missing(&path[1], &problem);
                         self.error(module, Diagnostic::error("E0048", span, message));
                         continue;
                     }
-                    let message = if located == Err(true) {
-                        catalog::module_outside(&dotted)
-                    } else {
-                        catalog::module_not_found(&dotted)
-                    };
+                    let message = catalog::module_not_found(&dotted);
                     self.error(module, Diagnostic::error("E0053", span, message));
                     continue;
                 };

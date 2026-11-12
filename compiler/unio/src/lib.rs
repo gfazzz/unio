@@ -17,6 +17,7 @@ mod lower;
 pub mod lsp;
 pub mod native;
 pub mod outline;
+pub mod package;
 pub mod parser;
 pub mod program;
 pub mod sandbox_cli;

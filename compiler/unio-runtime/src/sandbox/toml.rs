@@ -1,6 +1,8 @@
-//! The subset of TOML that manifests (`unio.toml`) and policies use: tables, dotted keys, and
-//! values that are texts, integers, booleans, or lists of texts. Anything else is an error, so
-//! that a mistyped policy never silently grants or leaves out a restriction.
+//! The subset of TOML that manifests (`unio.toml`), lock files (`unio.lock`), and policies use:
+//! tables, dotted keys, inline tables on one line (`util = { path = "../util" }`, whose members
+//! become dotted keys), and values that are texts, integers, booleans, or lists of texts.
+//! Anything else is an error, so that a mistyped policy never silently grants or leaves out a
+//! restriction.
 
 use std::collections::BTreeMap;
 
@@ -49,13 +51,70 @@ pub fn parse(source: &str) -> Result<Table, String> {
             .ok_or_else(|| format!("line {number}: expected key = value"))?;
         let key = key.trim();
         check_key(key, number)?;
-        let full = format!("{prefix}{key}");
-        let value = parse_value(value.trim()).map_err(|e| format!("line {number}: {e}"))?;
-        if table.insert(full.clone(), value).is_some() {
-            return Err(format!("line {number}: {full} is given twice"));
-        }
+        insert(&mut table, format!("{prefix}{key}"), value.trim(), number)?;
     }
     Ok(table)
+}
+
+/// Inserts a value under its full key; the members of an inline table under the key of the
+/// table and their own.
+fn insert(table: &mut Table, full: String, value: &str, number: usize) -> Result<(), String> {
+    if let Some(inner) = value.strip_prefix('{') {
+        let inner = inner
+            .strip_suffix('}')
+            .ok_or_else(|| format!("line {number}: the inline table is not closed"))?;
+        let mut empty = true;
+        for member in split_members(inner) {
+            let member = member.trim();
+            if member.is_empty() {
+                continue;
+            }
+            empty = false;
+            let (key, value) = member.split_once('=').ok_or_else(|| {
+                format!("line {number}: expected key = value in the inline table")
+            })?;
+            let key = key.trim();
+            check_key(key, number)?;
+            insert(table, format!("{full}.{key}"), value.trim(), number)?;
+        }
+        if empty {
+            return Err(format!("line {number}: the inline table {full} is empty"));
+        }
+        return Ok(());
+    }
+    let parsed = parse_value(value).map_err(|e| format!("line {number}: {e}"))?;
+    if table.insert(full.clone(), parsed).is_some() {
+        return Err(format!("line {number}: {full} is given twice"));
+    }
+    Ok(())
+}
+
+/// The members of an inline table: split at the commas outside texts, lists, and tables.
+fn split_members(inner: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    let mut in_text = false;
+    let mut escaped = false;
+    for (i, c) in inner.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_text => escaped = true,
+            '"' => in_text = !in_text,
+            '[' | '{' if !in_text => depth += 1,
+            ']' | '}' if !in_text => depth -= 1,
+            ',' if !in_text && depth == 0 => {
+                items.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&inner[start..]);
+    items
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -200,6 +259,30 @@ mod tests {
             table["env"],
             TomlValue::Texts(vec!["HOME".into(), "TODO_FILE".into()])
         );
+    }
+
+    #[test]
+    fn inline_tables_become_dotted_keys() {
+        let table = parse(
+            "[dependencies]\nutil = { path = \"../u, v\", version = \"^1\" }\njson = { registry = \"main\", package = \"acme/json\", nested = { list = [\"a\", \"b\"] } }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            table["dependencies.util.path"],
+            TomlValue::Text("../u, v".into())
+        );
+        assert_eq!(
+            table["dependencies.util.version"],
+            TomlValue::Text("^1".into())
+        );
+        assert_eq!(
+            table["dependencies.json.nested.list"],
+            TomlValue::Texts(vec!["a".into(), "b".into()])
+        );
+        assert!(parse("a = { b = 1\n").is_err());
+        assert!(parse("a = { }\n").is_err());
+        assert!(parse("a = { b = 1, b = 2 }\n").is_err());
+        assert!(parse("a = { b }\n").is_err());
     }
 
     #[test]

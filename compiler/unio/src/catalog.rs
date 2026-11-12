@@ -577,8 +577,39 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0047", range_as_list("List[Int]")),
         ("E0047", range_method("length")),
         ("E0047", add_to_list()),
-        ("E0048", dependency_missing("money", false)),
-        ("E0048", dependency_missing("money", true)),
+        (
+            "E0048",
+            dependency_missing("money", &DependencyProblem::NotDeclared),
+        ),
+        (
+            "E0048",
+            dependency_missing("money", &DependencyProblem::NotLocked),
+        ),
+        (
+            "E0048",
+            dependency_missing(
+                "money",
+                &DependencyProblem::NotInstalled("money@1.0.0".into()),
+            ),
+        ),
+        (
+            "E0048",
+            dependency_missing(
+                "money",
+                &DependencyProblem::NoModule("money@1.0.0".into(), "ledger".into()),
+            ),
+        ),
+        (
+            "E0048",
+            dependency_missing(
+                "money",
+                &DependencyProblem::NoModule("money@1.0.0".into(), String::new()),
+            ),
+        ),
+        (
+            "E0048",
+            dependency_missing("money", &DependencyProblem::BadLock("unio.lock: x".into())),
+        ),
         ("E0086", external_outside_stdlib("poke", false)),
         ("E0086", external_outside_stdlib("poke", true)),
     ]
@@ -954,8 +985,8 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "let A as List[Int] = range(0, 3).to_list()\n",
         ),
         "E0048" => (
-            "A module under `deps.` names a manifest dependency by its alias (T-14). The alias must be listed under `[dependencies]` in `unio.toml` and installed from its lock entry; release 0.1 has no package manager yet, so no dependency is installed. Declare the alias, or import a module of the package or the standard library.",
-            "Модуль под `deps.` называет зависимость манифеста по её псевдониму (И-14). Псевдоним должен быть указан в `[dependencies]` файла `unio.toml` и установлен по записи блокировки; в выпуске 0.1 менеджера пакетов ещё нет, поэтому зависимости не установлены. Объявите псевдоним или импортируйте модуль пакета либо стандартной библиотеки.",
+            "A module under `deps.` names a manifest dependency by its alias (T-14): `deps.<alias>.<module>`. The alias must be listed under `[dependencies]` in `unio.toml`, locked in `unio.lock` (`unio add` or `unio update`), and installed in the package cache from its lock entry (`unio install`); the module must exist in that package. The compiler reads only the lock and the cache and never touches the network. Declare and install the dependency, or import a module of the package or the standard library.",
+            "Модуль под `deps.` называет зависимость манифеста по её псевдониму (И-14): `deps.<псевдоним>.<модуль>`. Псевдоним должен быть указан в `[dependencies]` файла `unio.toml`, зафиксирован в `unio.lock` (`unio add` или `unio update`) и установлен в кэш пакетов по записи блокировки (`unio install`); модуль должен быть в этом пакете. Компилятор читает только блокировку и кэш и не обращается к сети. Объявите и установите зависимость или импортируйте модуль пакета либо стандартной библиотеки.",
             "import deps.money.ledger\n\nlet A as Int = 1\n",
             "let A as Int = 1\n",
         ),
@@ -1574,17 +1605,47 @@ pub fn add_to_list() -> Msg {
 }
 
 /// E0048: `declared` tells whether `[dependencies]` of the manifest lists the alias.
-pub fn dependency_missing(alias: &str, declared: bool) -> Msg {
-    if declared {
-        Msg::new(
-            format!("the dependency '{alias}' is declared in unio.toml but not installed: release 0.1 has no package manager"),
-            format!("зависимость '{alias}' объявлена в unio.toml, но не установлена: в выпуске 0.1 нет менеджера пакетов"),
-        )
-    } else {
-        Msg::new(
+/// Why `deps.<alias>.<module>` does not resolve (E0048, T-14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencyProblem {
+    /// `[dependencies]` of `unio.toml` does not list the alias.
+    NotDeclared,
+    /// The manifest lists it, but `unio.lock` has no entry for it.
+    NotLocked,
+    /// The lock has it (`name@version`), but its cache entry is not installed.
+    NotInstalled(String),
+    /// The package (`name@version`) has no such module (empty: the import names none).
+    NoModule(String, String),
+    /// `unio.lock` cannot be read or parsed.
+    BadLock(String),
+}
+
+pub fn dependency_missing(alias: &str, problem: &DependencyProblem) -> Msg {
+    match problem {
+        DependencyProblem::NotDeclared => Msg::new(
             format!("'{alias}' is not a dependency in [dependencies] of unio.toml"),
             format!("'{alias}' нет среди зависимостей в [dependencies] файла unio.toml"),
-        )
+        ),
+        DependencyProblem::NotLocked => Msg::new(
+            format!("the dependency '{alias}' is declared in unio.toml but not locked in unio.lock; run `unio update {alias}`"),
+            format!("зависимость '{alias}' объявлена в unio.toml, но не зафиксирована в unio.lock; выполните `unio update {alias}`"),
+        ),
+        DependencyProblem::NotInstalled(label) => Msg::new(
+            format!("the dependency '{alias}' ({label}) is locked but not installed in the package cache; run `unio install`"),
+            format!("зависимость '{alias}' ({label}) зафиксирована, но не установлена в кэш пакетов; выполните `unio install`"),
+        ),
+        DependencyProblem::NoModule(label, module) if module.is_empty() => Msg::new(
+            format!("the import of the dependency '{alias}' ({label}) must name a module: deps.{alias}.<module>"),
+            format!("импорт зависимости '{alias}' ({label}) должен назвать модуль: deps.{alias}.<модуль>"),
+        ),
+        DependencyProblem::NoModule(label, module) => Msg::new(
+            format!("the dependency '{alias}' ({label}) has no module '{module}'"),
+            format!("в зависимости '{alias}' ({label}) нет модуля '{module}'"),
+        ),
+        DependencyProblem::BadLock(problem) => Msg::new(
+            format!("the dependency '{alias}' cannot be resolved: {problem}"),
+            format!("зависимость '{alias}' не разрешается: {problem}"),
+        ),
     }
 }
 

@@ -7,6 +7,7 @@
 // The language server: the protocol here, its analyses in `unio::lsp` (T-10, SB-13).
 #[path = "lsp/server.rs"]
 mod lsp_server;
+mod packages;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,11 @@ const USAGE: &str = "Usage:
     unio parse --ast FILE
     unio explain CODE
     unio lsp [--policy FILE] [--allow-weaker-sandbox] [--lang=en|ru]
+    unio add ALIAS [VERSION] (--path DIR | --package OWNER/NAME [--registry NAME] |
+             --archive FILE|URL --sha384 HEX) [--unsafe-ok] [--offline]
+    unio remove ALIAS
+    unio update [ALIAS...] [--unsafe-ok] [--offline]
+    unio install [--offline] [--unsafe-ok]
 
 The language of messages is taken from --lang, then from UNIO_LANG, and is English otherwise.
 Every command that reads sources takes --policy FILE (or UNIO_POLICY), whose [compile] table
@@ -65,6 +71,11 @@ fn main() -> ExitCode {
     }
     if arguments.first().map(String::as_str) == Some("lsp") {
         return lsp_server::main(&arguments[1..]);
+    }
+    if let Some(command @ ("add" | "remove" | "update" | "install")) =
+        arguments.first().map(String::as_str)
+    {
+        return packages::command(command, &arguments[1..]);
     }
     let (sandbox, arguments) = match sandbox_cli::take(&arguments) {
         Ok(taken) => taken,
@@ -380,7 +391,8 @@ struct Sources {
 }
 
 impl Sources {
-    /// The sources of a loaded program: its modules, and the manifests that decide its packages.
+    /// The sources of a loaded program: its modules, the manifests that decide its packages,
+    /// and the lock files of its root packages, which lead to its dependencies (T-14).
     fn of(program: &unio::program::Program) -> Sources {
         let mut files: Vec<(PathBuf, String)> = program
             .modules
@@ -391,6 +403,12 @@ impl Sources {
             let toml = m.package.join("unio.toml");
             if let Ok(text) = std::fs::read_to_string(&toml) {
                 files.push((toml, text));
+            }
+            let lock = m.package.join(unio::package::lock::FILE);
+            if m.dependency.is_none() {
+                if let Ok(text) = std::fs::read_to_string(&lock) {
+                    files.push((lock, text));
+                }
             }
         }
         Sources {

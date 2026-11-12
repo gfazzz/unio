@@ -19,7 +19,12 @@ an executable contains none of it, because the linker drops what the runtime doe
 Windows the compiler also uses `find-msvc-tools`; see "The linker on Windows" below. The
 sandbox calls Landlock, seccomp, resource limits and Seatbelt through `extern` declarations in
 `unio-runtime/src/sandbox/`, as the runtime already does for `fsync`, `getpwuid` and
-`MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6).
+`MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6). The package commands
+(`unio add`, `remove`, `update`, `install`; [docs/packages.md](../docs/packages.md)) add none
+either: SHA-384, the archive format (uncompressed ustar), the HTTP/1.1 client of the download
+worker, semantic versions, and the resolver are written with the standard library in
+`unio/src/package/` and `unio/src/packages.rs`. HTTPS is not supported, because a TLS
+implementation would be a new dependency; that decision is open (docs/status.md, gap 12).
 
 The library crate `unio` is also built as a static library, `target/<profile>/libunio.a` (on
 Windows `unio.lib`): the runtime that `unio build` links into every executable, found through
@@ -549,8 +554,9 @@ The tests were written before the code (concept, section 1.2):
   outside the path of a fault, which the reserve serves, a small allocation the system refuses
   inside the Rust standard library aborts.
 - Known limits of the RFC 0001 checks: a struct with a `Float` field used as a key is rejected
-  at the calls that need `Hash` (E0062, E0056), not at the type; E0048 covers only a dependency
-  that is missing, because there is no resolver, lock file or package identity yet (T-14). E0046
+  at the calls that need `Hash` (E0062, E0056), not at the type; E0048 covers a dependency that
+  is not declared, not locked, not installed, or has no such module; conflicts of versions are
+  reported by `unio add` and `unio update`, not by the compiler (T-14, docs/packages.md). E0046
   is static; at run time decoding a struct with a private field also fails with `DecodeError`,
   while encoding has no such second guard.
 - Known limits of the language server (T-10): rename does not follow the implementations of an

@@ -95,6 +95,17 @@ pub struct Spec {
     /// Data for the worker on its standard input after the configuration: the request and the
     /// unsaved buffers of the language server (SB-13), which so reach it without a file.
     pub input: Vec<u8>,
+    /// Trees it may write besides its temporary directory: the staging directory of the cache
+    /// entry the unpack worker writes (SB-12).
+    pub write: Vec<Scope>,
+    /// The cache of packages, whose locked entries the loader reads (T-14).
+    pub cache: Option<PathBuf>,
+    /// The connection to a registry that the tool opened for the download worker, which
+    /// inherits it and may open none of its own (SB-12; Linux and macOS).
+    pub socket: Option<i32>,
+    /// Where the download worker connects itself, on Windows, which has no restriction of
+    /// the network for it to keep (SB-4).
+    pub connect: Option<String>,
 }
 
 /// The directory with `unio.toml` nearest above the path, by its written path and without
@@ -128,16 +139,26 @@ fn tree(path: &Path) -> Scope {
 }
 
 impl Spec {
-    /// The scopes of a worker that reads the given files: their packages and the standard
-    /// library (SB-11). There are no locked dependencies to read yet: release 0.1 installs
-    /// none (T-14), so the package cache is not a scope.
+    /// The scopes of a worker that reads the given files: their packages, the cache entries of
+    /// the dependencies their `unio.lock` files lock, and the standard library (SB-11). Never
+    /// the whole cache: only the entries of the lock.
     pub fn for_files(files: &[PathBuf], options: &unio::sandbox_cli::Options) -> Result<Spec, u8> {
         let (limits, allow_weaker) = limits(options)?;
+        let cache = unio::package::cache_root().map(|c| sandbox::absolute(&c));
         let mut read: Vec<Scope> = Vec::new();
         for file in files {
-            let scope = tree(&package_of(file));
+            let package = package_of(file);
+            let scope = tree(&package);
             if !read.contains(&scope) {
                 read.push(scope);
+            }
+            if let Some(cache) = &cache {
+                for entry in unio::package::locked_entries(&package, cache) {
+                    let scope = tree(&entry);
+                    if !read.contains(&scope) {
+                        read.push(scope);
+                    }
+                }
             }
         }
         let stdlib = unio::program::trusted_stdlib();
@@ -153,6 +174,18 @@ impl Spec {
             limits,
             allow_weaker,
             stdlib,
+            cache,
+            ..Spec::default()
+        })
+    }
+
+    /// A worker of the package operations (SB-12) with the limits of the policy: it reads and
+    /// writes nothing but its temporary directory unless the caller adds scopes.
+    pub fn for_packages(options: &unio::sandbox_cli::Options) -> Result<Spec, u8> {
+        let (limits, allow_weaker) = limits(options)?;
+        Ok(Spec {
+            limits,
+            allow_weaker,
             ..Spec::default()
         })
     }
@@ -168,7 +201,7 @@ impl Spec {
 /// SB-3a, RFC 0006), or the defaults of SB-11. The limits of the program (`[limits]`) do not
 /// reach a worker, and the permissions of a policy do not apply to the tools, whose scopes are
 /// fixed. A memory limit below [`MINIMUM_COMPILE_MEMORY`] is refused with code 103.
-fn limits(options: &unio::sandbox_cli::Options) -> Result<(Limits, bool), u8> {
+pub fn limits(options: &unio::sandbox_cli::Options) -> Result<(Limits, bool), u8> {
     let policy = unio::sandbox_cli::read_policy(options).map_err(|message| {
         eprintln!("unio: {message}");
         EXIT_SANDBOX
@@ -273,6 +306,10 @@ struct Config {
     read: Vec<Scope>,
     read_files: Vec<PathBuf>,
     formats: Vec<PathBuf>,
+    write: Vec<PathBuf>,
+    cache: Option<PathBuf>,
+    socket: Option<i32>,
+    connect: Option<String>,
     memory: Option<u64>,
     cpu: Option<u64>,
     allow_weaker: bool,
@@ -305,6 +342,18 @@ fn encode(spec: &Spec, temp: &Path, marker: Option<&tree::Marker>) -> String {
     }
     for file in &spec.formats {
         out.push_str(&format!("format {}\n", path_hex(file)));
+    }
+    for scope in &spec.write {
+        out.push_str(&format!("write {}\n", path_hex(&scope.root)));
+    }
+    if let Some(cache) = &spec.cache {
+        out.push_str(&format!("cache {}\n", path_hex(cache)));
+    }
+    if let Some(socket) = spec.socket {
+        out.push_str(&format!("socket {socket}\n"));
+    }
+    if let Some(connect) = &spec.connect {
+        out.push_str(&format!("connect {}\n", hex(connect.as_bytes())));
     }
     out.push_str(&format!("memory {}\n", spec.limits.memory_bytes));
     if let Some(cpu) = spec.limits.cpu_seconds {
@@ -351,6 +400,13 @@ fn decode(text: &str) -> Result<Config, String> {
             "format" => config
                 .formats
                 .push(hex_path(value).ok_or_else(|| bad(line))?),
+            "write" => config.write.push(hex_path(value).ok_or_else(|| bad(line))?),
+            "cache" => config.cache = Some(hex_path(value).ok_or_else(|| bad(line))?),
+            "socket" => config.socket = Some(value.parse().map_err(|_| bad(line))?),
+            "connect" => {
+                let bytes = unhex(value).ok_or_else(|| bad(line))?;
+                config.connect = Some(String::from_utf8(bytes).map_err(|_| bad(line))?);
+            }
             "memory" => config.memory = Some(value.parse().map_err(|_| bad(line))?),
             "cpu" => config.cpu = Some(value.parse().map_err(|_| bad(line))?),
             "weaker" => config.allow_weaker = value == "1",
@@ -461,6 +517,8 @@ pub fn enter(arguments: &[String]) -> Entered {
     match role.as_str() {
         "tool" => enter_tool(config, rest),
         "link" => Entered::Done(link_step(&config, rest)),
+        "download" => Entered::Done(download_step(&config, rest)),
+        "unpack" => Entered::Done(unpack_step(&config, rest)),
         _ => fail("started with an unknown role"),
     }
 }
@@ -506,6 +564,7 @@ fn apply(rules: &os::Rules, allow_weaker: bool) -> Result<(), ExitCode> {
 
 fn enter_tool(config: Config, rest: &[String]) -> Entered {
     unio::vfs::use_stdlib(config.stdlib.clone());
+    unio::package::use_cache(config.cache.clone());
     // The writer starts before the rules apply, so that it does not inherit them; it applies
     // its own, which permit exactly the given files (docs/runtime.md 9.2).
     #[cfg(unix)]
@@ -558,6 +617,99 @@ fn enter_tool(config: Config, rest: &[String]) -> Entered {
         probe::run(probe);
     }
     Entered::Tool(rest.to_vec())
+}
+
+// ---------------------------------------------------------------- the workers of packages
+
+/// The rules of a worker of the package operations: it reads only its scopes, writes only its
+/// temporary directory and the write scopes, has no network of its own, and starts no process
+/// (SB-12).
+fn package_rules(config: &Config) -> os::Rules {
+    let mut read = config.read.clone();
+    for file in &config.read_files {
+        read.push(Scope {
+            root: file.clone(),
+            subtree: false,
+        });
+    }
+    let mut write = vec![Scope {
+        root: config.temp.clone(),
+        subtree: true,
+    }];
+    write.extend(config.write.iter().map(|root| Scope {
+        root: root.clone(),
+        subtree: true,
+    }));
+    os::Rules {
+        read,
+        write,
+        execute: Vec::new(),
+        processes: false,
+        limits: os_limits(config),
+        marker: None,
+    }
+}
+
+/// The download worker (SB-12): it receives the connection to one configured registry from the
+/// tool and may open none itself (no socket, no `connect`), reads nothing, and writes only its
+/// temporary directory, the download area. On Windows, where the network is not restricted
+/// for a worker (SB-4), it connects itself to the address the tool checked.
+fn download_step(config: &Config, arguments: &[String]) -> ExitCode {
+    #[cfg(unix)]
+    let stream = match config.socket {
+        Some(fd) => {
+            use std::os::fd::FromRawFd;
+            // SAFETY: the tool passed this descriptor, a connected TCP socket, for this worker
+            // alone; nothing else in this process owns it.
+            unsafe { std::net::TcpStream::from_raw_fd(fd) }
+        }
+        None => {
+            eprintln!("unio: the download worker was given no connection");
+            return ExitCode::from(EXIT_SANDBOX);
+        }
+    };
+    #[cfg(not(unix))]
+    let stream = match config.connect.as_deref().map(std::net::TcpStream::connect) {
+        Some(Ok(stream)) => stream,
+        Some(Err(e)) => {
+            eprintln!("unio: the download worker cannot connect: {e}");
+            return ExitCode::from(1);
+        }
+        None => {
+            eprintln!("unio: the download worker was given no address");
+            return ExitCode::from(EXIT_SANDBOX);
+        }
+    };
+    if let Err(code) = apply(&package_rules(config), config.allow_weaker) {
+        return code;
+    }
+    let _ = INSIDE.set(Inside {
+        temp: config.temp.clone(),
+        #[cfg(unix)]
+        writer: None,
+    });
+    if let Some(probe) = &config.probe {
+        probe::run(probe);
+    }
+    crate::packages::download_worker(stream, &config.temp, arguments)
+}
+
+/// The unpack worker (SB-12): it has no network, reads only the archive (or the directory of a
+/// path dependency, or a cache entry it inspects), and writes only the staging directory of
+/// the cache entry it makes. It checks the hash and the signature before it unpacks.
+fn unpack_step(config: &Config, arguments: &[String]) -> ExitCode {
+    if let Err(code) = apply(&package_rules(config), config.allow_weaker) {
+        return code;
+    }
+    let _ = INSIDE.set(Inside {
+        temp: config.temp.clone(),
+        #[cfg(unix)]
+        writer: None,
+    });
+    if let Some(probe) = &config.probe {
+        probe::run(probe);
+    }
+    crate::packages::unpack_worker(arguments)
 }
 
 // ---------------------------------------------------------------- the link step

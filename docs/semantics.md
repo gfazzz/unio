@@ -14,7 +14,7 @@ Version 0.1-draft. Changes in this draft: decisions recorded while implementing 
 6. A name that resolves to nothing is E0056; the fix suggests the closest visible name.
 7. Visibility follows L-23 to L-23d: a private declaration, field, or method used from another module is E0057.
 8. An import cycle is E0058 and names the modules of the cycle (L-24).
-9. A module path that starts with `deps.` names a manifest dependency by its alias (T-14); `deps` is never a directory of the package. Release 0.1 installs no dependency, so such an import is E0048: the message says whether `[dependencies]` of `unio.toml` declares the alias.
+9. A module path that starts with `deps.` names a manifest dependency by its alias (T-14); `deps` is never a directory of the package. `deps.<alias>.<module>` is the module `<module>` of the package that the alias names in the lock of the root package (`unio.lock`, T-7), read from its entry in the package cache ([packages.md](packages.md)); a module of a dependency resolves its own `deps.` imports through its own aliases in the same lock, and its other imports in its own package. The module and its types belong to the identity of that package: the same file under two identities is two modules. The compiler reads only the lock and the cache. An alias that `[dependencies]` does not declare, that the lock does not lock, whose entry is not installed, a package without the named module, an import that names no module, and an unreadable lock are E0048, and the message says which.
 
 ## 2. Types
 
