@@ -41,10 +41,14 @@ pub fn prepare(command: &mut Command) {
 }
 
 /// A unique mark of the Seatbelt profile of a process tree on macOS: the profile allows reading
-/// one path and denies reading another, both named after a random token. No other profile
-/// treats these two paths differently, and a process without a profile may read both, so
-/// `sandbox_check` tells the processes of the tree from all others. On other systems the
-/// marker is carried but not used.
+/// one preference domain and denies reading another, both named after a random token. No
+/// other profile treats these two domains differently, and a process without a profile may
+/// read both, so `sandbox_check` tells the processes of the tree from all others. The marker
+/// names preference domains, not paths: `sandbox_check` reports a path that does not exist as
+/// denied for every process, with or without a profile, so a pair of paths that exist nowhere
+/// would mark no process. Reading a preference goes through `cfprefsd`, which the profiles do
+/// not let a process reach (`mach-lookup` is denied), so the allowed domain grants nothing.
+/// On other systems the marker is carried but not used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Marker(String);
 
@@ -76,17 +80,19 @@ impl Marker {
         &self.0
     }
 
-    fn path(&self, side: &str) -> String {
-        format!("/private/var/empty/unio-tree-{}/{side}", self.0)
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn domain(&self, side: &str) -> String {
+        format!("unio.tree.{}.{side}", self.0)
     }
 
     /// The rules of the profile that carry the marker; they go last, so that no other rule
     /// overrides them.
     pub fn rules(&self) -> String {
         format!(
-            "(allow file-read-data (literal \"{}\"))\n(deny file-read-data (literal \"{}\"))\n",
-            self.path("member"),
-            self.path("outside")
+            "(allow user-preference-read (preference-domain \"{}\"))\n\
+             (deny user-preference-read (preference-domain \"{}\"))\n",
+            self.domain("member"),
+            self.domain("outside")
         )
     }
 }
@@ -402,7 +408,9 @@ mod imp {
         }
         const PROC_ALL_PIDS: u32 = 1;
         const PROC_PPID_ONLY: u32 = 6;
-        const SANDBOX_FILTER_PATH: i32 = 1;
+        /// `SANDBOX_FILTER_PREFERENCE_DOMAIN` of libsandbox: the argument names a preference
+        /// domain, as `cfprefsd` checks its clients.
+        const SANDBOX_FILTER_PREFERENCE_DOMAIN: i32 = 6;
         /// `SANDBOX_CHECK_NO_REPORT` of libsandbox: a denied check is not logged.
         const SANDBOX_CHECK_NO_REPORT: i32 = 0x4000_0000;
 
@@ -430,27 +438,29 @@ mod imp {
             list(PROC_ALL_PIDS, 0)
         }
 
-        /// Whether `sandbox_check` reports `read` allowed and `outside` denied for the process.
-        fn check(pid: i32, path: &str) -> i32 {
-            let operation = c"file-read-data";
-            let Ok(path) = CString::new(path) else {
+        /// What `sandbox_check` answers for reading the preference domain in the process: 0
+        /// allowed, 1 denied, -1 an error.
+        fn check(pid: i32, domain: &str) -> i32 {
+            let operation = c"user-preference-read";
+            let Ok(domain) = CString::new(domain) else {
                 return -1;
             };
             // SAFETY: two C strings that live through the call; the variadic argument is the
-            // path the filter type names.
+            // domain the filter type names.
             unsafe {
                 sandbox_check(
                     pid,
                     operation.as_ptr(),
-                    SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT,
-                    path.as_ptr(),
+                    SANDBOX_FILTER_PREFERENCE_DOMAIN | SANDBOX_CHECK_NO_REPORT,
+                    domain.as_ptr(),
                 )
             }
         }
 
-        /// Whether the profile of the process carries the marker.
+        /// Whether the profile of the process carries the marker: the domain `member` is
+        /// allowed and the domain `outside` denied.
         pub fn carries(pid: i32, marker: &Marker) -> bool {
-            check(pid, &marker.path("member")) == 0 && check(pid, &marker.path("outside")) == 1
+            check(pid, &marker.domain("member")) == 0 && check(pid, &marker.domain("outside")) == 1
         }
     }
 }
@@ -674,22 +684,37 @@ mod tests {
         assert_eq!(Marker::from_token(a.token()), Some(a.clone()));
         assert_eq!(Marker::from_token("../x"), None);
         let rules = a.rules();
-        assert!(rules.contains(&format!("unio-tree-{}/member", a.token())));
-        assert!(rules.contains("(deny file-read-data"), "{rules}");
+        assert!(rules.contains(&format!("\"unio.tree.{}.member\"", a.token())));
+        assert!(rules.contains("(deny user-preference-read"), "{rules}");
     }
 
     /// The profile of a child carries the marker, and `sandbox_check` finds it: the test
     /// binary runs itself with one test and a variable that makes that test apply a profile
-    /// with the marker and wait. This process has no profile and does not carry the marker.
+    /// that denies by default, as the profile of a program does, with the marker, and wait.
+    /// This process has no profile and does not carry the marker. Inside the profile, where
+    /// the runtime of a program stops its trees, the child finds the marker on itself and not
+    /// on this process.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_process_under_a_marked_profile_is_found_by_its_marker() {
         const VARIABLE: &str = "UNIO_TREE_MARKER_CHILD";
         if let Ok(token) = std::env::var(VARIABLE) {
             let marker = Marker::from_token(&token).unwrap();
-            let profile = format!("(version 1)\n(allow default)\n{}", marker.rules());
+            let profile = format!(
+                "(version 1)\n(deny default)\n(allow file-read-metadata)\n\
+                 (allow process-info* (target self))\n(allow process-info-listpids)\n\
+                 (allow file-read* file-map-executable (subpath \"/usr/lib\") \
+                 (subpath \"/System\"))\n{}",
+                marker.rules()
+            );
             super::super::macos::init_profile(&profile).unwrap();
-            println!("marked");
+            let parent: i32 = std::env::var("UNIO_TREE_MARKER_PARENT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
+            let itself = imp::macos::carries(std::process::id() as i32, &marker);
+            let other = imp::macos::carries(parent, &marker);
+            println!("marked inside: itself {itself}, parent {other}");
             let mut line = String::new();
             let _ = std::io::stdin().read_line(&mut line);
             return;
@@ -704,16 +729,17 @@ mod tests {
                 "--test-threads=1",
             ])
             .env(VARIABLE, marker.token())
+            .env("UNIO_TREE_MARKER_PARENT", std::process::id().to_string())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let mut out = BufReader::new(child.stdout.take().unwrap());
-        let mut seen = false;
+        let mut seen = String::new();
         let mut line = String::new();
         while out.read_line(&mut line).unwrap_or(0) > 0 {
             if line.contains("marked") {
-                seen = true;
+                seen = line.trim().to_string();
                 break;
             }
             line.clear();
@@ -724,7 +750,11 @@ mod tests {
         let own = imp::macos::carries(std::process::id() as i32, &marker);
         let _ = child.stdin.take().unwrap().write_all(b"\n");
         let _ = child.wait();
-        assert!(seen, "the child did not apply the profile");
+        assert!(!seen.is_empty(), "the child did not apply the profile");
+        assert!(
+            seen.ends_with("marked inside: itself true, parent false"),
+            "inside the profile: {seen}"
+        );
         assert!(found, "the marker of the child was not found");
         assert!(!other, "another marker was found in the child");
         assert!(!own, "a process without a profile carries the marker");
