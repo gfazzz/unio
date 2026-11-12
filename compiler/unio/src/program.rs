@@ -268,7 +268,7 @@ pub fn trusted_stdlib() -> Option<PathBuf> {
         if dir.join("core/prelude.unio").is_file() {
             // Canonical, like the paths of the modules it is compared with: on macOS the
             // temporary directory /var is a link to /private/var.
-            return Some(std::fs::canonicalize(&dir).unwrap_or(dir));
+            return Some(unio_runtime::sandbox::canonical(&dir).unwrap_or(dir));
         }
         return None;
     }
@@ -284,7 +284,7 @@ pub fn trusted_stdlib() -> Option<PathBuf> {
 /// without a rebuild.
 fn checkout_stdlib() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = unio_runtime::sandbox::canonical(&exe).unwrap_or(exe);
     let target = exe
         .ancestors()
         .skip(1)
@@ -296,7 +296,7 @@ fn checkout_stdlib() -> Option<PathBuf> {
         && workspace.join("unio/build.rs").is_file()
         && library.join("core/prelude.unio").is_file();
     if is_checkout {
-        return std::fs::canonicalize(library).ok();
+        return unio_runtime::sandbox::canonical(&library).ok();
     }
     None
 }

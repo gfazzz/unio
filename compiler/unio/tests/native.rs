@@ -5,9 +5,8 @@
 //! (C-4); and a program that does not compile is not built.
 //!
 //! Executables are made for Linux on x86-64 and AArch64, macOS on AArch64, and Windows on
-//! x86-64 (docs/runtime.md 8.4); on any other machine these tests are skipped with a note. On
-//! Windows, which has no sandbox of the operating system yet, the tests act as the operator
-//! who allows the weaker sandbox (SB-5), for `unio build`, `unio run`, and the executables.
+//! x86-64 (docs/runtime.md 8.4); on any other machine these tests are skipped with a note. Every
+//! executable runs under the sandbox of its system, on Windows its AppContainer.
 
 mod common;
 
@@ -34,11 +33,9 @@ fn supported() -> bool {
     false
 }
 
-/// The environment of the operator: no external policy, except on Windows the one that allows
-/// the weaker sandbox there (see `common::allow_weaker_on_windows`).
+/// The environment of the operator: no external policy.
 fn operator(command: &mut Command) -> &mut Command {
     command.env_remove("UNIO_POLICY");
-    common::allow_weaker_on_windows(command);
     command
 }
 

@@ -143,6 +143,11 @@ pub(crate) fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
         Some(e) if e.files.contains_key(path) => Ok(path.to_path_buf()),
         _ if is_builtin(path) => Ok(path.to_path_buf()),
         Some(_) => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        // In the AppContainer of a worker, normalizing a name needs the directories above it
+        // (docs/runtime.md 9.4).
+        #[cfg(windows)]
+        None => unio_runtime::sandbox::windows::canonicalize(path),
+        #[cfg(not(windows))]
         None => std::fs::canonicalize(path),
     }
 }

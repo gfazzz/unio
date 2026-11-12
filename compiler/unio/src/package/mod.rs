@@ -53,7 +53,7 @@ pub fn cache_root() -> Option<PathBuf> {
                     } else {
                         std::env::current_dir().map(|c| c.join(&d)).unwrap_or(d)
                     };
-                    std::fs::canonicalize(&d).unwrap_or(d)
+                    unio_runtime::sandbox::canonical(&d).unwrap_or(d)
                 })
             })
             .clone(),

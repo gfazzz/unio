@@ -859,9 +859,6 @@ public function main() returns Int:
         .current_dir(&dir)
         .env_remove("UNIO_POLICY")
         .arg("run");
-    if cfg!(windows) {
-        command.arg("--allow-weaker-sandbox");
-    }
     let output = command.arg("main.unio").output().unwrap();
     assert_eq!(
         output.status.code(),
@@ -950,11 +947,6 @@ fn unio_in(dir: &Path, args: &[&str], stdlib: Option<&Path>) -> (Option<i32>, St
         command.env("UNIO_STDLIB", root);
     }
     command.arg(args[0]);
-    if cfg!(windows) {
-        // Programs and the workers of the tools need the operator's permission for the weaker
-        // sandbox on Windows (SB-5, SB-10).
-        command.arg("--allow-weaker-sandbox");
-    }
     let output = command.args(&args[1..]).output().unwrap();
     let text = format!(
         "{}{}",

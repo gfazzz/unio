@@ -945,10 +945,9 @@ impl Session {
         let mut spec = worker::Spec::for_packages(&self.options).map_err(Fail::Code)?;
         spec.input = input;
         // The connection is opened here, to the configured host only, and passed to the
-        // worker, which can open none (Linux and macOS).
-        #[cfg(unix)]
+        // worker, which can open none (seccomp and Landlock, Seatbelt, an AppContainer without
+        // capabilities).
         let stream = {
-            use std::os::fd::AsRawFd;
             let mut last = None;
             let mut found = None;
             for address in &addresses {
@@ -973,17 +972,23 @@ impl Session {
             let timeout = Some(std::time::Duration::from_secs(120));
             let _ = stream.set_read_timeout(timeout);
             let _ = stream.set_write_timeout(timeout);
-            inheritable(stream.as_raw_fd())?;
-            spec.socket = Some(stream.as_raw_fd());
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                inheritable(stream.as_raw_fd())?;
+                spec.socket = Some(stream.as_raw_fd().into());
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawSocket;
+                let handle = stream.as_raw_socket() as isize;
+                unio_runtime::sandbox::windows::make_inheritable(handle).map_err(|e| {
+                    format!("the connection cannot be passed to the download worker: {e}")
+                })?;
+                spec.socket = Some(handle as i64);
+            }
             stream
         };
-        #[cfg(not(unix))]
-        {
-            let address = addresses
-                .first()
-                .ok_or_else(|| format!("{}: no address", url.origin()))?;
-            spec.connect = Some(address.to_string());
-        }
         let temp = worker::TempDir::new()?;
         let arguments = vec![
             mode.to_string(),
@@ -994,7 +999,6 @@ impl Session {
             extra.to_string(),
         ];
         let finished = worker::start("download", &arguments, &spec, &temp, true, &[]);
-        #[cfg(unix)]
         drop(stream);
         let finished = finished.map_err(Fail::Code)?;
         if finished.code != 0 {

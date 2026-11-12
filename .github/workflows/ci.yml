@@ -23,10 +23,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      # Windows has no sandbox of the operating system yet, so the programs would not start
-      # there (SB-5); CI, as the operator, allows the weaker sandbox on Windows only.
-      SANDBOX: ${{ matrix.os == 'windows-2025-vs2026' && '--allow-weaker-sandbox' || '' }}
     steps:
       - uses: actions/checkout@v4
       - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
@@ -43,15 +39,15 @@ jobs:
         working-directory: compiler
         run: cargo build --release --locked -p unio
       - name: Documentation formatting and links
-        run: compiler/target/release/unio run $SANDBOX tools/check_docs.unio
+        run: compiler/target/release/unio run tools/check_docs.unio
       - name: Grammar consistency and corpus
-        run: compiler/target/release/unio run $SANDBOX tools/check_grammar.unio -- --corpus
+        run: compiler/target/release/unio run tools/check_grammar.unio -- --corpus
       - name: Unio sources parse (reference programs, standard library, tools)
-        run: compiler/target/release/unio run $SANDBOX tools/check_grammar.unio -- docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+        run: compiler/target/release/unio run tools/check_grammar.unio -- docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
       - name: Unio sources use only the standard library API
-        run: compiler/target/release/unio run $SANDBOX tools/check_api.unio
+        run: compiler/target/release/unio run tools/check_api.unio
       - name: Unio test blocks (stdlib, examples, tools)
-        run: compiler/target/release/unio test $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+        run: compiler/target/release/unio test docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
       # Plan section 12, release condition 4: the notices list the crates of Cargo.lock that
       # the shipped unio and libunio.a contain. The list is the same on every system.
       - name: Third-party notices are up to date
@@ -190,11 +186,6 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
-    env:
-      # Windows has no sandbox of the operating system for the workers of the tools yet, so
-      # check and fmt refuse there with 103 (SB-10); CI, as the operator, allows the weaker
-      # sandbox on Windows only. The refusal itself is tested in tests/workers.rs.
-      SANDBOX: ${{ matrix.os == 'windows-2025-vs2026' && '--allow-weaker-sandbox' || '' }}
     defaults:
       run:
         working-directory: compiler
@@ -232,11 +223,11 @@ jobs:
         working-directory: .
         run: |
           (cd compiler && cargo build --release --locked)
-          compiler/target/release/unio fmt --check $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio
+          compiler/target/release/unio fmt --check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio
       - name: Unio sources pass name and type checks (docs/semantics.md)
         shell: bash
         working-directory: .
-        run: compiler/target/release/unio check $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/semantic/valid/*.unio
+        run: compiler/target/release/unio check docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/semantic/valid/*.unio
 
   release:
     # Plan section 12, release condition 1: the release build in the installed layout of

@@ -748,9 +748,6 @@ fn command(dir: &Path) -> Command {
         .env_remove("UNIO_POLICY")
         .env_remove(unio_runtime::file_trace::ENV)
         .arg("run");
-    if cfg!(windows) {
-        command.arg("--allow-weaker-sandbox");
-    }
     command.arg("main.unio");
     command
 }

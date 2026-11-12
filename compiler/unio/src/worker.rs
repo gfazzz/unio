@@ -101,11 +101,9 @@ pub struct Spec {
     /// The cache of packages, whose locked entries the loader reads (T-14).
     pub cache: Option<PathBuf>,
     /// The connection to a registry that the tool opened for the download worker, which
-    /// inherits it and may open none of its own (SB-12; Linux and macOS).
-    pub socket: Option<i32>,
-    /// Where the download worker connects itself, on Windows, which has no restriction of
-    /// the network for it to keep (SB-4).
-    pub connect: Option<String>,
+    /// inherits it and may open none of its own (SB-12): a descriptor on Unix, the handle of
+    /// the socket on Windows.
+    pub socket: Option<i64>,
 }
 
 /// The directory with `unio.toml` nearest above the path, by its written path and without
@@ -308,8 +306,7 @@ struct Config {
     formats: Vec<PathBuf>,
     write: Vec<PathBuf>,
     cache: Option<PathBuf>,
-    socket: Option<i32>,
-    connect: Option<String>,
+    socket: Option<i64>,
     memory: Option<u64>,
     cpu: Option<u64>,
     allow_weaker: bool,
@@ -318,6 +315,8 @@ struct Config {
     input: usize,
     /// The marker of the process tree, for the profile of the link step (macOS).
     tree: Option<tree::Marker>,
+    /// The drive letters of the volumes and the NT names of their devices (Windows).
+    volumes: Vec<(String, String)>,
 }
 
 fn encode(spec: &Spec, temp: &Path, marker: Option<&tree::Marker>) -> String {
@@ -352,9 +351,6 @@ fn encode(spec: &Spec, temp: &Path, marker: Option<&tree::Marker>) -> String {
     if let Some(socket) = spec.socket {
         out.push_str(&format!("socket {socket}\n"));
     }
-    if let Some(connect) = &spec.connect {
-        out.push_str(&format!("connect {}\n", hex(connect.as_bytes())));
-    }
     out.push_str(&format!("memory {}\n", spec.limits.memory_bytes));
     if let Some(cpu) = spec.limits.cpu_seconds {
         out.push_str(&format!("cpu {cpu}\n"));
@@ -368,6 +364,16 @@ fn encode(spec: &Spec, temp: &Path, marker: Option<&tree::Marker>) -> String {
     }
     if !spec.input.is_empty() {
         out.push_str(&format!("input {}\n", spec.input.len()));
+    }
+    // The drive letters of the volumes, which a process of an AppContainer cannot ask for
+    // (`sandbox::windows::canonicalize`).
+    #[cfg(windows)]
+    for (drive, device) in sandbox::windows::volumes() {
+        out.push_str(&format!(
+            "volume {} {}\n",
+            hex(drive.as_bytes()),
+            hex(device.as_bytes())
+        ));
     }
     out.push_str("end\n");
     out
@@ -403,10 +409,6 @@ fn decode(text: &str) -> Result<Config, String> {
             "write" => config.write.push(hex_path(value).ok_or_else(|| bad(line))?),
             "cache" => config.cache = Some(hex_path(value).ok_or_else(|| bad(line))?),
             "socket" => config.socket = Some(value.parse().map_err(|_| bad(line))?),
-            "connect" => {
-                let bytes = unhex(value).ok_or_else(|| bad(line))?;
-                config.connect = Some(String::from_utf8(bytes).map_err(|_| bad(line))?);
-            }
             "memory" => config.memory = Some(value.parse().map_err(|_| bad(line))?),
             "cpu" => config.cpu = Some(value.parse().map_err(|_| bad(line))?),
             "weaker" => config.allow_weaker = value == "1",
@@ -416,6 +418,14 @@ fn decode(text: &str) -> Result<Config, String> {
                 config.probe = Some(String::from_utf8_lossy(&bytes).into_owned());
             }
             "input" => config.input = value.parse().map_err(|_| bad(line))?,
+            "volume" => {
+                let (drive, device) = value.split_once(' ').ok_or_else(|| bad(line))?;
+                let text = |h: &str| unhex(h).and_then(|b| String::from_utf8(b).ok());
+                config.volumes.push((
+                    text(drive).ok_or_else(|| bad(line))?,
+                    text(device).ok_or_else(|| bad(line))?,
+                ));
+            }
             "end" => return Ok(config),
             _ => return Err(bad(line)),
         }
@@ -511,6 +521,8 @@ pub fn enter(arguments: &[String]) -> Entered {
         return fail("the input after the configuration cannot be read");
     }
     let _ = INPUT.set(input);
+    #[cfg(windows)]
+    sandbox::windows::remember_volumes(Some(config.volumes.clone()));
     if !os::end_with_parent(config.parent) {
         return fail("its tool has already ended");
     }
@@ -652,8 +664,8 @@ fn package_rules(config: &Config) -> os::Rules {
 
 /// The download worker (SB-12): it receives the connection to one configured registry from the
 /// tool and may open none itself (no socket, no `connect`), reads nothing, and writes only its
-/// temporary directory, the download area. On Windows, where the network is not restricted
-/// for a worker (SB-4), it connects itself to the address the tool checked.
+/// temporary directory, the download area. On Windows its AppContainer has no capability, so
+/// it can connect nowhere and uses the socket it inherited.
 fn download_step(config: &Config, arguments: &[String]) -> ExitCode {
     #[cfg(unix)]
     let stream = match config.socket {
@@ -661,22 +673,27 @@ fn download_step(config: &Config, arguments: &[String]) -> ExitCode {
             use std::os::fd::FromRawFd;
             // SAFETY: the tool passed this descriptor, a connected TCP socket, for this worker
             // alone; nothing else in this process owns it.
-            unsafe { std::net::TcpStream::from_raw_fd(fd) }
+            unsafe { std::net::TcpStream::from_raw_fd(fd as i32) }
         }
         None => {
             eprintln!("unio: the download worker was given no connection");
             return ExitCode::from(EXIT_SANDBOX);
         }
     };
-    #[cfg(not(unix))]
-    let stream = match config.connect.as_deref().map(std::net::TcpStream::connect) {
-        Some(Ok(stream)) => stream,
-        Some(Err(e)) => {
-            eprintln!("unio: the download worker cannot connect: {e}");
-            return ExitCode::from(1);
+    #[cfg(windows)]
+    let stream = match config.socket {
+        Some(handle) => {
+            use std::os::windows::io::FromRawSocket;
+            if let Err(e) = sandbox::windows::start_sockets() {
+                eprintln!("unio: the download worker cannot use its connection: {e}");
+                return ExitCode::from(EXIT_SANDBOX);
+            }
+            // SAFETY: the tool passed this socket, connected, for this worker alone; it was
+            // inherited with the same value, and nothing else in this process owns it.
+            unsafe { std::net::TcpStream::from_raw_socket(handle as u64) }
         }
         None => {
-            eprintln!("unio: the download worker was given no address");
+            eprintln!("unio: the download worker was given no connection");
             return ExitCode::from(EXIT_SANDBOX);
         }
     };
@@ -780,7 +797,7 @@ fn link_step(config: &Config, arguments: &[String]) -> ExitCode {
     }
     // The linker's own messages go to standard error: link.exe writes its errors to standard
     // output, which a tool may read as data.
-    match Command::new(cc).args(args).stdin(Stdio::null()).output() {
+    match run_linker(cc, args) {
         Ok(out) if out.status.success() => ExitCode::SUCCESS,
         Ok(out) => {
             eprintln!(
@@ -796,6 +813,44 @@ fn link_step(config: &Config, arguments: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Runs the linker with empty standard input and both outputs captured. On Windows it is
+/// created by the runtime, since the pipes of `std::process` cannot be made inside an
+/// AppContainer; it inherits the container of the worker.
+#[cfg(not(windows))]
+fn run_linker(cc: &str, args: &[String]) -> std::io::Result<std::process::Output> {
+    Command::new(cc).args(args).stdin(Stdio::null()).output()
+}
+
+#[cfg(windows)]
+fn run_linker(cc: &str, args: &[String]) -> std::io::Result<std::process::Output> {
+    use sandbox::windows as w;
+    let program = w::find_program(std::ffi::OsStr::new(cc), None)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
+    let mut command = w::Command::new(program);
+    command.args = args.iter().map(OsString::from).collect();
+    command.stdin = w::Stdio::Null;
+    command.stdout = w::Stdio::Piped;
+    command.stderr = w::Stdio::Piped;
+    let mut child = w::spawn(&command)?;
+    child.resume()?;
+    let mut stderr = child.stderr.take().expect("a piped standard error");
+    let errors = std::thread::spawn(move || {
+        let mut data = Vec::new();
+        let _ = stderr.read_to_end(&mut data);
+        data
+    });
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    let status = child.wait()?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: errors.join().unwrap_or_default(),
+    })
 }
 
 // ---------------------------------------------------------------- the tool's side
@@ -834,44 +889,35 @@ pub fn start(
     capture: bool,
     extra_env: &[(&str, OsString)],
 ) -> Result<Finished, u8> {
-    #[cfg(target_os = "linux")]
-    let exe = PathBuf::from("/proc/self/exe");
-    #[cfg(not(target_os = "linux"))]
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            eprintln!("unio: the executable of the worker: {e}");
-            return Err(EXIT_SANDBOX);
-        }
-    };
-    let mut command = Command::new(exe);
-    command
-        .arg(ARG)
-        .arg(role)
-        .args(arguments)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let marker = (role == "link").then(tree::Marker::new);
+    let mut env: Vec<(OsString, OsString)> = Vec::new();
     for name in LANGUAGE_VARIABLES {
         if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
+            env.push((OsString::from(name), value));
         }
     }
     // System libraries on Windows do not load without it.
     #[cfg(windows)]
     if let Some(value) = std::env::var_os("SystemRoot") {
-        command.env("SystemRoot", value);
+        env.push((OsString::from("SystemRoot"), value));
     }
     for (name, value) in extra_env {
-        command.env(name, value);
+        env.push((OsString::from(name), value.clone()));
     }
-    // The worker and every process it starts form a tree that is stopped as a whole. The link
-    // step runs under a profile that carries the marker of the tree (macOS).
-    tree::prepare(&mut command);
     tree::stop_on_termination();
-    let marker = (role == "link").then(tree::Marker::new);
-    let mut child = match command.spawn() {
+    #[cfg(windows)]
+    let _container = match container_of(spec, temp) {
+        Ok(container) => container,
+        Err(e) => {
+            eprintln!("unio: the AppContainer of the worker cannot be set up: {e}");
+            return Err(EXIT_SANDBOX);
+        }
+    };
+    #[cfg(windows)]
+    let spawned = spawn_worker(role, arguments, env, &_container, spec.socket);
+    #[cfg(not(windows))]
+    let spawned = spawn_worker(role, arguments, env);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(e) => {
             eprintln!("unio: the worker cannot start: {e}");
@@ -1023,6 +1069,87 @@ pub fn start(
             Err(EXIT_ABNORMAL)
         }
     }
+}
+
+/// Starts the worker: the same executable with [`ARG`], the role, and the arguments, with
+/// exactly the given environment and piped standard streams, in a process tree of its own.
+#[cfg(not(windows))]
+fn spawn_worker(
+    role: &str,
+    arguments: &[String],
+    env: Vec<(OsString, OsString)>,
+) -> std::io::Result<tree::Child> {
+    #[cfg(target_os = "linux")]
+    let exe = PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let exe = std::env::current_exe()?;
+    let mut command = Command::new(exe);
+    command
+        .arg(ARG)
+        .arg(role)
+        .args(arguments)
+        .env_clear()
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The worker and every process it starts form a tree that is stopped as a whole. The link
+    // step runs under a profile that carries the marker of the tree (macOS).
+    tree::prepare(&mut command);
+    command.spawn()
+}
+
+/// Windows: the worker is created suspended in its own AppContainer, which may read its scopes,
+/// read and write its temporary directory and the staging directory of the unpack worker, write
+/// the files `unio fmt` was given, execute this executable, and enter the working directory
+/// (docs/runtime.md 9.7).
+#[cfg(windows)]
+fn spawn_worker(
+    role: &str,
+    arguments: &[String],
+    env: Vec<(OsString, OsString)>,
+    container: &sandbox::windows::Container,
+    socket: Option<i64>,
+) -> std::io::Result<tree::Child> {
+    use sandbox::windows as w;
+    let mut command = w::Command::new(std::env::current_exe()?);
+    command.args = std::iter::once(ARG)
+        .chain(std::iter::once(role))
+        .chain(arguments.iter().map(String::as_str))
+        .map(OsString::from)
+        .collect();
+    command.env = Some(env);
+    command.stdin = w::Stdio::Piped;
+    command.stdout = w::Stdio::Piped;
+    command.stderr = w::Stdio::Piped;
+    command.container = Some(container);
+    command.inherit = socket.map(|s| s as isize).into_iter().collect();
+    w::spawn(&command)
+}
+
+/// The AppContainer of one worker with its grants, removed when it is dropped.
+#[cfg(windows)]
+fn container_of(spec: &Spec, temp: &TempDir) -> std::io::Result<sandbox::windows::Container> {
+    use sandbox::windows::{Access, Container};
+    let mut container = Container::new()?;
+    for scope in &spec.read {
+        container.grant(&scope.root, Access::Read, scope.subtree)?;
+    }
+    for file in &spec.read_files {
+        container.grant(file, Access::Read, false)?;
+    }
+    for file in &spec.formats {
+        container.grant(file, Access::WriteFile, false)?;
+    }
+    container.grant(temp.path(), Access::Modify, true)?;
+    // The staging directory of the cache entry the unpack worker writes (SB-12).
+    for scope in &spec.write {
+        container.grant(&scope.root, Access::Modify, scope.subtree)?;
+    }
+    container.grant(&std::env::current_exe()?, Access::Execute, false)?;
+    // A process whose working directory it cannot enter does not start its own children.
+    let _ = container.grant(sandbox::working_directory(), Access::Enter, false);
+    Ok(container)
 }
 
 /// Links in the link step: runs the linker with its arguments in its sandbox, with `PATH`, the

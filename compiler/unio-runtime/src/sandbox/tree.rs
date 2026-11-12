@@ -13,31 +13,34 @@
 //!   process they start, so the marker finds a descendant that left the group and whose parent
 //!   has ended (reparented to launchd). Without a profile (a program without a sandbox, as in
 //!   the tests of the runtime), such a descendant is not found.
-//! - Windows: the child is created suspended, assigned to a new Job Object with kill-on-close
-//!   and without breakaway, and only then resumed, so its first instruction already runs in the
-//!   job and every process it starts is in the job too. A job that cannot be created,
-//!   configured, or assigned fails the start: the suspended child is terminated before it ran.
+//! - Windows: the child is created suspended (`windows::spawn`), assigned to a new Job Object
+//!   with kill-on-close and without breakaway, and only then resumed, so its first instruction
+//!   already runs in the job and every process it starts is in the job too. A job that cannot
+//!   be created, configured, or assigned fails the start: the suspended child is terminated
+//!   before it ran.
+//!
+//! The limit of processes of a program (`limits.processes`) counts every process of the trees
+//! of its children (docs/runtime.md 9.5): on Linux a seccomp filter of the program makes each
+//! creation wait for the runtime, which fails it past the limit (`linux.rs`); on Windows the
+//! job holds at most the processes left and reports each new one, and a tree that started more
+//! is stopped; on macOS the tree is searched for new processes while the call waits, and a
+//! tree found over the limit is stopped.
 
-use std::process::{Child, Command};
+#[cfg(windows)]
+pub use super::windows::Child;
+#[cfg(unix)]
+pub use std::process::Child;
+#[cfg(not(any(unix, windows)))]
+pub use std::process::Child;
 
 /// Prepares the command of a child so that it starts in a tree of its own: a new process group
-/// (Unix) whose descendants cannot leave it (Linux), or suspended until it is in its Job Object
-/// (Windows). [`Tree::start`] must follow the spawn.
-pub fn prepare(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-        super::keep_in_tree(command);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_SUSPENDED: u32 = 0x4;
-        command.creation_flags(CREATE_SUSPENDED);
-    }
-    #[cfg(not(any(unix, windows)))]
-    let _ = command;
+/// (Unix) whose descendants cannot leave it (Linux). [`Tree::start`] must follow the spawn. On
+/// Windows children are created suspended by `windows::spawn` instead.
+#[cfg(unix)]
+pub fn prepare(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    super::keep_in_tree(command);
 }
 
 /// A unique mark of the Seatbelt profile of a process tree on macOS: the profile allows reading
@@ -134,8 +137,10 @@ impl Tree {
     /// puts the suspended child in its Job Object and resumes it; when that fails the child is
     /// terminated and reaped, and the error is returned: the child never ran. `marker` is the
     /// marker of the Seatbelt profile the child runs under, if any (macOS).
+    ///
+    /// Within a program with a limit of processes, the tree counts its processes against it.
     pub fn start(child: &mut Child, marker: Option<Marker>) -> std::io::Result<Tree> {
-        match imp::Tree::start(child, marker) {
+        match imp::Tree::start(child, marker, super::process_budget()) {
             Ok(imp) => Ok(Tree { imp }),
             Err(e) => {
                 let _ = child.kill();
@@ -150,7 +155,17 @@ impl Tree {
     pub fn stop(&mut self) {
         self.imp.stop();
     }
+
+    /// Whether the tree has started more processes than the limit of the program allows; such
+    /// a tree is stopped (Windows, macOS). On Linux a creation past the limit fails instead, so
+    /// a tree is never over it.
+    pub fn over_limit(&mut self) -> bool {
+        self.imp.over_limit()
+    }
 }
+
+/// The processes of a tree the limit still allows besides those already counted.
+pub type Budget = Option<(u64, std::sync::Arc<std::sync::atomic::AtomicU64>)>;
 
 /// Whether the child has ended, without reaping it on Unix (waitid with WNOWAIT), so that its
 /// tree can be stopped before its number is free again.
@@ -228,10 +243,19 @@ mod imp {
         live: bool,
         #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
         marker: Option<Marker>,
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        budget: super::Budget,
+        /// The processes of the tree found so far (macOS).
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        seen: Vec<i32>,
     }
 
     impl Tree {
-        pub fn start(child: &mut Child, marker: Option<Marker>) -> std::io::Result<Tree> {
+        pub fn start(
+            child: &mut Child,
+            marker: Option<Marker>,
+            budget: super::Budget,
+        ) -> std::io::Result<Tree> {
             let group = i32::try_from(child.id()).unwrap_or(0);
             if group <= 0 {
                 return Err(std::io::Error::other("the child has no process number"));
@@ -241,6 +265,8 @@ mod imp {
                 group,
                 live: true,
                 marker,
+                budget,
+                seen: vec![group],
             })
         }
 
@@ -250,6 +276,55 @@ mod imp {
                 unregister(self.group);
                 self.live = false;
             }
+        }
+
+        /// Linux: the filter of the program fails every creation past the limit.
+        #[cfg(not(target_os = "macos"))]
+        pub fn over_limit(&mut self) -> bool {
+            false
+        }
+
+        /// macOS: the descendants are searched through their parents and the marker, and each
+        /// process not seen before counts; a tree over the limit is stopped. A process that
+        /// starts and ends between two searches is not seen.
+        #[cfg(target_os = "macos")]
+        pub fn over_limit(&mut self) -> bool {
+            use std::sync::atomic::Ordering;
+            let Some((limit, counted)) = &self.budget else {
+                return false;
+            };
+            if !self.live {
+                return false;
+            }
+            let own = std::process::id() as i32;
+            let mut next = 0;
+            while next < self.seen.len() && self.seen.len() < 4096 {
+                let parent = self.seen[next];
+                next += 1;
+                for pid in macos::children_of(parent) {
+                    if pid > 0 && pid != own && !self.seen.contains(&pid) {
+                        self.seen.push(pid);
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+            if let Some(marker) = &self.marker {
+                for pid in macos::all_pids() {
+                    if pid > 1
+                        && pid != own
+                        && !self.seen.contains(&pid)
+                        && macos::carries(pid, marker)
+                    {
+                        self.seen.push(pid);
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+            if counted.load(Ordering::SeqCst) > *limit {
+                self.stop();
+                return true;
+            }
+            false
         }
     }
 
@@ -467,9 +542,9 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use super::Marker;
-    use std::os::windows::io::AsRawHandle;
-    use std::process::Child;
+    use super::{Budget, Child, Marker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     type Handle = *mut std::ffi::c_void;
 
@@ -499,14 +574,9 @@ mod imp {
     }
 
     #[repr(C)]
-    struct ThreadEntry {
-        size: u32,
-        usage: u32,
-        thread: u32,
-        owner: u32,
-        base_priority: i32,
-        delta_priority: i32,
-        flags: u32,
+    struct CompletionPort {
+        key: *mut std::ffi::c_void,
+        port: Handle,
     }
 
     #[link(name = "kernel32")]
@@ -521,30 +591,60 @@ mod imp {
         fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
         fn TerminateJobObject(job: Handle, code: u32) -> i32;
         fn CloseHandle(handle: Handle) -> i32;
-        fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> Handle;
-        fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry) -> i32;
-        fn Thread32Next(snapshot: Handle, entry: *mut ThreadEntry) -> i32;
-        fn OpenThread(access: u32, inherit: i32, thread: u32) -> Handle;
-        fn ResumeThread(thread: Handle) -> u32;
+        fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
+        fn GetQueuedCompletionStatus(
+            port: Handle,
+            bytes: *mut u32,
+            key: *mut usize,
+            overlapped: *mut *mut std::ffi::c_void,
+            milliseconds: u32,
+        ) -> i32;
+        fn PostQueuedCompletionStatus(
+            port: Handle,
+            bytes: u32,
+            key: usize,
+            overlapped: *mut std::ffi::c_void,
+        ) -> i32;
+        fn DuplicateHandle(
+            source_process: Handle,
+            source: Handle,
+            target_process: Handle,
+            target: *mut Handle,
+            access: u32,
+            inherit: i32,
+            options: u32,
+        ) -> i32;
+        // As declared in mod.rs: a pseudo handle.
+        fn GetCurrentProcess() -> isize;
     }
+    const JOB_OBJECT_BASIC_LIMIT_INFORMATION: i32 = 2;
+    const JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION: i32 = 7;
     const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x8;
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const JOB_OBJECT_MSG_NEW_PROCESS: u32 = 6;
+    const DUPLICATE_SAME_ACCESS: u32 = 0x2;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    /// The key of the packet that ends the thread that watches a job.
+    const QUIT: usize = 1;
     /// The flags of the job: kill-on-close only. Neither JOB_OBJECT_LIMIT_BREAKAWAY_OK
     /// (0x800) nor JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK (0x1000) is set, so a process in the
     /// job cannot start a child outside it with CREATE_BREAKAWAY_FROM_JOB.
     const JOB_FLAGS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     const _: () = assert!(JOB_FLAGS & (0x800 | 0x1000) == 0);
-    const TH32CS_SNAPTHREAD: u32 = 0x4;
-    const THREAD_SUSPEND_RESUME: u32 = 0x2;
-    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
     /// A Job Object that holds the child and every process it starts; closing it stops them
-    /// all (kill-on-close).
+    /// all (kill-on-close). With a limit of processes, the job holds at most the processes the
+    /// limit leaves at once, and a thread counts every new process from the messages of the
+    /// job: when the count reaches the limit, no further process may join the job; a tree that
+    /// started more (in the moment before that) is terminated.
     pub struct Tree {
         job: Handle,
+        port: Handle,
+        exceeded: Arc<AtomicBool>,
     }
 
-    // SAFETY: the job handle is owned by the tree and may be used from any thread.
+    // SAFETY: the handles are owned by the tree and may be used from any thread.
     unsafe impl Send for Tree {}
 
     fn last_error(what: &str) -> std::io::Error {
@@ -552,8 +652,26 @@ mod imp {
         std::io::Error::new(e.kind(), format!("{what}: {e}"))
     }
 
+    unsafe fn set_active_limit(job: Handle, processes: u32) -> bool {
+        let mut limits = BasicLimits {
+            flags: JOB_FLAGS | JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            active_processes: processes.max(1),
+            ..BasicLimits::default()
+        };
+        SetInformationJobObject(
+            job,
+            JOB_OBJECT_BASIC_LIMIT_INFORMATION,
+            (&mut limits as *mut BasicLimits).cast(),
+            std::mem::size_of::<BasicLimits>() as u32,
+        ) != 0
+    }
+
     impl Tree {
-        pub fn start(child: &mut Child, _: Option<Marker>) -> std::io::Result<Tree> {
+        pub fn start(
+            child: &mut Child,
+            _: Option<Marker>,
+            budget: Budget,
+        ) -> std::io::Result<Tree> {
             // SAFETY: a new unnamed job with default security; the limits structure is the
             // documented JOBOBJECT_EXTENDED_LIMIT_INFORMATION; the process handle belongs to
             // the child, which is alive and suspended.
@@ -562,9 +680,19 @@ mod imp {
                 if job.is_null() {
                     return Err(last_error("the Job Object cannot be created"));
                 }
-                let tree = Tree { job };
+                let mut tree = Tree {
+                    job,
+                    port: std::ptr::null_mut(),
+                    exceeded: Arc::new(AtomicBool::new(false)),
+                };
                 let mut limits = ExtendedLimits::default();
                 limits.basic.flags = JOB_FLAGS;
+                if let Some((limit, counted)) = &budget {
+                    // The child itself was counted when the call started it.
+                    let left = limit.saturating_sub(counted.load(Ordering::SeqCst)) + 1;
+                    limits.basic.flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+                    limits.basic.active_processes = u32::try_from(left).unwrap_or(u32::MAX);
+                }
                 if SetInformationJobObject(
                     job,
                     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -574,75 +702,147 @@ mod imp {
                 {
                     return Err(last_error("the Job Object cannot be configured"));
                 }
+                if let Some((limit, counted)) = budget {
+                    tree.watch(limit, counted, child.id())?;
+                }
                 if AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
                     return Err(last_error("the child cannot be put in its Job Object"));
                 }
-                resume(child.id())?;
+                child.resume()?;
                 Ok(tree)
             }
         }
 
+        /// Starts the thread that counts the new processes of the job.
+        unsafe fn watch(
+            &mut self,
+            limit: u64,
+            counted: Arc<std::sync::atomic::AtomicU64>,
+            child: u32,
+        ) -> std::io::Result<()> {
+            let port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1);
+            if port.is_null() {
+                return Err(last_error(
+                    "the messages of the Job Object cannot be received",
+                ));
+            }
+            self.port = port;
+            let mut association = CompletionPort {
+                key: std::ptr::null_mut(),
+                port,
+            };
+            if SetInformationJobObject(
+                self.job,
+                JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION,
+                (&mut association as *mut CompletionPort).cast(),
+                std::mem::size_of::<CompletionPort>() as u32,
+            ) == 0
+            {
+                return Err(last_error(
+                    "the messages of the Job Object cannot be received",
+                ));
+            }
+            // The thread keeps handles of its own, so that stopping the tree never closes a
+            // handle it still uses.
+            let mut job: Handle = std::ptr::null_mut();
+            let mut own_port: Handle = std::ptr::null_mut();
+            let process = GetCurrentProcess() as Handle;
+            if DuplicateHandle(
+                process,
+                self.job,
+                process,
+                &mut job,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            ) == 0
+                || DuplicateHandle(
+                    process,
+                    port,
+                    process,
+                    &mut own_port,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                ) == 0
+            {
+                return Err(last_error("the Job Object cannot be watched"));
+            }
+            let exceeded = Arc::clone(&self.exceeded);
+            let (job, own_port) = (job as usize, own_port as usize);
+            let spawned = std::thread::Builder::new()
+                .name("unio-job".into())
+                .spawn(move || {
+                    let (job, port) = (job as Handle, own_port as Handle);
+                    loop {
+                        let mut message = 0u32;
+                        let mut key = 0usize;
+                        let mut pid: *mut std::ffi::c_void = std::ptr::null_mut();
+                        // SAFETY: the port is owned by this thread; the outputs are locals.
+                        let got = unsafe {
+                            GetQueuedCompletionStatus(
+                                port,
+                                &mut message,
+                                &mut key,
+                                &mut pid,
+                                u32::MAX,
+                            )
+                        };
+                        if got == 0 || key == QUIT {
+                            break;
+                        }
+                        if message != JOB_OBJECT_MSG_NEW_PROCESS || pid as usize as u32 == child {
+                            continue;
+                        }
+                        let now = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                        // SAFETY: the job handle is owned by this thread.
+                        unsafe {
+                            if now >= limit {
+                                // No further process may join the job.
+                                set_active_limit(job, 1);
+                            }
+                            if now > limit {
+                                exceeded.store(true, Ordering::SeqCst);
+                                TerminateJobObject(job, 1);
+                            }
+                        }
+                    }
+                    // SAFETY: both handles are owned by this thread.
+                    unsafe {
+                        CloseHandle(job);
+                        CloseHandle(port);
+                    }
+                });
+            if spawned.is_err() {
+                return Err(std::io::Error::other("the Job Object cannot be watched"));
+            }
+            Ok(())
+        }
+
         pub fn stop(&mut self) {
-            if !self.job.is_null() {
-                // SAFETY: the job handle is owned by this tree and closed once.
-                unsafe {
+            // SAFETY: the handles are owned by this tree and closed once.
+            unsafe {
+                if !self.job.is_null() {
                     TerminateJobObject(self.job, 1);
                     CloseHandle(self.job);
+                    self.job = std::ptr::null_mut();
                 }
-                self.job = std::ptr::null_mut();
+                if !self.port.is_null() {
+                    PostQueuedCompletionStatus(self.port, 0, QUIT, std::ptr::null_mut());
+                    CloseHandle(self.port);
+                    self.port = std::ptr::null_mut();
+                }
             }
+        }
+
+        pub fn over_limit(&mut self) -> bool {
+            self.exceeded.load(Ordering::SeqCst)
         }
     }
 
     impl Drop for Tree {
         fn drop(&mut self) {
             self.stop();
-        }
-    }
-
-    /// Resumes the threads of a process created suspended: its one main thread.
-    fn resume(process: u32) -> std::io::Result<()> {
-        // SAFETY: a snapshot of the threads of the system, walked with an entry of the
-        // documented THREADENTRY32 layout; each thread handle is closed after use.
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
-                return Err(last_error("the threads of the child cannot be listed"));
-            }
-            let mut entry = ThreadEntry {
-                size: std::mem::size_of::<ThreadEntry>() as u32,
-                usage: 0,
-                thread: 0,
-                owner: 0,
-                base_priority: 0,
-                delta_priority: 0,
-                flags: 0,
-            };
-            let mut resumed = 0;
-            let mut failed = None;
-            let mut more = Thread32First(snapshot, &mut entry) != 0;
-            while more {
-                if entry.owner == process {
-                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.thread);
-                    if thread.is_null() || ResumeThread(thread) == u32::MAX {
-                        failed = Some(last_error("the child cannot be resumed"));
-                    } else {
-                        resumed += 1;
-                    }
-                    if !thread.is_null() {
-                        CloseHandle(thread);
-                    }
-                }
-                more = Thread32Next(snapshot, &mut entry) != 0;
-            }
-            CloseHandle(snapshot);
-            match failed {
-                Some(e) => Err(e),
-                None if resumed == 0 => Err(std::io::Error::other(
-                    "the child cannot be resumed: it has no thread",
-                )),
-                None => Ok(()),
-            }
         }
     }
 
@@ -660,11 +860,15 @@ mod imp {
     pub struct Tree;
 
     impl Tree {
-        pub fn start(_: &mut Child, _: Option<Marker>) -> std::io::Result<Tree> {
+        pub fn start(_: &mut Child, _: Option<Marker>, _: super::Budget) -> std::io::Result<Tree> {
             Ok(Tree)
         }
 
         pub fn stop(&mut self) {}
+
+        pub fn over_limit(&mut self) -> bool {
+            false
+        }
     }
 
     pub fn has_exited(child: &mut Child) -> std::io::Result<bool> {

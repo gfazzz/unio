@@ -398,7 +398,14 @@ fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }) {
         return done.map(|()| Value::Unit);
     }
-    rename_without_replacing(&from, &to).map_err(|e| os_error(target.as_str(), &e))?;
+    crate::sandbox::writing(|| {
+        #[cfg(windows)]
+        if let Some(done) = crate::sandbox::rename_checked(&from, &to, false) {
+            return done;
+        }
+        rename_without_replacing(&from, &to)
+    })
+    .map_err(|e| os_error(target.as_str(), &e))?;
     trace("rename-noreplace", &[&from, &to], None);
     Ok(Value::Unit)
 }
@@ -552,7 +559,14 @@ fn create_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }) {
         return done.map(|()| Value::Unit);
     }
-    fs::create_dir(&target).map_err(|e| os_error(p.as_str(), &e))?;
+    crate::sandbox::writing(|| {
+        #[cfg(windows)]
+        if let Some(done) = crate::sandbox::make_directory_checked(&target) {
+            return done;
+        }
+        fs::create_dir(&target)
+    })
+    .map_err(|e| os_error(p.as_str(), &e))?;
     trace("mkdir", &[&target], None);
     // The entry of the new directory is synced, so that a durable write into it survives power
     // loss (S-9, docs/runtime.md 10). The directory exists either way, so a failed sync is not
@@ -591,9 +605,9 @@ fn system_supports_durability(runtime: &mut Runtime, arguments: &mut [Value]) ->
             return answer.map(Value::Bool);
         }
     }
-    Ok(Value::Bool(super::durability::supports_durability(
-        &native(&p),
-    )))
+    Ok(Value::Bool(crate::sandbox::writing(|| {
+        super::durability::supports_durability(&native(&p))
+    })))
 }
 
 /// Creates .<name>.unio-tmp-<id> next to the target and opens it for writing.
@@ -629,11 +643,17 @@ fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let temporary = directory.join(format!(".{name}.unio-tmp-{}", runtime.next_temporary_id()));
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|e| os_error(target.as_str(), &e))?;
+    let file = crate::sandbox::writing(|| {
+        #[cfg(windows)]
+        if let Some(done) = crate::sandbox::create_new_checked(&temporary) {
+            return done;
+        }
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+    })
+    .map_err(|e| os_error(target.as_str(), &e))?;
     trace("create", &[&temporary], None);
     let descriptor = runtime.add_descriptor(file);
     trace_descriptor(
@@ -769,7 +789,14 @@ fn system_rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }) {
         return done.map(|()| Value::Unit);
     }
-    replace(&from, &to).map_err(|e| os_error(target.as_str(), &e))?;
+    crate::sandbox::writing(|| {
+        #[cfg(windows)]
+        if let Some(done) = crate::sandbox::rename_checked(&from, &to, true) {
+            return done;
+        }
+        replace(&from, &to)
+    })
+    .map_err(|e| os_error(target.as_str(), &e))?;
     // MOVEFILE_WRITE_THROUGH returns after the rename is on the disk (S-9a).
     let operation = if cfg!(windows) {
         "rename-write-through"
@@ -917,7 +944,14 @@ fn system_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         return Ok(Value::Unit);
     }
     if let Some(entry) = crate::sandbox::temporary_target(p.as_str()) {
-        if fs::remove_file(&entry).is_ok() {
+        let removed = crate::sandbox::writing(|| {
+            #[cfg(windows)]
+            if let Some(done) = crate::sandbox::remove_checked(&entry) {
+                return done;
+            }
+            fs::remove_file(&entry)
+        });
+        if removed.is_ok() {
             trace("unlink", &[&entry], None);
         }
     }

@@ -215,7 +215,16 @@ mod tests {
             walk(&mut fake, &anchored(&["a", "f"])).unwrap(),
             Path::new("/s/a/f")
         );
-        assert_eq!(fake.log, ["anchor /s", "dir /s/a", "last /s/a/f"]);
+        // The names are joined with the separator of the system.
+        let s = Path::new("/s");
+        assert_eq!(
+            fake.log,
+            [
+                "anchor /s".to_string(),
+                format!("dir {}", s.join("a").display()),
+                format!("last {}", s.join("a").join("f").display()),
+            ]
+        );
         assert!(walk(&mut fake, &anchored(&["l", "f"])).is_err());
         assert!(walk(&mut fake, &anchored(&["a", "fl"])).is_err());
         assert!(walk(&mut fake, &anchored(&["a", "missing"])).is_err());
