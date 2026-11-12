@@ -23,6 +23,7 @@
 
 pub mod toml;
 
+pub mod beneath;
 #[cfg(unix)]
 mod children;
 #[cfg(unix)]
@@ -766,16 +767,79 @@ pub fn may_write(path: &str) -> bool {
     write_target(path).is_some()
 }
 
-/// Opens a file for reading at a path that [`read_target`] returned. In a sandbox on Linux the
-/// directory is opened one component at a time from `/` without following a link, and the file
-/// in it with O_NOFOLLOW, so that a link put on the path after the check makes the open fail
-/// instead of leading it outside the scope; elsewhere the resolved path is opened as it is.
+/// The path that [`read_target`] returned, split at the scope that covers it, when a sandbox
+/// is active on this thread; `None` without one, where the path is used as given.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn below_scope(target: &Path) -> std::io::Result<Option<beneath::Anchored>> {
+    let Some(a) = active() else {
+        return Ok(None);
+    };
+    beneath::anchor(target, &a.sandbox.permissions.read)
+        .map(Some)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+}
+
+// The read-class operations below use what the check authorized (release condition 5,
+// docs/runtime.md 9.2). In a sandbox on Linux and macOS each opens the checked path from the
+// directory of its scope without following a link in any component ([`fdio::open_checked`]),
+// so a link that another process puts on the path after the check makes the operation fail
+// instead of leading it out of the scope. On Windows the checked path is still opened by its
+// name: handle-relative opening plugs in here through [`beneath::Beneath`] and
+// [`beneath::walk`], with [`below_scope`] giving the anchor.
+
+/// Opens a file for reading at a path that [`read_target`] returned.
 pub fn open_for_reading(target: &Path) -> std::io::Result<std::fs::File> {
-    #[cfg(target_os = "linux")]
-    if active().is_some() {
-        return fdio::open_read_beneath(target);
+    #[cfg(unix)]
+    if let Some(anchored) = below_scope(target)? {
+        return fdio::open_checked(&anchored, fdio::Want::Read).map(std::fs::File::from);
     }
     std::fs::File::open(target)
+}
+
+/// What exists at a path that [`read_target`] returned, following no link put there after the
+/// check (`exists`, `is_directory`).
+pub fn entry_kind(target: &Path) -> std::io::Result<beneath::Kind> {
+    #[cfg(unix)]
+    if let Some(anchored) = below_scope(target)? {
+        return fdio::kind_checked(&anchored);
+    }
+    let metadata = std::fs::metadata(target)?;
+    Ok(if metadata.is_dir() {
+        beneath::Kind::Directory
+    } else {
+        beneath::Kind::Other
+    })
+}
+
+/// Calls `each` with the names in the directory at a path that [`read_target`] returned,
+/// without `.` and `..`; stops early when `each` returns false.
+pub fn list_directory(
+    target: &Path,
+    each: &mut dyn FnMut(&std::ffi::OsStr) -> bool,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(anchored) = below_scope(target)? {
+        let dir = fdio::open_checked(&anchored, fdio::Want::Directory)?;
+        return fdio::list_names(dir, each);
+    }
+    for entry in std::fs::read_dir(target)? {
+        if !each(&entry?.file_name()) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The existing path that a path [`read_target`] returned names, with every link resolved. In
+/// a sandbox the check has resolved it already, so it is confirmed to exist without following a
+/// link and returned as it is: the name of a place outside the scope is never reported.
+pub fn resolve_existing(target: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(unix)]
+    if below_scope(target)?.is_some() {
+        entry_kind(target)?;
+        return Ok(target.to_path_buf());
+    }
+    std::fs::canonicalize(absolute(target))
 }
 
 /// Whether the path is a temporary file `.<name>.unio-tmp-<id>` of the atomic commit protocol

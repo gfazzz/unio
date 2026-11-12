@@ -704,3 +704,118 @@ fn reading_a_file_of_unknown_size_counts_the_buffer_it_grows() {
     writer.join().unwrap();
     assert!(matches!(read, Ok(Value::Bytes(b)) if b.len() == 100 * 1024));
 }
+
+/// Release condition 5 (docs/plan.md section 12, runtime.md 9.2): another process swaps a
+/// directory and a file of the scope for links that lead outside it, in a tight loop, while the
+/// program reads, lists, asks about, and resolves paths through them. The check sees the link
+/// or the real entry, but whatever it saw, the operation must not reach what lies outside:
+/// nothing outside is read, listed, reported as existing, or named. Only the runtime checks
+/// stand between the program and the file system here (the weaker sandbox), so that the rules
+/// of the operating system do not hide the race.
+#[cfg(unix)]
+#[test]
+fn a_link_swapped_in_after_the_check_reveals_nothing_outside_the_scope() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let scratch = Scratch::new("swap-race");
+    let root = std::fs::canonicalize(&scratch.0).unwrap();
+    for dir in ["open/d/sub", "outside/only-outside-dir"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(root.join("open/d/f.txt"), "inside").unwrap();
+    std::fs::write(root.join("open/f.txt"), "inside").unwrap();
+    std::fs::write(root.join("outside/f.txt"), "SECRET").unwrap();
+    std::fs::write(root.join("outside/only-outside.txt"), "SECRET").unwrap();
+    std::os::unix::fs::symlink(root.join("outside"), root.join("open/d-link")).unwrap();
+    std::os::unix::fs::symlink(root.join("outside/f.txt"), root.join("open/f-link")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, open) = (Arc::clone(&stop), root.join("open"));
+        std::thread::spawn(move || {
+            let at = |name: &str| open.join(name);
+            while !stop.load(Ordering::Relaxed) {
+                // open/d and open/f.txt are the real entries, then the links, then real again.
+                let _ = std::fs::rename(at("d"), at("d-real"));
+                let _ = std::fs::rename(at("d-link"), at("d"));
+                let _ = std::fs::rename(at("f.txt"), at("f-real"));
+                let _ = std::fs::rename(at("f-link"), at("f.txt"));
+                std::thread::yield_now();
+                let _ = std::fs::rename(at("d"), at("d-link"));
+                let _ = std::fs::rename(at("d-real"), at("d"));
+                let _ = std::fs::rename(at("f.txt"), at("f-link"));
+                let _ = std::fs::rename(at("f-real"), at("f.txt"));
+                std::thread::yield_now();
+            }
+        })
+    };
+    let leaks = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (found, check_root) = (Arc::clone(&leaks), root.clone());
+    in_checks_only_sandbox(root.join("open"), move |rt| {
+        let root = check_root;
+        let outside = root.join("outside");
+        let leak = |what: String| found.lock().unwrap().push(what);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut rounds = 0u64;
+        while std::time::Instant::now() < deadline || rounds < 2000 {
+            rounds += 1;
+            for file in ["open/d/f.txt", "open/f.txt"] {
+                let file = root.join(file);
+                for name in ["std.files.read_text", "std.files.read_bytes"] {
+                    match call(rt, name, &mut [p(&file)]) {
+                        Ok(Value::Text(t)) if t.as_str() == "SECRET" => leak(name.to_string()),
+                        Ok(Value::Bytes(b)) if b.as_slice() == b"SECRET" => leak(name.to_string()),
+                        _ => {}
+                    }
+                }
+                if let Ok(Value::Int(d)) = call(rt, "std.files.system_open_read", &mut [p(&file)]) {
+                    let read = call(
+                        rt,
+                        "std.files.system_read_chunk",
+                        &mut [Value::Int(d), p(&file), Value::Int(64)],
+                    );
+                    if let Ok(step) = read {
+                        if matches!(step.field("data"), Some(Value::Bytes(b)) if b.as_slice() == b"SECRET")
+                        {
+                            leak("system_open_read".into());
+                        }
+                    }
+                    let _ = call(rt, "std.files.system_close", &mut [Value::Int(d)]);
+                }
+                if let Ok(Value::Path(r)) = call(rt, "std.files.resolve", &mut [p(&file)]) {
+                    if Path::new(r.as_str()).starts_with(&outside) {
+                        leak(format!("resolve {r:?}"));
+                    }
+                }
+            }
+            let d = root.join("open/d");
+            if let Ok(entries) = call(rt, "std.files.list_directory", &mut [p(&d)]) {
+                let names = format!("{entries:?}");
+                if names.contains("only-outside") {
+                    leak(format!("list_directory {names}"));
+                }
+            }
+            if let Ok(Value::Path(r)) = call(rt, "std.files.resolve", &mut [p(&d)]) {
+                if Path::new(r.as_str()).starts_with(&outside) {
+                    leak(format!("resolve {r:?}"));
+                }
+            }
+            for (name, path) in [
+                ("std.files.exists", "open/d/only-outside.txt"),
+                ("std.files.is_directory", "open/d/only-outside-dir"),
+            ] {
+                if matches!(
+                    call(rt, name, &mut [p(&root.join(path))]),
+                    Ok(Value::Bool(true))
+                ) {
+                    leak(name.into());
+                }
+            }
+        }
+    });
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let mut leaks = leaks.lock().unwrap().clone();
+    leaks.sort();
+    leaks.dedup();
+    assert!(leaks.is_empty(), "outside the scope: {leaks:?}");
+}

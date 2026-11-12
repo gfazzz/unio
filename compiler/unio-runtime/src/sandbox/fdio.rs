@@ -10,6 +10,8 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
+use super::beneath::{Anchored, Kind};
+
 extern "C" {
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
@@ -157,28 +159,343 @@ pub fn open_directory(path: &Path) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
-/// Opens an existing file of an absolute, link-free path for reading: its directory as
-/// [`open_directory`] opens it, and the file in it with O_NOFOLLOW, so that no link on the path
-/// is followed, not even one put there after the path was checked (ELOOP).
-#[cfg(target_os = "linux")]
-pub fn open_read_beneath(path: &Path) -> io::Result<std::fs::File> {
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the path does not name a file",
-        ));
+/// What a read-class operation opens at the end of a walk below a scope ([`open_checked`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Want {
+    /// A file, for reading its content.
+    Read,
+    /// A directory, for listing its names.
+    Directory,
+}
+
+/// Opens a path that the runtime checked, split at its scope ([`super::beneath::anchor`]), so
+/// that a link put on any component after the check makes the open fail instead of leading it
+/// out of the scope (release condition 5, docs/runtime.md 9.2).
+///
+/// Linux: the anchor is opened one component at a time from `/` ([`open_directory`]) and the
+/// rest relative to it, with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+/// RESOLVE_NO_MAGICLINKS` where the kernel has it (5.6 and later) and otherwise one component
+/// at a time with `O_NOFOLLOW` ([`super::beneath::walk`]). macOS: the whole path is opened with
+/// `O_NOFOLLOW_ANY` (macOS 11 and later), which fails on a link in any component; the path has
+/// no `.` and `..`, so it names exactly the components the check saw.
+pub fn open_checked(anchored: &Anchored, want: Want) -> io::Result<OwnedFd> {
+    let flags = match want {
+        Want::Read => O_RDONLY | O_CLOEXEC,
+        Want::Directory => O_RDONLY | O_DIRECTORY | O_CLOEXEC,
     };
-    let dir = open_directory(parent)?;
+    open_with(anchored, flags)
+}
+
+/// What the checked path is, without following a link in any component and without opening
+/// its content (`exists`, `is_directory`, `resolve`).
+#[cfg(target_os = "linux")]
+pub fn kind_checked(anchored: &Anchored) -> io::Result<Kind> {
+    // O_PATH names the object without opening it, so a device or a pipe is not touched; with
+    // O_NOFOLLOW a link as the last name is opened as the link itself, and refused here.
+    let file = std::fs::File::from(open_with(anchored, O_PATH | O_CLOEXEC)?);
+    let kind = file.metadata()?.file_type();
+    if kind.is_symlink() {
+        Err(io::Error::from_raw_os_error(ELOOP))
+    } else if kind.is_dir() {
+        Ok(Kind::Directory)
+    } else {
+        Ok(Kind::Other)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_with(anchored: &Anchored, flags: i32) -> io::Result<OwnedFd> {
+    let anchor = open_directory(&anchored.anchor)?;
+    if !anchored.rest.is_empty() {
+        let mut rest = std::path::PathBuf::new();
+        rest.extend(&anchored.rest);
+        if let Some(done) = openat2_beneath(&anchor, rest.as_os_str(), flags | O_NOFOLLOW) {
+            return done;
+        }
+    }
+    open_walking(anchored, anchor, flags)
+}
+
+/// The walk without `openat2`: one component at a time below the opened anchor.
+#[cfg(target_os = "linux")]
+fn open_walking(anchored: &Anchored, anchor: OwnedFd, flags: i32) -> io::Result<OwnedFd> {
+    let mut steps = Steps {
+        last: flags,
+        anchor: Some(anchor),
+    };
+    super::beneath::walk(&mut steps, anchored)
+}
+
+/// The steps of [`super::beneath::walk`] with descriptors: the anchor as [`open_directory`]
+/// opens it (or as it was already opened), each directory with `O_PATH` and `O_NOFOLLOW`, the
+/// last name with the flags of the operation and `O_NOFOLLOW`.
+#[cfg(target_os = "linux")]
+struct Steps {
+    last: i32,
+    anchor: Option<OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl super::beneath::Beneath for Steps {
+    type Handle = OwnedFd;
+    fn open_anchor(&mut self, anchor: &Path) -> io::Result<OwnedFd> {
+        match self.anchor.take() {
+            Some(fd) => Ok(fd),
+            None => open_directory(anchor),
+        }
+    }
+    fn open_directory(&mut self, dir: &OwnedFd, name: &std::ffi::OsString) -> io::Result<OwnedFd> {
+        open_in(dir, name, O_DIR_HANDLE | O_NOFOLLOW)
+    }
+    fn open_last(&mut self, dir: &OwnedFd, name: &std::ffi::OsString) -> io::Result<OwnedFd> {
+        open_in(dir, name, self.last | O_NOFOLLOW)
+    }
+    fn reopen_anchor(&mut self, anchor: OwnedFd) -> io::Result<OwnedFd> {
+        if self.last & O_PATH != 0 {
+            return Ok(anchor);
+        }
+        // `.` is never a link; the directory is opened again with the rights of the operation.
+        open_in(&anchor, OsStr::new("."), self.last)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_in(dir: &OwnedFd, name: &OsStr, flags: i32) -> io::Result<OwnedFd> {
     let name = c_text(name.as_bytes())?;
     // SAFETY: the descriptor is open and name ends with 0.
-    let fd = owned(unsafe {
-        openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+    owned(unsafe { openat(dir.as_raw_fd(), name.as_ptr(), flags) })
+}
+
+/// Whether the kernel lacks `openat2` (Linux before 5.6, or a filter that refuses it); then
+/// every open walks one component at a time.
+#[cfg(target_os = "linux")]
+static NO_OPENAT2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `openat2` below the directory, refusing every link and every way out of it; `None` where
+/// the kernel cannot do it, so that the caller walks instead.
+#[cfg(target_os = "linux")]
+fn openat2_beneath(dir: &OwnedFd, rest: &OsStr, flags: i32) -> Option<io::Result<OwnedFd>> {
+    use std::sync::atomic::Ordering;
+    #[repr(C)]
+    struct OpenHow {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+    extern "C" {
+        fn syscall(number: i64, ...) -> i64;
+    }
+    // The same number on every architecture, as for all calls from 424 on.
+    const SYS_OPENAT2: i64 = 437;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    const ENOSYS: i32 = 38;
+    const EPERM: i32 = 1;
+    const EINVAL: i32 = 22;
+    const E2BIG: i32 = 7;
+    const EAGAIN: i32 = 11;
+    if NO_OPENAT2.load(Ordering::Relaxed) {
+        return None;
+    }
+    let name = match c_text(rest.as_bytes()) {
+        Ok(name) => name,
+        Err(e) => return Some(Err(e)),
+    };
+    let how = OpenHow {
+        flags: flags as u32 as u64,
+        mode: 0,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+    };
+    for _ in 0..8 {
+        // SAFETY: the descriptor is open, name ends with 0, and how lives during the call with
+        // the size passed.
+        let fd = unsafe {
+            syscall(
+                SYS_OPENAT2,
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                &how as *const OpenHow,
+                std::mem::size_of::<OpenHow>(),
+            )
+        };
+        if fd >= 0 {
+            // SAFETY: a non-negative result is a new descriptor that nothing else owns.
+            return Some(Ok(unsafe { OwnedFd::from_raw_fd(fd as c_int) }));
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            // A rename elsewhere on the file system during the lookup: the kernel asks for a
+            // retry.
+            Some(EAGAIN) => continue,
+            Some(ENOSYS | EPERM | E2BIG) => {
+                NO_OPENAT2.store(true, Ordering::Relaxed);
+                return None;
+            }
+            Some(EINVAL) => return None,
+            _ => return Some(Err(error)),
+        }
+    }
+    None
+}
+
+#[cfg(target_vendor = "apple")]
+const O_NOFOLLOW_ANY: i32 = 0x2000_0000;
+
+#[cfg(target_vendor = "apple")]
+fn open_with(anchored: &Anchored, flags: i32) -> io::Result<OwnedFd> {
+    let path = c_text(checked_path(anchored)?.as_os_str().as_bytes())?;
+    // SAFETY: path ends with 0.
+    owned(unsafe { open(path.as_ptr(), flags | O_NOFOLLOW | O_NOFOLLOW_ANY) })
+}
+
+/// The whole checked path, once the system is known to refuse a link in any component of it.
+#[cfg(target_vendor = "apple")]
+fn checked_path(anchored: &Anchored) -> io::Result<std::path::PathBuf> {
+    nofollow_any()?;
+    let mut path = anchored.anchor.clone();
+    path.extend(&anchored.rest);
+    Ok(path)
+}
+
+/// What the checked path is: `fstatat` with `AT_SYMLINK_NOFOLLOW_ANY`, which fails on a link
+/// in any component and does not open the object.
+#[cfg(target_vendor = "apple")]
+pub fn kind_checked(anchored: &Anchored) -> io::Result<Kind> {
+    extern "C" {
+        #[cfg_attr(target_arch = "x86_64", link_name = "fstatat$INODE64")]
+        fn fstatat(dirfd: c_int, path: *const c_char, buf: *mut u8, flags: c_int) -> c_int;
+    }
+    const AT_FDCWD: c_int = -2;
+    const AT_SYMLINK_NOFOLLOW: c_int = 0x20;
+    const AT_SYMLINK_NOFOLLOW_ANY: c_int = 0x0800;
+    const S_IFMT: u16 = 0o170000;
+    const S_IFDIR: u16 = 0o040000;
+    const S_IFLNK: u16 = 0o120000;
+    let path = c_text(checked_path(anchored)?.as_os_str().as_bytes())?;
+    // struct stat (64-bit inodes) is 144 bytes; st_mode is a u16 after the 32-bit st_dev.
+    let mut buffer = [0u64; 32];
+    // SAFETY: path ends with 0 and the buffer is larger than struct stat.
+    check(unsafe {
+        fstatat(
+            AT_FDCWD,
+            path.as_ptr(),
+            buffer.as_mut_ptr() as *mut u8,
+            AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY,
         )
     })?;
-    Ok(std::fs::File::from(fd))
+    // SAFETY: the offset is inside the buffer.
+    let mode =
+        unsafe { std::ptr::read_unaligned((buffer.as_ptr() as *const u8).add(4) as *const u16) };
+    match mode & S_IFMT {
+        S_IFLNK => Err(io::Error::from_raw_os_error(ELOOP)),
+        S_IFDIR => Ok(Kind::Directory),
+        _ => Ok(Kind::Other),
+    }
+}
+
+/// `O_NOFOLLOW_ANY` and `AT_SYMLINK_NOFOLLOW_ANY` exist from macOS 11 (Darwin 20); an older
+/// kernel would ignore them, so a read below a scope fails there instead of following a link.
+#[cfg(target_vendor = "apple")]
+fn nofollow_any() -> io::Result<()> {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let supported = *SUPPORTED.get_or_init(|| {
+        extern "C" {
+            fn uname(name: *mut [[u8; 256]; 5]) -> c_int;
+        }
+        let mut name = [[0u8; 256]; 5];
+        // SAFETY: struct utsname of Darwin is five fields of 256 bytes.
+        if unsafe { uname(&mut name) } != 0 {
+            return false;
+        }
+        let release = &name[2];
+        let digits: Vec<u8> = release
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .copied()
+            .collect();
+        std::str::from_utf8(&digits)
+            .ok()
+            .and_then(|d| d.parse::<u32>().ok())
+            .is_some_and(|major| major >= 20)
+    });
+    if supported {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "reading in a sandbox needs macOS 11 or later (O_NOFOLLOW_ANY)",
+        ))
+    }
+}
+
+/// Calls `each` with the names in a directory opened by [`open_checked`] with
+/// [`Want::Directory`], without `.` and `..`, read from the descriptor itself, so that the
+/// directory listed is the one opened; stops early when `each` returns false.
+pub fn list_names(dir: OwnedFd, each: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<()> {
+    extern "C" {
+        #[cfg_attr(
+            all(target_vendor = "apple", target_arch = "x86_64"),
+            link_name = "fdopendir$INODE64"
+        )]
+        fn fdopendir(fd: c_int) -> *mut c_void;
+        #[cfg_attr(
+            all(target_vendor = "apple", target_arch = "x86_64"),
+            link_name = "readdir$INODE64"
+        )]
+        fn readdir(dir: *mut c_void) -> *const u8;
+        fn closedir(dir: *mut c_void) -> c_int;
+    }
+    #[cfg(target_os = "linux")]
+    extern "C" {
+        #[link_name = "__errno_location"]
+        fn errno() -> *mut c_int;
+    }
+    #[cfg(target_vendor = "apple")]
+    extern "C" {
+        #[link_name = "__error"]
+        fn errno() -> *mut c_int;
+    }
+    // struct dirent: on Linux d_ino, d_off (8 bytes each), d_reclen (2), d_type (1); on macOS
+    // d_ino, d_seekoff (8 each), d_reclen, d_namlen (2 each), d_type (1); then the name.
+    #[cfg(target_os = "linux")]
+    const NAME: usize = 19;
+    #[cfg(target_vendor = "apple")]
+    const NAME: usize = 21;
+    use std::os::fd::IntoRawFd;
+    let fd = dir.into_raw_fd();
+    // SAFETY: the descriptor is open; on success the stream owns it.
+    let stream = unsafe { fdopendir(fd) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: the stream did not take the descriptor, which is still ours.
+        drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        return Err(error);
+    }
+    let result = loop {
+        // SAFETY: errno is the thread's own; it is cleared to tell the end from an error.
+        unsafe { *errno() = 0 };
+        // SAFETY: the stream is open.
+        let entry = unsafe { readdir(stream) };
+        if entry.is_null() {
+            // SAFETY: as above.
+            let code = unsafe { *errno() };
+            break if code == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(code))
+            };
+        }
+        // SAFETY: the name of an entry ends with 0 inside the entry.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.add(NAME) as *const c_char) };
+        let name = name.to_bytes();
+        if name != b"." && name != b".." && !each(OsStr::from_bytes(name)) {
+            break Ok(());
+        }
+    };
+    // SAFETY: the stream is open and closes the descriptor with it.
+    unsafe { closedir(stream) };
+    result
 }
 
 /// Creates a new file in the directory and opens it for writing; never follows a link and
@@ -591,4 +908,76 @@ pub fn receive_with_descriptor(
         return Err(io::Error::other("more than one descriptor arrived"));
     }
     Ok((received, fds.pop()))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Both ways of opening below a scope, `openat2` and the walk of one component at a time,
+    /// open the checked entries and refuse a link in any component, the last one included.
+    #[test]
+    fn opening_below_a_scope_refuses_links_with_and_without_openat2() {
+        let dir = std::env::temp_dir().join(format!("unio-fdio-beneath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scope/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::fs::write(dir.join("scope/sub/f.txt"), "inside").unwrap();
+        std::fs::write(dir.join("outside/f.txt"), "SECRET").unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("scope/dir-link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside/f.txt"), dir.join("scope/file-link")).unwrap();
+        let root = std::fs::canonicalize(dir.join("scope")).unwrap();
+        let at = |rest: &[&str]| Anchored {
+            anchor: root.clone(),
+            rest: rest.iter().map(std::ffi::OsString::from).collect(),
+        };
+        let read = |fd: OwnedFd| std::io::read_to_string(std::fs::File::from(fd)).unwrap();
+        let walking = |rest: &[&str], flags: i32| {
+            open_walking(&at(rest), open_directory(&root).unwrap(), flags)
+        };
+        let file = O_RDONLY | O_CLOEXEC;
+        assert_eq!(
+            read(open_checked(&at(&["sub", "f.txt"]), Want::Read).unwrap()),
+            "inside"
+        );
+        assert_eq!(read(walking(&["sub", "f.txt"], file).unwrap()), "inside");
+        for rest in [&["dir-link", "f.txt"][..], &["file-link"][..]] {
+            assert!(open_checked(&at(rest), Want::Read).is_err(), "{rest:?}");
+            assert!(walking(rest, file).is_err(), "{rest:?}");
+            assert!(kind_checked(&at(rest)).is_err(), "{rest:?}");
+            assert!(walking(rest, O_PATH | O_CLOEXEC)
+                .map(|fd| std::fs::File::from(fd).metadata().unwrap().is_symlink())
+                .unwrap_or(true));
+        }
+        assert!(open_checked(&at(&["dir-link"]), Want::Directory).is_err());
+        assert_eq!(kind_checked(&at(&["sub"])).unwrap(), Kind::Directory);
+        assert_eq!(kind_checked(&at(&["sub", "f.txt"])).unwrap(), Kind::Other);
+        // The scope itself, from the directory above it, and the root of the file system.
+        let above = Anchored {
+            anchor: root.parent().unwrap().to_path_buf(),
+            rest: vec!["scope".into()],
+        };
+        let mut names = Vec::new();
+        list_names(open_checked(&above, Want::Directory).unwrap(), &mut |n| {
+            names.push(n.to_os_string());
+            true
+        })
+        .unwrap();
+        names.sort();
+        assert_eq!(names, ["dir-link", "file-link", "sub"]);
+        let slash = Anchored {
+            anchor: PathBuf::from("/"),
+            rest: Vec::new(),
+        };
+        assert_eq!(kind_checked(&slash).unwrap(), Kind::Directory);
+        assert!(open_checked(&slash, Want::Directory).is_ok());
+        // A link as the anchor itself is refused too.
+        let linked = Anchored {
+            anchor: dir.join("scope/dir-link"),
+            rest: vec!["f.txt".into()],
+        };
+        assert!(open_checked(&linked, Want::Read).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

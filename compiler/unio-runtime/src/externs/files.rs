@@ -194,7 +194,8 @@ fn through_writer<R>(
 fn exists(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     Ok(Value::Bool(
-        crate::sandbox::read_target(p.as_str()).is_some_and(|t| fs::metadata(t).is_ok()),
+        crate::sandbox::read_target(p.as_str())
+            .is_some_and(|t| crate::sandbox::entry_kind(&t).is_ok()),
     ))
 }
 
@@ -202,8 +203,10 @@ fn exists(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn is_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     Ok(Value::Bool(
-        crate::sandbox::read_target(p.as_str())
-            .is_some_and(|t| fs::metadata(t).is_ok_and(|m| m.is_dir())),
+        crate::sandbox::read_target(p.as_str()).is_some_and(|t| {
+            crate::sandbox::entry_kind(&t)
+                .is_ok_and(|k| k == crate::sandbox::beneath::Kind::Directory)
+        }),
     ))
 }
 
@@ -325,8 +328,8 @@ fn system_read_chunk(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome 
 fn resolve(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     let target = readable(&p)?;
-    let resolved = fs::canonicalize(crate::sandbox::absolute(&target))
-        .map_err(|e| os_error(p.as_str(), &e))?;
+    let resolved =
+        crate::sandbox::resolve_existing(&target).map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::path(path_text(&resolved)))
 }
 
@@ -341,15 +344,20 @@ fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     // to grow, which may copy it.
     let mut names: Vec<String> = Vec::new();
     let mut held = 0usize;
-    for entry in fs::read_dir(&target).map_err(|e| os_error(p.as_str(), &e))? {
-        let name = entry
-            .map_err(|e| os_error(p.as_str(), &e))?
-            .file_name()
-            .to_string_lossy()
-            .into_owned();
+    let mut exhausted = None;
+    crate::sandbox::list_directory(&target, &mut |name| {
+        let name = name.to_string_lossy().into_owned();
         held = held.saturating_add(name.len() + 3 * std::mem::size_of::<String>());
-        runtime.reserve_heap(held)?;
+        if let Err(unwind) = runtime.reserve_heap(held) {
+            exhausted = Some(unwind);
+            return false;
+        }
         names.push(name);
+        true
+    })
+    .map_err(|e| os_error(p.as_str(), &e))?;
+    if let Some(unwind) = exhausted {
+        return Err(unwind);
     }
     names.sort();
     // Each entry of the list is a path below the directory, which the heap counts when it is
