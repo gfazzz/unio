@@ -157,6 +157,30 @@ pub fn open_directory(path: &Path) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
+/// Opens an existing file of an absolute, link-free path for reading: its directory as
+/// [`open_directory`] opens it, and the file in it with O_NOFOLLOW, so that no link on the path
+/// is followed, not even one put there after the path was checked (ELOOP).
+#[cfg(target_os = "linux")]
+pub fn open_read_beneath(path: &Path) -> io::Result<std::fs::File> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the path does not name a file",
+        ));
+    };
+    let dir = open_directory(parent)?;
+    let name = c_text(name.as_bytes())?;
+    // SAFETY: the descriptor is open and name ends with 0.
+    let fd = owned(unsafe {
+        openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+        )
+    })?;
+    Ok(std::fs::File::from(fd))
+}
+
 /// Creates a new file in the directory and opens it for writing; never follows a link and
 /// never opens an existing file.
 pub fn create_new(dir: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {

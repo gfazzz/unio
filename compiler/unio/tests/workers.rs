@@ -424,6 +424,81 @@ fn a_worker_over_the_time_limit_is_stopped() {
     assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
 }
 
+/// (f) The compile steps of `unio run` and `unio test` are workers under the same time limits
+/// of the operator's policy, given by `--policy` or by `UNIO_POLICY`: a compile step that does
+/// not end is stopped at the limit of the policy with code 102, not at the default of ten
+/// minutes, and the program does not run.
+#[test]
+fn the_compile_steps_of_run_and_test_keep_the_time_limit_of_the_policy() {
+    let p = Project::new("compile-time");
+    let policy = p.policy("[limits]\nwall_seconds = 1\n");
+    let policy = policy.to_string_lossy().into_owned();
+    for command in ["run", "test"] {
+        for by_variable in [false, true] {
+            let mut args = vec![command];
+            if !by_variable {
+                args.extend(["--policy", &policy]);
+            }
+            args.push("main.unio");
+            let mut unio = p.command(&args, &[("UNIO_WORKER_PROBE", "spin")]);
+            if by_variable {
+                unio.env("UNIO_POLICY", &policy);
+            }
+            let started = Instant::now();
+            let output = unio.output().unwrap();
+            let elapsed = started.elapsed();
+            let case = format!("{command}, policy by variable: {by_variable}");
+            assert_eq!(output.status.code(), Some(102), "{case}: {}", all(&output));
+            assert!(
+                text(&output.stderr).contains("time limit of 1 s"),
+                "{case}: {}",
+                all(&output)
+            );
+            assert!(!text(&output.stdout).contains("hello"), "{case}");
+            assert!(elapsed < Duration::from_secs(20), "{case}: {elapsed:?}");
+        }
+    }
+    // Without the probe the same policy runs the program.
+    let output = p.unio(&["run", "--policy", &policy, "main.unio"], &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+    assert_eq!(text(&output.stdout), "hello\n");
+}
+
+/// (f) The memory limit of the policy narrows the compile steps of `unio run` and `unio test`
+/// too, down to the floor that compiling needs: above it a compile step that takes more is
+/// stopped with code 102; a heap limit below it is the program's alone, so the program runs.
+#[test]
+fn the_compile_steps_of_run_and_test_keep_the_memory_limit_of_the_policy() {
+    let p = Project::new("compile-memory");
+    let policy = p.policy("[limits]\nheap_bytes = 536870912\nwall_seconds = 60\n");
+    let policy = policy.to_string_lossy().into_owned();
+    for command in ["run", "test"] {
+        let output = p.unio(
+            &[command, "--policy", &policy, "main.unio"],
+            &[("UNIO_WORKER_PROBE", "alloc=1073741824")],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(102),
+            "{command}: {}",
+            all(&output)
+        );
+        assert!(
+            text(&output.stderr).contains("memory limit"),
+            "{command}: {}",
+            all(&output)
+        );
+        assert!(!text(&output.stdout).contains("hello"), "{command}");
+    }
+    let small = p.policy("[limits]\nheap_bytes = 2_097_152\n");
+    let output = p.unio(
+        &["run", "--policy", &small.to_string_lossy(), "main.unio"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+    assert_eq!(text(&output.stdout), "hello\n");
+}
+
 /// (f) A worker that uses more memory than the limit of the policy is stopped by the operating
 /// system (Linux: the address space; macOS: the footprint the tool watches; Windows: the Job
 /// Object), and the tool reports it with code 102.
@@ -594,4 +669,117 @@ fn build_writes_the_output_only_through_the_tool() {
     let ran = Command::new(&out).output().unwrap();
     assert_eq!(text(&ran.stdout), "hello\n");
     assert!(!p.pkg().join("hello").exists());
+}
+
+/// Builds `libunio.a` next to the tool when it is missing, for the tests of `unio build`.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
+fn ensure_runtime_library() {
+    let exe = Path::new(env!("CARGO_BIN_EXE_unio"));
+    if !exe.with_file_name("libunio.a").is_file() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut command = Command::new(cargo);
+        command
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["build", "-p", "unio", "--lib"]);
+        if exe.parent().and_then(|d| d.file_name()) == Some("release".as_ref()) {
+            command.arg("--release");
+        }
+        assert!(command.status().unwrap().success());
+    }
+}
+
+/// The processes whose command line names `marker` and that have not ended (zombies aside).
+#[cfg(unix)]
+fn processes_naming(marker: &str) -> Vec<String> {
+    let listed = Command::new("ps")
+        .args(["-A", "-o", "pid=,stat=,args="])
+        .output()
+        .unwrap();
+    text(&listed.stdout)
+        .lines()
+        .filter(|l| l.contains(marker))
+        .filter(|l| {
+            let mut words = l.split_whitespace();
+            let _pid = words.next();
+            !words.next().is_some_and(|stat| stat.starts_with('Z'))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// (f) The link step over the time limit ends with its whole process tree (docs/runtime.md
+/// 9.7): the C compiler is a script that starts a child and both run forever. After the tool
+/// reports code 102, neither the script nor its child runs. The script uses only built-ins of
+/// the shell, since the link step may execute nothing but the compiler and its interpreter.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
+#[test]
+fn the_link_step_over_the_time_limit_ends_with_its_process_tree() {
+    use std::os::unix::fs::PermissionsExt;
+    ensure_runtime_library();
+    let p = Project::new("link-tree");
+    let cc = p.path("outside/unio-hanging-cc");
+    fs::write(
+        &cc,
+        "#!/bin/sh\n\
+         for a in \"$@\"; do\n\
+         \x20   case \"$a\" in\n\
+         \x20       --version) echo 'hanging-cc 1.0'; exit 0 ;;\n\
+         \x20       -print-prog-name=*) exit 1 ;;\n\
+         \x20   esac\n\
+         done\n\
+         ( while :; do :; done ) &\n\
+         while :; do :; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cc, fs::Permissions::from_mode(0o755)).unwrap();
+    let cc_text = cc.to_string_lossy().into_owned();
+    let policy = p.policy("[limits]\nwall_seconds = 3\n");
+    let output = p.unio(
+        &[
+            "build",
+            "--policy",
+            &policy.to_string_lossy(),
+            "main.unio",
+            "-o",
+            &p.path("outside/hello").to_string_lossy(),
+        ],
+        &[("CC", &cc_text)],
+    );
+    let mut left = processes_naming(&cc_text);
+    for _ in 0..100 {
+        if left.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        left = processes_naming(&cc_text);
+    }
+    // Clean up before asserting, so that a failure leaves nothing running.
+    for line in &left {
+        if let Some(pid) = line.split_whitespace().next() {
+            let _ = Command::new("kill").args(["-9", pid]).status();
+        }
+    }
+    assert_eq!(output.status.code(), Some(102), "{}", all(&output));
+    assert!(
+        text(&output.stderr).contains("time limit of 3 s"),
+        "{}",
+        all(&output)
+    );
+    assert!(
+        left.is_empty(),
+        "the link step left processes running:\n{}",
+        left.join("\n")
+    );
 }

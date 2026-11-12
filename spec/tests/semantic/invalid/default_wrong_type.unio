@@ -1,0 +1,6 @@
+# expect-error: 2 E0061
+function next(value as Int = "wrong") returns Int:
+    return value + 1
+
+function main():
+    print("{next()}")

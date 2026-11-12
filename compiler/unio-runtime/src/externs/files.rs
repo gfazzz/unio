@@ -12,7 +12,7 @@
 //! from the table before the operating system reports the result of closing it, so a released
 //! descriptor is never closed again even when closing fails.
 
-use super::{bytes, int, io_error, io_error_value, os_error, path, text, ExternFn};
+use super::{int, io_error, io_error_value, os_error, text, ExternFn};
 use crate::fault::{Outcome, Unwind};
 use crate::runtime::{FailPoint, Runtime};
 use crate::value::{Text, Value};
@@ -44,6 +44,47 @@ pub const BINDINGS: &[(&str, ExternFn)] = &[
     ("std.files.system_sync_directory", system_sync_directory),
     ("std.files.system_remove", system_remove),
 ];
+
+/// A path argument, with the memory of the copies the operation makes of it checked against the
+/// heap limit first (C-18): the native path, its resolution through the file system, the
+/// zero-terminated text for the system call, and the request to the writer process, and for
+/// the resolution a part for each component. The copies of a path of ordinary length are a
+/// small fixed cost, like the chunk buffer of a read, and are not counted; a longer path whose
+/// copies do not fit ends the program with code 102 instead of allocating them past the limit.
+fn path(runtime: &Runtime, arguments: &[Value], index: usize) -> Result<Text, Unwind> {
+    let p = super::path(runtime, arguments, index)?;
+    let text = p.as_str();
+    let components = text.bytes().filter(|&b| b == b'/' || b == b'\\').count() + 1;
+    let copies = text
+        .len()
+        .saturating_mul(PATH_COPIES)
+        .saturating_add(components.saturating_mul(COMPONENT_BYTES));
+    if copies > UNCOUNTED_PATH_BYTES {
+        runtime.reserve_heap(copies)?;
+    }
+    Ok(p)
+}
+
+/// The copies of a path an operation may hold at once.
+const PATH_COPIES: usize = 4;
+/// The memory of one component in the resolution of a path: its entry and its name.
+const COMPONENT_BYTES: usize = 64;
+/// The copies of a path that are not counted: those of a path of up to 4,096 bytes (PATH_MAX
+/// of Linux) with ordinary components.
+const UNCOUNTED_PATH_BYTES: usize = 32 * 1024;
+
+/// The data of a Bytes argument, borrowed: writing it needs no copy.
+fn bytes_of<'a>(
+    runtime: &Runtime,
+    arguments: &'a [Value],
+    index: usize,
+) -> Result<&'a [u8], Unwind> {
+    match arguments.get(index) {
+        Some(Value::Bytes(b)) => Ok(&b[..]),
+        // Any other argument is the internal fault that `bytes` reports for it.
+        _ => super::bytes(runtime, arguments, index).map(|_| &[][..]),
+    }
+}
 
 fn native(p: &Text) -> PathBuf {
     PathBuf::from(p.as_str())
@@ -96,20 +137,29 @@ fn permit(allowed: bool, permission: &str, p: &str) -> Result<(), Unwind> {
     }
 }
 
-fn permit_read(p: &Text) -> Result<(), Unwind> {
-    permit(
-        crate::sandbox::may_read(p.as_str()),
-        "files.read",
-        p.as_str(),
-    )
+/// The path a read-class operation uses, once the sandbox permits it (files.read): in a sandbox
+/// the path resolved as the system resolves it, so that the operation opens exactly what was
+/// checked; without one, the path as given.
+fn readable(p: &Text) -> Result<PathBuf, Unwind> {
+    crate::sandbox::read_target(p.as_str()).ok_or_else(|| {
+        io_error(
+            p.as_str(),
+            "PermissionDenied",
+            crate::sandbox::denied("files.read", p.as_str()),
+        )
+    })
 }
 
-fn permit_write(p: &Text) -> Result<(), Unwind> {
-    permit(
-        crate::sandbox::may_write(p.as_str()),
-        "files.write",
-        p.as_str(),
-    )
+/// The entry a write-class operation changes, once the sandbox permits it (files.write): in a
+/// sandbox its directory resolved and its last name as given ([`crate::sandbox::entry_path`]).
+fn writable(p: &Text) -> Result<PathBuf, Unwind> {
+    crate::sandbox::write_target(p.as_str()).ok_or_else(|| {
+        io_error(
+            p.as_str(),
+            "PermissionDenied",
+            crate::sandbox::denied("files.write", p.as_str()),
+        )
+    })
 }
 
 /// The error of an operation the writer did not do, reported for the path of the program.
@@ -144,7 +194,7 @@ fn through_writer<R>(
 fn exists(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     Ok(Value::Bool(
-        crate::sandbox::may_read(p.as_str()) && fs::metadata(native(&p)).is_ok(),
+        crate::sandbox::read_target(p.as_str()).is_some_and(|t| fs::metadata(t).is_ok()),
     ))
 }
 
@@ -152,15 +202,16 @@ fn exists(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn is_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
     Ok(Value::Bool(
-        crate::sandbox::may_read(p.as_str()) && fs::metadata(native(&p)).is_ok_and(|m| m.is_dir()),
+        crate::sandbox::read_target(p.as_str())
+            .is_some_and(|t| fs::metadata(t).is_ok_and(|m| m.is_dir())),
     ))
 }
 
 /// The whole file as text; kind InvalidData if it is not UTF-8.
 fn read_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    permit_read(&p)?;
-    let data = read_whole(runtime, &p)?;
+    let target = readable(&p)?;
+    let data = read_whole(runtime, &p, &target)?;
     let text = String::from_utf8(data)
         .map_err(|_| io_error(p.as_str(), "InvalidData", "the file is not valid UTF-8"))?;
     let value = Value::text(text);
@@ -171,8 +222,8 @@ fn read_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// The whole file as bytes.
 fn read_bytes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    permit_read(&p)?;
-    let data = read_whole(runtime, &p)?;
+    let target = readable(&p)?;
+    let data = read_whole(runtime, &p, &target)?;
     let value = Value::bytes(data);
     runtime.check_heap()?;
     Ok(value)
@@ -181,8 +232,9 @@ fn read_bytes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// The content of a file, with its size checked against the heap limit before the memory is
 /// allocated (C-18). A file that grows while it is read is read to its end in steps that are
 /// checked the same way.
-fn read_whole(runtime: &Runtime, p: &Text) -> Result<Vec<u8>, Unwind> {
-    let mut file = File::open(native(p)).map_err(|e| os_error(p.as_str(), &e))?;
+fn read_whole(runtime: &Runtime, p: &Text, target: &Path) -> Result<Vec<u8>, Unwind> {
+    let mut file =
+        crate::sandbox::open_for_reading(target).map_err(|e| os_error(p.as_str(), &e))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut data = Vec::new();
     super::reserve(
@@ -196,8 +248,16 @@ fn read_whole(runtime: &Runtime, p: &Text) -> Result<Vec<u8>, Unwind> {
             Ok(0) => return Ok(data),
             Ok(n) => {
                 if data.capacity() - data.len() < n {
+                    // The buffer the runtime holds is not counted yet, and growing it may copy
+                    // it into a new block before the old one is freed: both are checked.
                     let more = data.len().max(n);
-                    super::reserve(runtime, &mut data, more)?;
+                    runtime.reserve_heap(
+                        data.capacity()
+                            .saturating_add(data.len())
+                            .saturating_add(more),
+                    )?;
+                    data.try_reserve_exact(more)
+                        .map_err(|_| Unwind::Exhausted(crate::fault::Exhaustion::Heap))?;
                 }
                 data.extend_from_slice(&chunk[..n]);
             }
@@ -210,8 +270,8 @@ fn read_whole(runtime: &Runtime, p: &Text) -> Result<Vec<u8>, Unwind> {
 /// Opens a file for reading; no content is read ahead.
 fn system_open_read(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    permit_read(&p)?;
-    let file = File::open(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
+    let target = readable(&p)?;
+    let file = crate::sandbox::open_for_reading(&target).map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::Int(runtime.add_descriptor(file)))
 }
 
@@ -264,8 +324,8 @@ fn system_read_chunk(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome 
 /// Resolves an existing path through the file system, including links.
 fn resolve(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    permit_read(&p)?;
-    let resolved = fs::canonicalize(crate::sandbox::absolute(&native(&p)))
+    let target = readable(&p)?;
+    let resolved = fs::canonicalize(crate::sandbox::absolute(&target))
         .map_err(|e| os_error(p.as_str(), &e))?;
     Ok(Value::path(path_text(&resolved)))
 }
@@ -274,20 +334,40 @@ fn resolve(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// Unicode are written with replacement characters.
 fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    permit_read(&p)?;
+    let target = readable(&p)?;
     let directory = native(&p);
-    let mut names: Vec<String> = fs::read_dir(&directory)
-        .map_err(|e| os_error(p.as_str(), &e))?
-        .map(|entry| entry.map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<_, _>>()
-        .map_err(|e| os_error(p.as_str(), &e))?;
+    // The names are held before the list is made, so each is checked against the heap limit
+    // as it is read (C-18): its text, its place in the list of names, and room for that list
+    // to grow, which may copy it.
+    let mut names: Vec<String> = Vec::new();
+    let mut held = 0usize;
+    for entry in fs::read_dir(&target).map_err(|e| os_error(p.as_str(), &e))? {
+        let name = entry
+            .map_err(|e| os_error(p.as_str(), &e))?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        held = held.saturating_add(name.len() + 3 * std::mem::size_of::<String>());
+        runtime.reserve_heap(held)?;
+        names.push(name);
+    }
     names.sort();
+    // Each entry of the list is a path below the directory, which the heap counts when it is
+    // made; the names are still held until then.
+    let per_entry = directory.as_os_str().len() + 1 + ENTRY_BYTES;
+    runtime.reserve_heap(held.saturating_add(names.len().saturating_mul(per_entry)))?;
     let entries = names
         .into_iter()
         .map(|name| Value::path(path_text(&directory.join(name))))
         .collect();
-    Ok(Value::list(entries))
+    let list = Value::list(entries);
+    runtime.check_heap()?;
+    Ok(list)
 }
+
+/// The memory of one entry of a listed directory besides its text: the value in the list and
+/// the storage of the text.
+const ENTRY_BYTES: usize = 96;
 
 /// Gives a file or directory a new path and fails with AlreadyExists instead of replacing an
 /// existing target. The check and the rename are one step of the operating system:
@@ -299,8 +379,8 @@ fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let source = path(runtime, arguments, 0)?;
     let target = path(runtime, arguments, 1)?;
-    permit_write(&source)?;
-    permit_write(&target)?;
+    let from = writable(&source)?;
+    let to = writable(&target)?;
     #[cfg(unix)]
     if let Some(done) = through_writer(|w| {
         let (from, to) = (writer_path(source.as_str())?, writer_path(target.as_str())?);
@@ -310,13 +390,8 @@ fn rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }) {
         return done.map(|()| Value::Unit);
     }
-    rename_without_replacing(&native(&source), &native(&target))
-        .map_err(|e| os_error(target.as_str(), &e))?;
-    trace(
-        "rename-noreplace",
-        &[&native(&source), &native(&target)],
-        None,
-    );
+    rename_without_replacing(&from, &to).map_err(|e| os_error(target.as_str(), &e))?;
+    trace("rename-noreplace", &[&from, &to], None);
     Ok(Value::Unit)
 }
 
@@ -460,7 +535,7 @@ fn no_exclusive_rename(error: &std::io::Error) -> bool {
 /// Creates one directory; AlreadyExists if it exists, NotFound if its parent does not.
 fn create_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let p = path(runtime, arguments, 0)?;
-    permit_write(&p)?;
+    let target = writable(&p)?;
     #[cfg(unix)]
     if let Some(done) = through_writer(|w| {
         w.handle()
@@ -469,16 +544,26 @@ fn create_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }) {
         return done.map(|()| Value::Unit);
     }
-    fs::create_dir(native(&p)).map_err(|e| os_error(p.as_str(), &e))?;
-    trace("mkdir", &[&native(&p)], None);
+    fs::create_dir(&target).map_err(|e| os_error(p.as_str(), &e))?;
+    trace("mkdir", &[&target], None);
     // The entry of the new directory is synced, so that a durable write into it survives power
-    // loss (S-9, docs/runtime.md 10); the directory exists either way, so the result of the
-    // sync is not reported. Windows has no sync of a directory (NTFS journals the entry).
+    // loss (S-9, docs/runtime.md 10). The directory exists either way, so a failed sync is not
+    // reported here: it is remembered, and a durable commit below the directory syncs the
+    // parent again first or reports kind DurabilityUnconfirmed. Windows has no sync of a
+    // directory (NTFS journals the entry).
     #[cfg(unix)]
     {
-        let created = crate::sandbox::absolute(&native(&p));
+        let created = crate::sandbox::resolve(&target);
         if let Some(parent) = created.parent() {
-            let _ = sync_directory(parent);
+            let synced = if super::durability::parent_sync_fails(false) {
+                Err(super::durability::injected_sync_failure())
+            } else {
+                sync_directory(parent)
+            };
+            if synced.is_err() {
+                let parent = parent.to_path_buf();
+                UNSYNCED.with(|u| u.borrow_mut().record(created, parent));
+            }
         }
     }
     Ok(Value::Unit)
@@ -506,7 +591,7 @@ fn system_supports_durability(runtime: &mut Runtime, arguments: &mut [Value]) ->
 /// Creates .<name>.unio-tmp-<id> next to the target and opens it for writing.
 fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let target = path(runtime, arguments, 0)?;
-    permit_write(&target)?;
+    let target_path = writable(&target)?;
     #[cfg(unix)]
     if let Some(opened) = through_writer(|w| {
         w.open(&writer_path(target.as_str())?)
@@ -527,7 +612,6 @@ fn system_open_temporary(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
             ],
         ));
     }
-    let target_path = native(&target);
     let directory = match target_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
@@ -591,8 +675,8 @@ fn system_write(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 
 fn system_write_bytes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let descriptor = int(runtime, arguments, 0)?;
-    let data = bytes(runtime, arguments, 1)?;
-    write_all(runtime, descriptor, &data)
+    let data = bytes_of(runtime, arguments, 1)?;
+    write_all(runtime, descriptor, data)
 }
 
 /// Syncs the data of the file to storage: `File::sync_all` is fsync on Linux,
@@ -659,12 +743,14 @@ fn close(file: File) -> std::io::Result<()> {
 fn system_rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let temporary = path(runtime, arguments, 0)?;
     let target = path(runtime, arguments, 1)?;
-    permit(
-        crate::sandbox::may_write_temporary(temporary.as_str()),
-        "files.write",
-        temporary.as_str(),
-    )?;
-    permit_write(&target)?;
+    let from = crate::sandbox::temporary_target(temporary.as_str()).ok_or_else(|| {
+        io_error(
+            temporary.as_str(),
+            "PermissionDenied",
+            crate::sandbox::denied("files.write", temporary.as_str()),
+        )
+    })?;
+    let to = writable(&target)?;
     if runtime.fails_at(FailPoint::Rename) {
         return Err(injected(target.as_str()));
     }
@@ -675,14 +761,14 @@ fn system_rename(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }) {
         return done.map(|()| Value::Unit);
     }
-    replace(&native(&temporary), &native(&target)).map_err(|e| os_error(target.as_str(), &e))?;
+    replace(&from, &to).map_err(|e| os_error(target.as_str(), &e))?;
     // MOVEFILE_WRITE_THROUGH returns after the rename is on the disk (S-9a).
     let operation = if cfg!(windows) {
         "rename-write-through"
     } else {
         "rename"
     };
-    trace(operation, &[&native(&temporary), &native(&target)], None);
+    trace(operation, &[&from, &to], None);
     Ok(Value::Unit)
 }
 
@@ -730,8 +816,31 @@ fn system_sync_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outc
     }) {
         return done.map(|()| Value::Unit);
     }
-    sync_directory(&native(&directory)).map_err(|e| os_error(directory.as_str(), &e))?;
+    let dir = match crate::sandbox::read_target(directory.as_str()) {
+        Some(dir) => dir,
+        None => crate::sandbox::resolve(&native(&directory)),
+    };
+    UNSYNCED
+        .with(|u| {
+            u.borrow_mut()
+                .settle(&crate::sandbox::resolve(&dir), &mut |parent| {
+                    if super::durability::parent_sync_fails(true) {
+                        Err(super::durability::injected_sync_failure())
+                    } else {
+                        sync_directory(parent)
+                    }
+                })
+        })
+        .map_err(|e| os_error(directory.as_str(), &e))?;
+    sync_directory(&dir).map_err(|e| os_error(directory.as_str(), &e))?;
     Ok(Value::Unit)
+}
+
+thread_local! {
+    /// The new directories of this thread whose parent could not be synced, when the runtime
+    /// creates them itself (no writer process).
+    static UNSYNCED: std::cell::RefCell<super::durability::UnsyncedParents> =
+        std::cell::RefCell::default();
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -799,8 +908,10 @@ fn system_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     {
         return Ok(Value::Unit);
     }
-    if crate::sandbox::may_write_temporary(p.as_str()) && fs::remove_file(native(&p)).is_ok() {
-        trace("unlink", &[&native(&p)], None);
+    if let Some(entry) = crate::sandbox::temporary_target(p.as_str()) {
+        if fs::remove_file(&entry).is_ok() {
+            trace("unlink", &[&entry], None);
+        }
     }
     Ok(Value::Unit)
 }

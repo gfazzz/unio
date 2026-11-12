@@ -742,7 +742,13 @@ impl<'a> Lowering<'a> {
                 let r = self.expr(right);
                 match *op {
                     "and" => Node::And(Box::new(l), Box::new(r)),
-                    "or" => Node::Or(Box::new(l), Box::new(r), yields_option(right)),
+                    "or" => {
+                        // The check decides whether the right side is an Option (semantics
+                        // 4.3); `some(...)` and `none` are one also where it found no type.
+                        let key = (self.module, (expr.span.start.offset, expr.span.end.offset));
+                        let option = self.interp.program.option_ors.contains(&key);
+                        Node::Or(Box::new(l), Box::new(r), option || yields_option(right))
+                    }
                     other => match Op::of(other) {
                         Some(op) => Node::Binary(op, Box::new(l), Box::new(r)),
                         None => Node::Fault(format!("internal: operator {other}")),

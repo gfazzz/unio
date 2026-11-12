@@ -1,0 +1,8 @@
+# expect-error: 4 E0061
+struct Counter:
+    name as Text
+    count as Int = "zero"
+
+function main():
+    let counter = Counter(name = "a")
+    print("{counter.count + 1}")

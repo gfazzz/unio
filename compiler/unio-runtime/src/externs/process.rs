@@ -6,20 +6,27 @@
 //! - the environment of the child is built, not inherited: the variables the sandbox grants
 //!   under `env` and `PATH` (and `SystemRoot` on Windows), see
 //!   [`crate::sandbox::child_environment`];
-//! - the child runs in a process tree of its own: a new process group on Unix, which no
-//!   descendant can leave on Linux (a seccomp filter denies `setsid` and `setpgid`) and whose
-//!   leavers macOS finds through their parents; a Job Object with kill-on-close and without
-//!   breakaway on Windows. When the child ends, what is left of the tree is stopped; on
+//! - the child runs in a process tree of its own ([`crate::sandbox::tree`]): a new process
+//!   group on Unix, which no descendant can leave on Linux (a seccomp filter denies `setsid`
+//!   and `setpgid`) and whose leavers macOS finds through their parents and the marker of the
+//!   Seatbelt profile; on Windows a Job Object with kill-on-close and without breakaway, which
+//!   the child joins while it is still suspended. A job that cannot be set up fails the call
+//!   before the child runs. When the child ends, what is left of the tree is stopped; on
 //!   timeout, on output over the limit, and on exhaustion the whole tree is stopped;
 //! - the deadline covers the whole call, including reading the outputs: a process that keeps a
 //!   pipe open after leaving the tree cannot make the call wait longer;
 //! - each captured stream holds at most [`OUTPUT_LIMIT`] bytes, and what is captured counts
-//!   against the heap limit before it is stored.
+//!   against the heap limit before it is stored. Between the pipes and the call the output
+//!   passes through a bounded queue: a reader stops reading while its chunks are not taken, so
+//!   at most [`IN_FLIGHT`] bytes are on the way, and they count against the heap limit for the
+//!   whole call. Output over the limit ends the call at once and stops the tree; the readers
+//!   then end at their next chunk.
 
 use super::{int, text, texts, ExternFn};
 use crate::fault::{Outcome, Unwind};
-use crate::heap::Counted;
+use crate::heap::{Counted, Measure};
 use crate::runtime::Runtime;
+use crate::sandbox::tree;
 use crate::value::Value;
 use std::io::{ErrorKind, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -35,6 +42,30 @@ pub const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 /// The size of one read from a pipe.
 const CHUNK: usize = 64 * 1024;
+
+/// The chunks the queue between the readers and the call holds.
+const QUEUE: usize = 2;
+
+/// The most bytes on the way from the pipes to the call: the chunks in the queue, plus, for
+/// each of the two readers, the chunk it waits to send and the buffer it reads into.
+pub const IN_FLIGHT: usize = (QUEUE + 2 * 2) * CHUNK;
+
+/// One message of a reader: a chunk of its stream, or `None` at its end.
+type Message = (usize, Option<Vec<u8>>);
+
+/// The bounded queue from the readers of the pipes to the call.
+fn queue() -> (mpsc::SyncSender<Message>, mpsc::Receiver<Message>) {
+    mpsc::sync_channel(QUEUE)
+}
+
+/// What the output on the way takes of the heap, counted for the whole call.
+struct InFlight;
+
+impl Measure for InFlight {
+    fn measure(&self) -> usize {
+        IN_FLIGHT
+    }
+}
 
 fn process_error(program: &str, kind: &str, reason: impl Into<String>) -> Unwind {
     Unwind::Error(Box::new(Value::record(
@@ -76,9 +107,11 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     if let Some(environment) = crate::sandbox::child_environment() {
         command.env_clear().envs(environment);
     }
-    tree::own_tree(&mut command);
-    crate::sandbox::keep_in_tree(&mut command);
-    let child = command
+    tree::prepare(&mut command);
+    // The output on the way counts against the heap limit before the child starts.
+    runtime.reserve_heap(IN_FLIGHT)?;
+    let in_flight = Counted::new(InFlight);
+    let mut child = command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -92,8 +125,15 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
             };
             process_error(program, kind, e.to_string())
         })?;
-    let mut running = Running::new(child);
-    let (sender, receiver) = mpsc::channel::<(usize, Option<Vec<u8>>)>();
+    let tree = tree::Tree::start(&mut child, tree::applied_marker().cloned()).map_err(|e| {
+        process_error(
+            program,
+            "Other",
+            format!("the process tree of the child cannot be set up: {e}"),
+        )
+    })?;
+    let mut running = Running::new(child, tree);
+    let (sender, receiver) = queue();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
         running
             .child
@@ -182,6 +222,7 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }
     let status = status.expect("the loop ends after the program ended");
     running.finished = true;
+    drop(in_flight);
     let [out, err] = captured;
     let out = String::from_utf8(take(out))
         .map_err(|_| process_error(program, "InvalidOutput", "standard output is not UTF-8"))?;
@@ -206,14 +247,11 @@ fn take(mut buffer: Counted<Vec<u8>>) -> Vec<u8> {
     data
 }
 
-/// Reads a pipe in chunks until its end and sends them; stops when the call no longer listens.
-/// A thread whose pipe a process outside the tree keeps open outlives the call, blocked in a
-/// read that ends when that process closes the pipe; the call itself does not wait for it.
-fn read_pipe(
-    stream: usize,
-    mut pipe: Box<dyn Read + Send>,
-    sender: mpsc::Sender<(usize, Option<Vec<u8>>)>,
-) {
+/// Reads a pipe in chunks until its end and sends them through the bounded queue, waiting
+/// while it is full; stops when the call no longer listens. A thread whose pipe a process
+/// outside the tree keeps open outlives the call, blocked in a read that ends when that
+/// process writes or closes the pipe; the call itself does not wait for it.
+fn read_pipe(stream: usize, mut pipe: Box<dyn Read + Send>, sender: mpsc::SyncSender<Message>) {
     let mut chunk = vec![0u8; CHUNK];
     loop {
         match pipe.read(&mut chunk) {
@@ -243,8 +281,7 @@ struct Running {
 }
 
 impl Running {
-    fn new(child: Child) -> Running {
-        let tree = tree::Tree::new(&child);
+    fn new(child: Child, tree: tree::Tree) -> Running {
         Running {
             child,
             tree,
@@ -280,311 +317,12 @@ impl Drop for Running {
     }
 }
 
-#[cfg(unix)]
-mod tree {
-    use std::process::{Child, Command};
-
-    extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-        fn waitid(idtype: u32, id: u32, info: *mut u8, options: i32) -> i32;
-    }
-    const SIGKILL: i32 = 9;
-    const P_PID: u32 = 1;
-    const WEXITED: i32 = 4;
-    const WNOHANG: i32 = 1;
-    #[cfg(target_os = "linux")]
-    const WNOWAIT: i32 = 0x0100_0000;
-    #[cfg(not(target_os = "linux"))]
-    const WNOWAIT: i32 = 0x20;
-
-    /// The child leads a new process group, which its descendants join; on Linux they cannot
-    /// leave it (`sandbox::keep_in_tree`), on macOS they can (setsid, setpgid).
-    pub fn own_tree(command: &mut Command) {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-
-    /// The process group of the child, whose number is the number of the child.
-    pub struct Tree {
-        group: i32,
-        live: bool,
-    }
-
-    impl Tree {
-        pub fn new(child: &Child) -> Tree {
-            let group = i32::try_from(child.id()).unwrap_or(0);
-            if group > 0 {
-                super::register(group);
-            }
-            Tree {
-                group,
-                live: group > 0,
-            }
-        }
-
-        /// Stops every process of the group with SIGKILL. The child is not reaped yet when this
-        /// runs, so the number of the group still belongs to this tree.
-        pub fn stop(&mut self) {
-            if self.live {
-                stop_group(self.group);
-                super::unregister(self.group);
-                self.live = false;
-            }
-        }
-    }
-
-    /// Stops a tree: on Linux its descendants cannot leave the group (the filter of
-    /// `sandbox::keep_in_tree`), so SIGKILL to the group stops them all.
-    #[cfg(not(target_os = "macos"))]
-    fn stop_group(group: i32) {
-        // SAFETY: kill with a negative number signals the process group; it has no memory
-        // effects.
-        unsafe {
-            kill(-group, SIGKILL);
-        }
-    }
-
-    /// Stops a tree on macOS, where a descendant can leave the group: the group is frozen with
-    /// SIGSTOP, the descendants of the child are found through their parents and frozen in
-    /// turn, so that none starts another process meanwhile, and then all of them and the group
-    /// get SIGKILL. A descendant whose parent has already ended belongs to launchd and is not
-    /// found (docs/runtime.md 9.5).
-    #[cfg(target_os = "macos")]
-    fn stop_group(group: i32) {
-        const SIGSTOP: i32 = 17;
-        const PROC_PPID_ONLY: u32 = 6;
-        const MOST: usize = 4096;
-        extern "C" {
-            fn proc_listpids(kind: u32, info: u32, buffer: *mut i32, size: i32) -> i32;
-        }
-        // SAFETY: kill has no memory effects.
-        unsafe {
-            kill(-group, SIGSTOP);
-        }
-        let mut found = vec![group];
-        let mut next = 0;
-        let mut buffer = vec![0i32; 1024];
-        while next < found.len() && found.len() < MOST {
-            let parent = found[next];
-            next += 1;
-            let size = i32::try_from(buffer.len() * 4).unwrap_or(i32::MAX);
-            // SAFETY: the buffer holds size bytes; the call writes at most that many and
-            // returns how many it wrote.
-            let bytes =
-                unsafe { proc_listpids(PROC_PPID_ONLY, parent as u32, buffer.as_mut_ptr(), size) };
-            let count = usize::try_from(bytes).unwrap_or(0) / 4;
-            for &pid in &buffer[..count.min(buffer.len())] {
-                if pid > 0 && !found.contains(&pid) {
-                    // SAFETY: as above.
-                    unsafe {
-                        kill(pid, SIGSTOP);
-                    }
-                    found.push(pid);
-                }
-            }
-        }
-        // SAFETY: as above.
-        unsafe {
-            kill(-group, SIGKILL);
-            for &pid in &found[1..] {
-                kill(pid, SIGKILL);
-            }
-        }
-    }
-
-    /// Whether the child has ended, without reaping it (waitid with WNOWAIT).
-    pub fn has_exited(child: &mut Child) -> std::io::Result<bool> {
-        let mut info = [0u8; 256];
-        // SAFETY: info is larger than siginfo_t on every Unix the runtime supports; waitid
-        // writes at most one siginfo_t.
-        let result = unsafe {
-            waitid(
-                P_PID,
-                child.id(),
-                info.as_mut_ptr(),
-                WEXITED | WNOHANG | WNOWAIT,
-            )
-        };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // si_signo is the first int of siginfo_t; it stays 0 when no child has ended.
-        Ok(i32::from_ne_bytes([info[0], info[1], info[2], info[3]]) != 0)
-    }
-
-    /// Stops the process groups of children that still run; for the watchdog of the time
-    /// limits, which ends the process.
-    pub fn stop_groups(groups: &[i32]) {
-        for &group in groups {
-            stop_group(group);
-        }
-    }
-}
-
-#[cfg(windows)]
-mod tree {
-    use std::os::windows::io::AsRawHandle;
-    use std::process::{Child, Command};
-
-    type Handle = *mut std::ffi::c_void;
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct BasicLimits {
-        per_process_user_time: i64,
-        per_job_user_time: i64,
-        flags: u32,
-        minimum_working_set: usize,
-        maximum_working_set: usize,
-        active_processes: u32,
-        affinity: usize,
-        priority_class: u32,
-        scheduling_class: u32,
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct ExtendedLimits {
-        basic: BasicLimits,
-        io: [u64; 6],
-        process_memory: usize,
-        job_memory: usize,
-        peak_process_memory: usize,
-        peak_job_memory: usize,
-    }
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateJobObjectW(attributes: *mut std::ffi::c_void, name: *const u16) -> Handle;
-        fn SetInformationJobObject(
-            job: Handle,
-            class: i32,
-            info: *mut std::ffi::c_void,
-            size: u32,
-        ) -> i32;
-        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
-        fn TerminateJobObject(job: Handle, code: u32) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-    }
-    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
-    /// The flags of the job: kill-on-close only. Neither JOB_OBJECT_LIMIT_BREAKAWAY_OK
-    /// (0x800) nor JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK (0x1000) is set, so a process in the
-    /// job cannot start a child outside it with CREATE_BREAKAWAY_FROM_JOB.
-    const JOB_FLAGS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    const _: () = assert!(JOB_FLAGS & (0x800 | 0x1000) == 0);
-
-    /// Nothing to set before the start: the child joins its Job Object right after it starts.
-    pub fn own_tree(_: &mut Command) {}
-
-    /// A Job Object that holds the child and every process it starts; closing it stops them
-    /// all (kill-on-close). A process the child starts in the moment before it joins the job
-    /// is not in it.
-    pub struct Tree {
-        job: Handle,
-    }
-
-    impl Tree {
-        pub fn new(child: &Child) -> Tree {
-            // SAFETY: a new unnamed job with default security; the limits structure is the
-            // documented JOBOBJECT_EXTENDED_LIMIT_INFORMATION; the process handle belongs to
-            // the child, which is alive.
-            unsafe {
-                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-                if job.is_null() {
-                    return Tree { job };
-                }
-                let mut limits = ExtendedLimits::default();
-                limits.basic.flags = JOB_FLAGS;
-                let set = SetInformationJobObject(
-                    job,
-                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                    (&mut limits as *mut ExtendedLimits).cast(),
-                    std::mem::size_of::<ExtendedLimits>() as u32,
-                );
-                if set == 0 || AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
-                    CloseHandle(job);
-                    return Tree {
-                        job: std::ptr::null_mut(),
-                    };
-                }
-                Tree { job }
-            }
-        }
-
-        /// Stops every process of the job and closes it.
-        pub fn stop(&mut self) {
-            if !self.job.is_null() {
-                // SAFETY: the job handle is owned by this tree and closed once.
-                unsafe {
-                    TerminateJobObject(self.job, 1);
-                    CloseHandle(self.job);
-                }
-                self.job = std::ptr::null_mut();
-            }
-        }
-    }
-
-    impl Drop for Tree {
-        fn drop(&mut self) {
-            self.stop();
-        }
-    }
-
-    pub fn has_exited(child: &mut Child) -> std::io::Result<bool> {
-        // On Windows waiting does not reuse the identity of the job: the handle is ours.
-        Ok(child.try_wait()?.is_some())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-mod tree {
-    use std::process::{Child, Command};
-
-    pub fn own_tree(_: &mut Command) {}
-
-    pub struct Tree;
-
-    impl Tree {
-        pub fn new(_: &Child) -> Tree {
-            Tree
-        }
-
-        pub fn stop(&mut self) {}
-    }
-
-    pub fn has_exited(child: &mut Child) -> std::io::Result<bool> {
-        Ok(child.try_wait()?.is_some())
-    }
-}
-
-/// The process groups of children that run now, for [`stop_children`].
-#[cfg(unix)]
-static GROUPS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
-
-#[cfg(unix)]
-fn register(group: i32) {
-    if let Ok(mut groups) = GROUPS.lock() {
-        groups.push(group);
-    }
-}
-
-#[cfg(unix)]
-fn unregister(group: i32) {
-    if let Ok(mut groups) = GROUPS.lock() {
-        groups.retain(|&g| g != group);
-    }
-}
-
 /// Stops the process trees of children that still run. The watchdog of the time limits calls
 /// it before it ends the process with code 102, since a child in a process group of its own
 /// would otherwise outlive the program. Windows stops them through kill-on-close of the job
 /// when the process ends.
 pub fn stop_children() {
-    #[cfg(unix)]
-    if let Ok(groups) = GROUPS.try_lock() {
-        tree::stop_groups(&groups);
-    }
+    tree::stop_all();
 }
 
 #[cfg(unix)]
@@ -600,4 +338,50 @@ fn exit_status(status: &ExitStatus) -> i64 {
 #[cfg(not(unix))]
 fn exit_status(status: &ExitStatus) -> i64 {
     status.code().map_or(-1, i64::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A pipe that never ends on its own: it yields chunks until `total` bytes, counting them.
+    struct Endless {
+        read: Arc<AtomicUsize>,
+        total: usize,
+    }
+
+    impl Read for Endless {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let done = self.read.load(Ordering::SeqCst);
+            let n = buffer.len().min(self.total - done);
+            buffer[..n].fill(b'x');
+            self.read.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    /// A reader of a pipe whose chunks nobody takes stops reading after a bounded number of
+    /// bytes, so that a child that writes fast cannot grow the memory of the call past the
+    /// limit of its output while the call is busy.
+    #[test]
+    fn a_reader_whose_chunks_are_not_taken_stops_reading() {
+        let read = Arc::new(AtomicUsize::new(0));
+        let pipe = Endless {
+            read: read.clone(),
+            total: 4 * OUTPUT_LIMIT,
+        };
+        let (sender, receiver) = queue();
+        let reader = thread::spawn(move || read_pipe(0, Box::new(pipe), sender));
+        thread::sleep(Duration::from_millis(300));
+        let bytes = read.load(Ordering::SeqCst);
+        assert!(
+            bytes <= IN_FLIGHT,
+            "{bytes} bytes were read ahead, more than {IN_FLIGHT}"
+        );
+        drop(receiver);
+        reader.join().unwrap();
+        assert!(read.load(Ordering::SeqCst) <= IN_FLIGHT + CHUNK);
+    }
 }

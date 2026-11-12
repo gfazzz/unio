@@ -31,6 +31,7 @@ mod fdio;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod tree;
 pub mod worker;
 #[cfg(unix)]
 pub mod writer;
@@ -146,10 +147,35 @@ impl std::fmt::Display for Scope {
     }
 }
 
-/// The path as the file system sees it: absolute, without `.` and `..`, and with the links of
-/// its longest existing prefix resolved, so that a link cannot lead out of a scope.
+/// The path as the file system sees it: absolute, without `.` and `..`, and with every link of
+/// its existing part resolved, so that a link cannot lead out of a scope.
+///
+/// On Linux and macOS the system follows a link before it takes the `..` after it, so
+/// `a/link/..` is the parent of the link's target, not `a`; the path is resolved one component
+/// at a time in that order ([`walk_path`]). On Windows `..` is removed from the text before the
+/// system looks at the path, so it is removed lexically there first.
 pub fn resolve(path: &Path) -> PathBuf {
     resolve_in(path, working_directory())
+}
+
+/// The path of the entry that a write-class operation creates, replaces, renames or removes:
+/// its directory resolved as [`resolve`] resolves it, and its last name kept as given, so that a
+/// link there is the entry itself and not what it points to. A path that ends in `.` or `..` is
+/// resolved as a whole. `None` for a path that names no entry, such as `/`.
+pub fn entry_path(path: &Path) -> Option<PathBuf> {
+    let absolute = absolute(path);
+    match absolute.components().next_back() {
+        Some(Component::Normal(name)) => {
+            let name = name.to_os_string();
+            let parent = absolute.parent()?;
+            Some(resolve(parent).join(name))
+        }
+        _ => {
+            let resolved = resolve(&absolute);
+            resolved.file_name()?;
+            Some(resolved)
+        }
+    }
 }
 
 /// The path made absolute against the remembered working directory, without touching the file
@@ -180,16 +206,17 @@ fn resolve_in(path: &Path, cwd: &Path) -> PathBuf {
     } else {
         cwd.join(path)
     };
-    let mut lexical = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                lexical.pop();
-            }
-            other => lexical.push(other.as_os_str()),
-        }
+    if cfg!(windows) {
+        resolve_lexically(&absolute)
+    } else {
+        walk_path(&absolute, &mut look_up)
     }
+}
+
+/// Windows: `..` and `.` are removed from the text, as the system does, and then the longest
+/// existing prefix is resolved through the file system.
+fn resolve_lexically(absolute: &Path) -> PathBuf {
+    let lexical = lexically_normal(absolute);
     let mut rest = Vec::new();
     let mut prefix = lexical.as_path();
     loop {
@@ -208,6 +235,116 @@ fn resolve_in(path: &Path, cwd: &Path) -> PathBuf {
             _ => return lexical,
         }
     }
+}
+
+/// The path without `.`, and with each `..` removing the name before it, by the text alone.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut lexical = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+            }
+            other => lexical.push(other.as_os_str()),
+        }
+    }
+    lexical
+}
+
+/// What the file system holds at a path, as [`walk_path`] asks it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// Nothing, or nothing the process may see.
+    Missing,
+    /// A symbolic link with this target.
+    Link(PathBuf),
+    /// A file or a directory.
+    Present,
+}
+
+/// The real file system, without following a link at the path itself.
+fn look_up(path: &Path) -> Found {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => match std::fs::read_link(path) {
+            Ok(target) => Found::Link(target),
+            Err(_) => Found::Missing,
+        },
+        Ok(_) => Found::Present,
+        Err(_) => Found::Missing,
+    }
+}
+
+/// How many links one resolution follows, as Linux allows (ELOOP after 40).
+const MAX_LINKS: usize = 40;
+
+/// Resolves an absolute path in the order the system of Linux and macOS does: from the root,
+/// one component at a time; a link is replaced by its target, relative to the directory the
+/// link is in, before the components after it are taken; `..` goes up from the directory
+/// reached so far, which never contains a link. From the first missing component on, nothing
+/// below exists, so the rest is taken by its text, and `..` there only removes a missing name.
+/// A path with more than [`MAX_LINKS`] links keeps the link at which it stopped, so that an
+/// operation on it fails as the system's would. The result has no `.`, no `..`, and no link in
+/// the part of it that exists; `lookup` makes it independent of the platform, for the tests.
+pub(crate) fn walk_path(absolute: &Path, lookup: &mut dyn FnMut(&Path) -> Found) -> PathBuf {
+    enum Part {
+        Root(PathBuf),
+        Up,
+        Name(std::ffi::OsString),
+    }
+    fn parts(path: &Path, into: &mut Vec<Part>) {
+        let mut found = Vec::new();
+        let mut root = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => root.push(component.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => found.push(Part::Up),
+                Component::Normal(name) => found.push(Part::Name(name.to_os_string())),
+            }
+        }
+        // The parts go on a stack, the last one first.
+        into.extend(found.into_iter().rev());
+        if !root.as_os_str().is_empty() {
+            into.push(Part::Root(root));
+        }
+    }
+    let mut stack = Vec::new();
+    parts(absolute, &mut stack);
+    let mut out = PathBuf::new();
+    // Names pushed since the first missing one; zero while everything so far exists.
+    let mut missing = 0usize;
+    let mut links = 0usize;
+    while let Some(part) = stack.pop() {
+        match part {
+            Part::Root(root) => {
+                out = root;
+                missing = 0;
+            }
+            Part::Up => {
+                missing = missing.saturating_sub(1);
+                out.pop();
+            }
+            Part::Name(name) => {
+                out.push(&name);
+                if missing > 0 {
+                    missing += 1;
+                    continue;
+                }
+                match lookup(&out) {
+                    Found::Present => {}
+                    Found::Missing => missing = 1,
+                    Found::Link(_) if links == MAX_LINKS => missing = 1,
+                    Found::Link(target) => {
+                        links += 1;
+                        out.pop();
+                        parts(&target, &mut stack);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- permissions and policies
@@ -565,11 +702,14 @@ fn active() -> Option<Rc<Active>> {
     ACTIVE.with(|a| a.borrow().clone())
 }
 
-/// Whether the program may read the path (files.read). Without a sandbox on this thread, as in
-/// the tests of the runtime, everything is permitted.
-pub fn may_read(path: &str) -> bool {
+/// The path the program reads, checked against the read scopes (files.read): the path
+/// resolved as the system resolves it ([`resolve`]), which the operation then opens, so that
+/// what is checked and what is opened are the same. `None` if no read scope covers it. Without
+/// a sandbox on this thread, as in the tests of the runtime, everything is permitted and the
+/// path is used as given.
+pub fn read_target(path: &str) -> Option<PathBuf> {
     match active() {
-        None => true,
+        None => Some(PathBuf::from(path)),
         Some(a) => {
             let resolved = resolve(Path::new(path));
             a.sandbox
@@ -577,23 +717,49 @@ pub fn may_read(path: &str) -> bool {
                 .read
                 .iter()
                 .any(|s| s.covers(&resolved))
+                .then_some(resolved)
         }
     }
 }
 
-/// Whether the program may write, create, rename or remove the path (files.write).
-pub fn may_write(path: &str) -> bool {
+/// The entry a write-class operation changes, checked against the write scopes (files.write):
+/// [`entry_path`], which the operation then uses, or the writer process is asked about.
+/// `None` if no write scope covers it. Without a sandbox, the path as given.
+pub fn write_target(path: &str) -> Option<PathBuf> {
     match active() {
-        None => true,
+        None => Some(PathBuf::from(path)),
         Some(a) => {
-            let resolved = resolve(Path::new(path));
+            let entry = entry_path(Path::new(path))?;
             a.sandbox
                 .permissions
                 .write
                 .iter()
-                .any(|s| s.covers(&resolved))
+                .any(|s| s.covers(&entry))
+                .then_some(entry)
         }
     }
+}
+
+/// Whether the program may read the path (files.read).
+pub fn may_read(path: &str) -> bool {
+    read_target(path).is_some()
+}
+
+/// Whether the program may write, create, rename or remove the path (files.write).
+pub fn may_write(path: &str) -> bool {
+    write_target(path).is_some()
+}
+
+/// Opens a file for reading at a path that [`read_target`] returned. In a sandbox on Linux the
+/// directory is opened one component at a time from `/` without following a link, and the file
+/// in it with O_NOFOLLOW, so that a link put on the path after the check makes the open fail
+/// instead of leading it outside the scope; elsewhere the resolved path is opened as it is.
+pub fn open_for_reading(target: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(target_os = "linux")]
+    if active().is_some() {
+        return fdio::open_read_beneath(target);
+    }
+    std::fs::File::open(target)
 }
 
 /// Whether the path is a temporary file `.<name>.unio-tmp-<id>` of the atomic commit protocol
@@ -616,6 +782,18 @@ pub fn may_write_temporary(path: &str) -> bool {
     };
     let target = p.with_file_name(target);
     may_write(&target.to_string_lossy())
+}
+
+/// The entry of a temporary file that [`may_write_temporary`] permits, as [`write_target`]
+/// gives it; `None` if it is not permitted.
+pub fn temporary_target(path: &str) -> Option<PathBuf> {
+    if !may_write_temporary(path) {
+        return None;
+    }
+    match active() {
+        None => Some(PathBuf::from(path)),
+        Some(_) => entry_path(Path::new(path)),
+    }
 }
 
 /// Whether the program may sync the directory: it may read it, or it holds a target the
@@ -776,6 +954,27 @@ pub fn enter(
         }))
     });
     Ok(Guard { stop, missing })
+}
+
+/// Enters only the runtime part of the sandbox on this thread: its checks and its limits,
+/// without the restrictions of the operating system, without the watchdog, and without a writer
+/// process, so that write-class operations run in the runtime as on Windows. This is what is
+/// left where the operator allowed a weaker sandbox and no mechanism is available (SB-5); the
+/// tests of the runtime checks use it to show that those checks hold on their own.
+#[doc(hidden)]
+pub fn enter_checks_only(sandbox: Sandbox) -> Guard {
+    ACTIVE.with(|a| {
+        *a.borrow_mut() = Some(Rc::new(Active {
+            sandbox,
+            processes: Cell::new(0),
+            #[cfg(unix)]
+            writer: None,
+        }))
+    });
+    Guard {
+        stop: Arc::new(AtomicBool::new(false)),
+        missing: Vec::new(),
+    }
 }
 
 /// What a weaker sandbox lacks, as words for the operator.
@@ -1269,6 +1468,111 @@ mod tests {
                     .iter()
                     .all(|(name, _)| name == "HOME" || CHILD_ENVIRONMENT.contains(&name.as_str())));
                 ACTIVE.with(|a| *a.borrow_mut() = None);
+            }
+        })
+        .join();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_ok());
+    }
+
+    /// A file system of names: a link maps to its target, anything else listed is present.
+    fn fake(entries: &[(&str, Option<&str>)]) -> impl FnMut(&Path) -> Found {
+        let entries: Vec<(PathBuf, Option<PathBuf>)> = entries
+            .iter()
+            .map(|(p, t)| (PathBuf::from(p), t.map(PathBuf::from)))
+            .collect();
+        move |path: &Path| match entries.iter().find(|(p, _)| p == path) {
+            None => Found::Missing,
+            Some((_, None)) => Found::Present,
+            Some((_, Some(target))) => Found::Link(target.clone()),
+        }
+    }
+
+    /// The resolution of Linux and macOS, on a file system that needs no platform: a link is
+    /// followed before the `..` after it, as the system does.
+    #[test]
+    fn dot_dot_after_a_link_goes_up_from_the_link_target() {
+        let mut fs = fake(&[
+            ("/a", None),
+            ("/a/link", Some("/other/deep")),
+            ("/a/relative", Some("../other/deep")),
+            ("/a/secret", None),
+            ("/other", None),
+            ("/other/deep", None),
+            ("/other/secret", None),
+            ("/b", None),
+            ("/b/back", Some("/a/sub")),
+            ("/a/sub", None),
+            ("/a/loop", Some("/a/loop")),
+            ("/a/chain", Some("link/..")),
+        ]);
+        let r = |p: &str, fs: &mut dyn FnMut(&Path) -> Found| walk_path(Path::new(p), fs);
+        // The audit's case: lexically /a/secret, really /other/secret.
+        assert_eq!(r("/a/link/../secret", &mut fs), Path::new("/other/secret"));
+        assert_eq!(
+            r("/a/relative/../secret", &mut fs),
+            Path::new("/other/secret")
+        );
+        assert_eq!(r("/a/chain/secret", &mut fs), Path::new("/other/secret"));
+        // The converse: lexically /b/x, really /a/x.
+        assert_eq!(r("/b/back/../x", &mut fs), Path::new("/a/x"));
+        // Without links `..` and `.` are what they look like.
+        assert_eq!(r("/a/./sub/../secret", &mut fs), Path::new("/a/secret"));
+        assert_eq!(r("/../a/..", &mut fs), Path::new("/"));
+        // Below a missing name nothing exists: the rest is taken by its text, and a `..` that
+        // leaves the missing part looks at the file system again.
+        assert_eq!(r("/a/new/x/../y", &mut fs), Path::new("/a/new/y"));
+        assert_eq!(
+            r("/a/new/../link/../secret", &mut fs),
+            Path::new("/other/secret")
+        );
+        // A loop stops at the link, which the operation then fails on.
+        assert_eq!(r("/a/loop/x", &mut fs), Path::new("/a/loop/x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_checks_authorize_what_the_system_opens() {
+        let dir = std::env::temp_dir().join(format!("unio-sandbox-dotdot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["a/sub", "other/deep", "b"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("other/secret"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("other/deep"), dir.join("a/link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a/sub"), dir.join("b/back")).unwrap();
+        let real = std::fs::canonicalize(&dir).unwrap();
+        let text = |p: PathBuf| p.to_string_lossy().into_owned();
+        let result = std::thread::spawn({
+            let real = real.clone();
+            move || {
+                let tree = Scope {
+                    root: real.join("a"),
+                    subtree: true,
+                };
+                let permissions = Permissions {
+                    read: vec![tree.clone()],
+                    write: vec![tree],
+                    ..Permissions::default()
+                };
+                let _guard = enter_checks_only(Sandbox::new(permissions, Limits::default()));
+                let escape = text(real.join("a/link/../secret"));
+                assert_eq!(resolve(Path::new(&escape)), real.join("other/secret"));
+                assert!(!may_read(&escape) && !may_write(&escape));
+                assert!(read_target(&escape).is_none());
+                let inside = text(real.join("b/back/../x"));
+                assert_eq!(read_target(&inside), Some(real.join("a/x")));
+                assert_eq!(write_target(&inside), Some(real.join("a/x")));
+                // A write names the entry: a link as the last name is not followed.
+                assert_eq!(
+                    write_target(&text(real.join("a/link"))),
+                    Some(real.join("a/link"))
+                );
+                assert!(read_target(&text(real.join("a/link"))).is_none());
+                assert_eq!(
+                    writer::target_path(&text(real.join("a/link/../y"))),
+                    Some(real.join("other/y"))
+                );
             }
         })
         .join();

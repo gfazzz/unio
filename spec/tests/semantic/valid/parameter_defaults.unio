@@ -1,0 +1,28 @@
+struct Window:
+    width as Int
+    height as Int = 10
+    title as Text = "untitled"
+    tags as List[Text] = []
+
+struct Box[T]:
+    items as List[T] = []
+
+extend Window:
+    function area(self, scale as Int = self.width) returns Int:
+        return self.width * self.height * scale
+
+function default_after(value as Int, named next as Int = value + 1) returns Int:
+    return next
+
+function span(start as Int, finish as Int = start + 10, named step as Int = finish - start) returns Int:
+    return step
+
+function first_or[T](items as List[T], fallback as Option[T] = none) returns Option[T]:
+    return fallback if items.length() == 0 else items.get(0)
+
+function main():
+    let window = Window(width = 2)
+    let box as Box[Int] = Box()
+    print("{default_after(1)} {span(3)} {window.area()} {box.items.length()}")
+    let first = first_or([1]) or 0
+    print("{first} {window.title} {window.tags.length()}")

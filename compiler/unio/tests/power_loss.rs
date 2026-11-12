@@ -817,6 +817,11 @@ public function main():
 
 /// Runs the trial program with the trace on: the world before, the trace, the targets.
 fn traced_run(name: &str) -> (World, Vec<Op>, Vec<Target>, PathBuf) {
+    traced_run_with(name, &[])
+}
+
+/// [`traced_run`] with more variables for the run, such as a test hook that makes syncs fail.
+fn traced_run_with(name: &str, envs: &[(&str, &str)]) -> (World, Vec<Op>, Vec<Target>, PathBuf) {
     let dir = package(name, "");
     let data = dir.join("data");
     fs::write(data.join("a.txt"), "old").unwrap();
@@ -827,6 +832,7 @@ fn traced_run(name: &str) -> (World, Vec<Op>, Vec<Target>, PathBuf) {
     let world = World::of(&data);
     let output = command(&dir)
         .env(unio_runtime::file_trace::ENV, "1")
+        .envs(envs.iter().copied())
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1003,6 +1009,69 @@ fn the_harness_catches_broken_protocols() {
             ),
             "a new directory without the sync of its parent (Weak)",
         );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Audit finding: when the sync of the parent after `create_directory` fails, the new directory
+/// may be lost after power loss with every file in it, so a later durable commit into it does
+/// not survive by its own syncs. The test hook makes that sync fail (`once`): the durable commit
+/// must sync the parent again before it returns, and the guarantees hold in every crash state of
+/// the weak model. When the parent cannot be synced at all (`always`), the commit reports kind
+/// DurabilityUnconfirmed instead of success.
+#[cfg(unix)]
+#[test]
+fn a_durable_commit_confirms_a_new_directory_whose_parent_sync_failed() {
+    use unio_runtime::externs::durability::FAIL_PARENT_SYNC;
+    let (world, ops, targets, dir) = traced_run_with("parent-once", &[(FAIL_PARENT_SYNC, "once")]);
+    let durable = targets[1].commits[0].1;
+    let platform = Platform::host();
+    if durable {
+        // The sync after the mkdir failed, so the trace has none right after it.
+        assert_eq!(without_parent_sync(&ops).len(), ops.len(), "{ops:#?}");
+        for persistence in [Persistence::Ordered, Persistence::Weak] {
+            check(&world, &ops, &targets, platform, persistence)
+                .unwrap_or_else(|violation| panic!("{violation}\ntrace: {ops:#?}"));
+        }
+    }
+    let _ = fs::remove_dir_all(dir);
+
+    let dir = package("parent-always", "");
+    let data = dir.join("data");
+    let made = data.join("made");
+    let program = format!(
+        "import std.files
+from std.files import IoErrorKind
+
+public function main():
+    try files.create_directory(Path(\"{made}\")) on IoError as e:
+        print(\"error {{e.reason}}\")
+        return
+    try files.write_text(Path(\"{target}\"), \"inside\", durable = true) on IoError as e:
+        if e.kind == IoErrorKind.DurabilityUnconfirmed:
+            print(\"unconfirmed {{e.reason}}\")
+        else:
+            print(\"error {{e.reason}}\")
+        return
+    print(\"confirmed\")
+",
+        made = made.to_string_lossy(),
+        target = made.join("c.txt").to_string_lossy(),
+    );
+    fs::write(dir.join("main.unio"), program).unwrap();
+    let output = command(&dir)
+        .env(FAIL_PARENT_SYNC, "always")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if durable_here(&data) {
+        assert!(
+            stdout.starts_with("unconfirmed") && stdout.contains("is not confirmed"),
+            "stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        // The target is replaced all the same (guarantees 1 and 2).
+        assert_eq!(fs::read_to_string(made.join("c.txt")).unwrap(), "inside");
     }
     let _ = fs::remove_dir_all(dir);
 }

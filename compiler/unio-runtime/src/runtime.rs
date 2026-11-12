@@ -283,10 +283,14 @@ impl Runtime {
 
     /// Ends with code 102 when the values of the program hold more than the heap limit. On the
     /// path of a fault, the reserve for `release` serves while it has room; once an allocation
-    /// overflowed it, the limit applies again (C-17, C-18).
+    /// overflowed it, the limit applies again, also to the blocks that went to the system and
+    /// were freed before this check ([`crate::reserve::demand`]; C-17, C-18).
     pub fn check_heap(&self) -> Result<(), Unwind> {
         match self.heap_limit {
-            Some(limit) if crate::heap::live_bytes() > limit && !crate::reserve::covers(0) => {
+            Some(limit)
+                if (crate::heap::live_bytes() > limit && !crate::reserve::covers(0))
+                    || crate::reserve::demand() > limit =>
+            {
                 Err(Unwind::Exhausted(Exhaustion::Heap))
             }
             _ => Ok(()),
@@ -299,8 +303,9 @@ impl Runtime {
     pub fn reserve_heap(&self, bytes: usize) -> Result<(), Unwind> {
         match self.heap_limit {
             Some(limit)
-                if crate::heap::live_bytes().saturating_add(bytes) > limit
-                    && !crate::reserve::covers(bytes) =>
+                if (crate::heap::live_bytes().saturating_add(bytes) > limit
+                    && !crate::reserve::covers(bytes))
+                    || crate::reserve::demand() > limit =>
             {
                 Err(Unwind::Exhausted(Exhaustion::Heap))
             }
@@ -545,6 +550,42 @@ mod tests {
             Err(Unwind::Exhausted(Exhaustion::Heap))
         ));
         drop((counted, fault));
+        crate::heap::clear_ballast();
+    }
+
+    #[test]
+    fn a_block_over_the_reserve_freed_before_the_check_is_exhaustion() {
+        let mut runtime = Runtime::new(Vec::new());
+        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
+        fill_to(MINIMUM_HEAP_LIMIT - 100_000);
+        let fault = runtime.fault(FaultKind::DivisionByZero, "division by zero");
+        assert_eq!(reserve::demand(), 0);
+        // Not counted and freed at once: the limit still applies to it.
+        drop(std::hint::black_box(Vec::<u8>::with_capacity(
+            2 * RESERVE_BYTES,
+        )));
+        assert!(reserve::demand() > MINIMUM_HEAP_LIMIT);
+        assert!(matches!(
+            runtime.check_heap(),
+            Err(Unwind::Exhausted(Exhaustion::Heap))
+        ));
+        assert!(runtime.reserve_heap(0).is_err());
+        // expect_fault closes the reserve: the demand of its path is gone with it.
+        drop(fault);
+        reserve::close();
+        assert_eq!(reserve::demand(), 0);
+        assert!(runtime.check_heap().is_ok());
+        // With room on the heap, a block over the reserve is within the limit.
+        fill_to(0);
+        runtime.heap_limit = Some(8 * RESERVE_BYTES);
+        let fault = runtime.fault(FaultKind::DivisionByZero, "division by zero");
+        drop(std::hint::black_box(Vec::<u8>::with_capacity(
+            2 * RESERVE_BYTES,
+        )));
+        assert!(reserve::overflowed());
+        assert!(runtime.check_heap().is_ok());
+        drop(fault);
+        reserve::close();
         crate::heap::clear_ballast();
     }
 

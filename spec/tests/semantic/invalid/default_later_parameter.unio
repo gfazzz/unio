@@ -1,0 +1,6 @@
+# expect-error: 2 E0056
+function span(start as Int = finish, finish as Int = 10) returns Int:
+    return finish - start
+
+function main():
+    print("{span()}")

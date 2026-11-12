@@ -47,6 +47,9 @@ pub struct Rules {
     /// Whether it may start processes: only the link step, which runs the C compiler.
     pub processes: bool,
     pub limits: Limits,
+    /// The marker of the process tree the tool gave the link step: on macOS its profile carries
+    /// it, so that the tool finds every process of the step to stop it (`tree.rs`).
+    pub marker: Option<super::tree::Marker>,
 }
 
 /// What the link step of `unio build` may read and execute besides its own files.
@@ -165,6 +168,7 @@ pub fn apply(rules: &Rules) -> Result<(), String> {
                 &rules.write,
                 super::working_directory(),
                 &rules.execute,
+                rules.marker.as_ref(),
             );
         }
         if !rules.execute.is_empty() {

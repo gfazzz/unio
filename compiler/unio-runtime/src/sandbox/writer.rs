@@ -407,6 +407,9 @@ pub struct Server {
     ids: Ids,
     /// /proc/self/mountinfo, read before the writer's own sandbox applies (Linux).
     mountinfo: Option<String>,
+    /// New directories whose parent could not be synced, which a durable sync below them
+    /// syncs again first.
+    unsynced: crate::externs::durability::UnsyncedParents,
 }
 
 fn refused_scope(path: &Path) -> Reply {
@@ -468,7 +471,23 @@ impl Server {
             } else {
                 None
             },
+            unsynced: Default::default(),
         }
+    }
+
+    /// Syncs the directory for a durable commit: first the parents of the new directories on
+    /// its path whose sync failed, then the directory itself.
+    fn sync_durably(&mut self, dir: &OwnedFd, path: &Path) -> Result<(), Reply> {
+        self.unsynced
+            .settle(path, &mut |parent| {
+                if crate::externs::durability::parent_sync_fails(true) {
+                    return Err(crate::externs::durability::injected_sync_failure());
+                }
+                let fd = fdio::open_directory(parent)?;
+                fdio::sync_directory(&fd, parent)
+            })
+            .map_err(Reply::Os)?;
+        fdio::sync_directory(dir, path).map_err(Reply::Os)
     }
 
     fn permits(&self, path: &Path) -> bool {
@@ -601,12 +620,15 @@ impl Server {
                 }
             }
             Request::Sync(id) => {
-                let Some((_, dir, path)) = self.committed.iter().find(|(i, _, _)| *i == id) else {
+                let Some(at) = self.committed.iter().position(|(i, _, _)| *i == id) else {
                     return Err(Reply::Refused(format!(
                         "denied by the sandbox: operation {id:016x} is not a committed atomic file of this program"
                     )));
                 };
-                fdio::sync_directory(dir, path).map_err(Reply::Os)?;
+                let (id, dir, path) = self.committed.remove(at).expect("found above");
+                let synced = self.sync_durably(&dir, &path);
+                self.committed.insert(at, (id, dir, path));
+                synced?;
                 Ok(Reply::ok())
             }
             Request::SyncDirectory(dir) => {
@@ -615,7 +637,7 @@ impl Server {
                     return Err(refused_scope(&dir));
                 }
                 let fd = walk(&dir)?;
-                fdio::sync_directory(&fd, &dir).map_err(Reply::Os)?;
+                self.sync_durably(&fd, &dir)?;
                 Ok(Reply::ok())
             }
             Request::MakeDirectory(path) => {
@@ -624,9 +646,17 @@ impl Server {
                 trace("mkdir", &[&path]);
                 // The entry of the new directory is synced, so that a durable write into it
                 // survives power loss (S-9, docs/runtime.md 10). The directory exists either
-                // way, so the result of the sync is not reported: a file system that cannot
-                // sync a directory gives no guarantee after power loss in any case (S-9a).
-                let _ = fdio::sync_directory(&dir, &parent);
+                // way, so a failed sync is not reported here: it is remembered, and a durable
+                // sync below the new directory syncs the parent again first, or fails, so that
+                // the commit reports kind DurabilityUnconfirmed.
+                let synced = if crate::externs::durability::parent_sync_fails(false) {
+                    Err(crate::externs::durability::injected_sync_failure())
+                } else {
+                    fdio::sync_directory(&dir, &parent)
+                };
+                if synced.is_err() {
+                    self.unsynced.record(path, parent);
+                }
                 Ok(Reply::ok())
             }
             Request::Rename(source, target) => {
@@ -899,6 +929,10 @@ impl Handle {
         if crate::file_trace::enabled() {
             command.env(crate::file_trace::ENV, "1");
         }
+        // The test hook that makes syncs of new directories' parents fail only takes away.
+        if let Some(mode) = std::env::var_os(crate::externs::durability::FAIL_PARENT_SYNC) {
+            command.env(crate::externs::durability::FAIL_PARENT_SYNC, mode);
+        }
         // SAFETY: the closure only calls dup2 and fcntl, which are async-signal-safe.
         unsafe {
             command.pre_exec(move || {
@@ -1031,22 +1065,10 @@ impl Handle {
 
 /// The path the writer is asked about: absolute, without `.` and `..`, its directory resolved
 /// through the file system as the runtime checks resolve it, and its last name kept as given,
-/// so that the entry itself is written and not what a link there points to.
+/// so that the entry itself is written and not what a link there points to
+/// ([`super::entry_path`]).
 pub fn target_path(path: &str) -> Option<PathBuf> {
-    let absolute = super::absolute(Path::new(path));
-    let mut lexical = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                lexical.pop();
-            }
-            other => lexical.push(other.as_os_str()),
-        }
-    }
-    let name = lexical.file_name()?.to_os_string();
-    let parent = super::resolve(lexical.parent()?);
-    Some(parent.join(name))
+    super::entry_path(Path::new(path))
 }
 
 /// The writer of one running program and the operations it has issued to it.

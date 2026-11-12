@@ -442,3 +442,265 @@ fn repeating_a_text_over_the_heap_limit_is_exhaustion() {
         &mut [Value::text("ab"), Value::Int(1 << 40)]
     )));
 }
+
+/// Runs `f` on a thread with only the runtime checks of a sandbox whose read and write scope is
+/// `scope/**`: the weaker sandbox of SB-5, where nothing but the runtime stands between the
+/// program and the file system, and writes run in the runtime as on Windows.
+#[cfg(unix)]
+fn in_checks_only_sandbox(scope: PathBuf, f: impl FnOnce(&mut Runtime) + Send + 'static) {
+    use unio_runtime::sandbox::{self, Limits, Permissions, Sandbox, Scope};
+    std::thread::spawn(move || {
+        let scope = Scope {
+            root: scope,
+            subtree: true,
+        };
+        let permissions = Permissions {
+            read: vec![scope.clone()],
+            write: vec![scope],
+            ..Permissions::default()
+        };
+        let _guard = sandbox::enter_checks_only(Sandbox::new(permissions, Limits::default()));
+        let mut rt = Runtime::new(vec![]);
+        f(&mut rt);
+    })
+    .join()
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Audit finding: `open/link/../secret.txt` is `open/secret.txt` when `..` is taken lexically,
+/// but the system follows the link first and then goes up from its target, outside the scope.
+/// The check must authorize what the system opens, for every operation, and the operation must
+/// open what was authorized. The converse, a path that only looks outside, is permitted.
+#[cfg(unix)]
+#[test]
+fn a_link_followed_by_dot_dot_does_not_lead_a_file_operation_out_of_its_scope() {
+    let scratch = Scratch::new("link-dot-dot");
+    for dir in ["open/sub", "elsewhere/deep", "outside"] {
+        std::fs::create_dir_all(scratch.path(dir)).unwrap();
+    }
+    std::fs::write(scratch.path("elsewhere/secret.txt"), "SECRET").unwrap();
+    std::fs::write(scratch.path("open/secret.txt"), "inside").unwrap();
+    std::fs::write(scratch.path("open/a.txt"), "alpha").unwrap();
+    std::os::unix::fs::symlink(scratch.path("elsewhere/deep"), scratch.path("open/link")).unwrap();
+    std::os::unix::fs::symlink(scratch.path("open/sub"), scratch.path("outside/back")).unwrap();
+    let root = std::fs::canonicalize(&scratch.0).unwrap();
+    let check_root = root.clone();
+    in_checks_only_sandbox(root.join("open"), move |rt| {
+        let root = check_root;
+        let escape = root.join("open/link/../secret.txt");
+        let up = root.join("open/link/..");
+        for name in [
+            "std.files.read_text",
+            "std.files.read_bytes",
+            "std.files.system_open_read",
+        ] {
+            assert_eq!(
+                kind_of(call(rt, name, &mut [p(&escape)])),
+                "PermissionDenied",
+                "{name}"
+            );
+        }
+        for name in ["std.files.list_directory", "std.files.resolve"] {
+            assert_eq!(
+                kind_of(call(rt, name, &mut [p(&up)])),
+                "PermissionDenied",
+                "{name}"
+            );
+        }
+        for name in ["std.files.exists", "std.files.is_directory"] {
+            let target = if name.ends_with("exists") {
+                &escape
+            } else {
+                &up
+            };
+            assert!(
+                matches!(call(rt, name, &mut [p(target)]), Ok(Value::Bool(false))),
+                "{name}"
+            );
+        }
+        // Writes: a new file, a directory, and a rename into the place outside.
+        let outside = root.join("open/link/../new.txt");
+        assert_eq!(
+            kind_of(call(
+                rt,
+                "std.files.system_open_temporary",
+                &mut [p(&outside)]
+            )),
+            "PermissionDenied"
+        );
+        assert_eq!(
+            kind_of(call(
+                rt,
+                "std.files.create_directory",
+                &mut [p(&root.join("open/link/../made"))]
+            )),
+            "PermissionDenied"
+        );
+        assert_eq!(
+            kind_of(call(
+                rt,
+                "std.files.rename",
+                &mut [p(&root.join("open/a.txt")), p(&outside)]
+            )),
+            "PermissionDenied"
+        );
+        // The converse: outside/back is open/sub, so outside/back/.. is open itself.
+        let inside = root.join("outside/back/../a.txt");
+        assert!(matches!(
+            call(rt, "std.files.read_text", &mut [p(&inside)]),
+            Ok(Value::Text(t)) if t.as_str() == "alpha"
+        ));
+        assert!(matches!(
+            call(rt, "std.files.exists", &mut [p(&inside)]),
+            Ok(Value::Bool(true))
+        ));
+        let written = root.join("outside/back/../w.txt");
+        let (_, _, outcome) = commit(rt, &written, "written", false);
+        outcome.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("open/w.txt")).unwrap(),
+            "written"
+        );
+    });
+    assert_eq!(names_in(&root.join("elsewhere")), ["deep", "secret.txt"]);
+    assert_eq!(names_in(&root.join("outside")), ["back"]);
+}
+
+/// The bytes the heap counts while `f` holds its result.
+fn counted_by(f: impl FnOnce() -> Value) -> (Value, usize) {
+    let before = unio_runtime::heap::live_bytes();
+    let value = f();
+    let after = unio_runtime::heap::live_bytes();
+    (value, after.saturating_sub(before))
+}
+
+/// Audit finding: the temporary memory of file operations must be checked against the heap
+/// limit before it is allocated. Each operation here would succeed if only its result were
+/// counted, but holds more while it runs; with `free` bytes left it must end with exhaustion
+/// (code 102) instead of allocating past the limit.
+#[test]
+fn the_temporary_memory_of_file_operations_counts_against_the_heap_limit() {
+    let scratch = Scratch::new("temporary-budget");
+    let mut rt = Runtime::new(vec![]);
+    let with_free = |rt: &mut Runtime, free: usize| {
+        rt.heap_limit = Some(unio_runtime::heap::live_bytes() + free);
+    };
+
+    // A directory listing holds every name before it makes the list.
+    let many = scratch.path("many");
+    std::fs::create_dir(&many).unwrap();
+    for i in 0..2000 {
+        std::fs::write(
+            many.join(format!("an-entry-with-a-longish-name-{i:05}")),
+            "",
+        )
+        .unwrap();
+    }
+    let (list, result) =
+        counted_by(|| call(&mut rt, "std.files.list_directory", &mut [p(&many)]).unwrap());
+    drop(list);
+    with_free(&mut rt, result + 8 * 1024);
+    assert!(exhausted(call(
+        &mut rt,
+        "std.files.list_directory",
+        &mut [p(&many)]
+    )));
+    rt.heap_limit = None;
+
+    // A path's copies: the native path, its resolution, the text for the system call.
+    let long = Value::path(format!(
+        "{}/{}",
+        scratch.0.display(),
+        "a/".repeat(32 * 1024)
+    ));
+    with_free(&mut rt, 32 * 1024);
+    for name in [
+        "std.files.exists",
+        "std.files.read_bytes",
+        "std.files.create_directory",
+    ] {
+        assert!(
+            exhausted(call(&mut rt, name, &mut [long.clone()])),
+            "{name} with a long path"
+        );
+    }
+    rt.heap_limit = None;
+}
+
+/// Writing bytes the program holds makes no copy of them: measured in the reserve for
+/// `release`, which records the most it served at once (C-17).
+#[test]
+fn writing_bytes_makes_no_copy_of_them() {
+    use unio_runtime::reserve;
+    let scratch = Scratch::new("write-no-copy");
+    let mut rt = Runtime::new(vec![]);
+    let data = Value::bytes(vec![b'x'; 256 * 1024]);
+    let temporary = call(
+        &mut rt,
+        "std.files.system_open_temporary",
+        &mut [p(&scratch.path("w.bin"))],
+    )
+    .unwrap();
+    let descriptor = Value::Int(int_field(&temporary, "descriptor"));
+    reserve::open();
+    reserve::reset_peak();
+    let written = call(
+        &mut rt,
+        "std.files.system_write_bytes",
+        &mut [descriptor.clone(), data.clone()],
+    );
+    let peak = reserve::peak();
+    reserve::close();
+    written.unwrap();
+    assert!(peak < 4096, "writing 256 KiB allocated {peak} bytes");
+    call(&mut rt, "std.files.system_close", &mut [descriptor]).unwrap();
+}
+
+/// A file whose size the system does not report (a pipe) grows the buffer step by step; each
+/// step is checked with the buffer the runtime already holds and the copy that growing makes.
+#[cfg(unix)]
+#[test]
+fn reading_a_file_of_unknown_size_counts_the_buffer_it_grows() {
+    extern "C" {
+        fn mkfifo(path: *const std::os::raw::c_char, mode: u32) -> i32;
+    }
+    let scratch = Scratch::new("read-pipe");
+    let pipe = scratch.path("pipe");
+    let name = std::ffi::CString::new(pipe.to_string_lossy().into_owned()).unwrap();
+    // SAFETY: the path ends with 0.
+    assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
+    let feed = |pipe: PathBuf| {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(pipe) {
+                let _ = f.write_all(&vec![b'y'; 100 * 1024]);
+            }
+        })
+    };
+    let mut rt = Runtime::new(vec![]);
+    // The content is 100 KiB, and the buffer that holds it 128 KiB: with 150 KiB free it fits,
+    // but growing from 64 KiB to 128 KiB holds both blocks for a moment.
+    let writer = feed(pipe.clone());
+    rt.heap_limit = Some(unio_runtime::heap::live_bytes() + 150 * 1024);
+    let outcome = call(&mut rt, "std.files.read_bytes", &mut [p(&pipe)]);
+    rt.heap_limit = None;
+    writer.join().unwrap();
+    assert!(exhausted(outcome));
+    // With room for both, the whole content is read.
+    let writer = feed(pipe.clone());
+    rt.heap_limit = Some(unio_runtime::heap::live_bytes() + 256 * 1024);
+    let read = call(&mut rt, "std.files.read_bytes", &mut [p(&pipe)]);
+    rt.heap_limit = None;
+    writer.join().unwrap();
+    assert!(matches!(read, Ok(Value::Bytes(b)) if b.len() == 100 * 1024));
+}

@@ -89,6 +89,44 @@ function divide(a as Int, b as Int) returns Int:
 
 ";
 
+/// Releases that exhaust the reserve with memory they free again before any check of the
+/// heap: one large block (a text of 2.4 MB built by concatenation, which no check of the heap
+/// follows) and many small ones (40,000 texts in a list that is dropped at once). The heap
+/// has 100,000 bytes beside the reserve, so both are exhaustion: code 102, the preallocated
+/// diagnostic, the release of `first` skipped, the temporary file kept and the target
+/// unchanged (C-17, C-18, plan section 12 condition 1).
+#[allow(dead_code)]
+pub const SPIKES: &str = "struct Spike:
+    name as Text
+
+extend Spike with Resource:
+    function release(var self):
+        print(\"releasing {self.name}\")
+        let part = \"s\".repeat(400000)
+        let n = (part + part + part + part + part + part).length()
+        print(\"released {self.name}: {n}\")
+
+struct Crowd:
+    name as Text
+
+extend Crowd with Resource:
+    function release(var self):
+        print(\"releasing {self.name}\")
+        let n = [\"{self.name} {i}\" for i in range(0, 40000)].length()
+        print(\"released {self.name}: {n}\")
+
+public function main() returns Int:
+    try:
+        using first = Log(name = \"first\"):
+            using file = try files.open_atomic(Path(\"open/target.txt\")):
+                try file.write(\"new content\")
+                using spike = KIND(name = \"spike\"):
+                    return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+";
+
 /// A fresh package for a program of the reserve: `RESERVE_PRELUDE` and `body` in `main.unio`,
 /// a manifest that lets it write `open/`, `open/target.txt` holding "old content", and
 /// `policy.toml` with a heap limit of 8 MiB (on Windows also allowing the weaker sandbox).

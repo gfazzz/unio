@@ -1,0 +1,6 @@
+# expect-error: 2 E0056
+function next(value as Int = missing_name) returns Int:
+    return value + 1
+
+function main():
+    print("{next()}")

@@ -194,6 +194,98 @@ pub fn file_system_name(_: &Path) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------- new directories
+
+/// The new directories of a run whose entry in their parent is not confirmed on storage: the
+/// sync of the parent after `create_directory` failed. A durable commit depends on the entries
+/// of every directory above its target, so a durable sync of a directory first syncs the
+/// parents of the new directories on its path again ([`UnsyncedParents::settle`]) and fails if
+/// one of them still fails: the commit then reports kind DurabilityUnconfirmed (S-9, S-9c,
+/// docs/runtime.md 10). Directories that existed before the run are taken as on storage.
+#[derive(Debug, Default)]
+pub struct UnsyncedParents {
+    /// The new directory and its parent, both resolved.
+    entries: Vec<(PathBuf, PathBuf)>,
+    /// More new directories failed than are kept: no durable sync is confirmed any more.
+    overflowed: bool,
+}
+
+/// How many unconfirmed new directories are kept.
+const MAX_UNSYNCED: usize = 1024;
+
+impl UnsyncedParents {
+    /// Records a new directory whose parent was not synced.
+    pub fn record(&mut self, created: PathBuf, parent: PathBuf) {
+        if self.entries.len() >= MAX_UNSYNCED {
+            self.overflowed = true;
+        } else {
+            self.entries.push((created, parent));
+        }
+    }
+
+    /// Before a durable sync of `dir`: syncs with `sync` the parent of every recorded directory
+    /// that is `dir` or above it, deepest first, and forgets each that succeeds. The first
+    /// failure is returned; its directory and those not yet tried stay recorded.
+    pub fn settle(
+        &mut self,
+        dir: &Path,
+        sync: &mut dyn FnMut(&Path) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        if self.overflowed {
+            return Err(std::io::Error::other(
+                "the parents of too many new directories could not be synced",
+            ));
+        }
+        loop {
+            let deepest = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, (created, _))| dir.starts_with(created))
+                .max_by_key(|(_, (created, _))| created.components().count())
+                .map(|(i, _)| i);
+            let Some(i) = deepest else {
+                return Ok(());
+            };
+            let parent = self.entries[i].1.clone();
+            sync(&parent).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the new directory {} is not confirmed in {}: {e}",
+                        self.entries[i].0.display(),
+                        parent.display()
+                    ),
+                )
+            })?;
+            self.entries.swap_remove(i);
+        }
+    }
+}
+
+/// The test hook of the crash trials that makes the sync of a parent after a new directory fail
+/// (`file_trace`): with [`FAIL_PARENT_SYNC`] set to `once`, the sync that `create_directory`
+/// does; with `always`, also each later attempt of a durable commit. It only makes syncs fail.
+pub fn parent_sync_fails(retry: bool) -> bool {
+    static MODE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    match MODE
+        .get_or_init(|| std::env::var(FAIL_PARENT_SYNC).ok())
+        .as_deref()
+    {
+        Some("always") => true,
+        Some("once") => !retry,
+        _ => false,
+    }
+}
+
+/// The variable of [`parent_sync_fails`].
+pub const FAIL_PARENT_SYNC: &str = "UNIO_TEST_FAIL_PARENT_SYNC";
+
+/// The error of a sync that the test hook fails.
+pub fn injected_sync_failure() -> std::io::Error {
+    std::io::Error::other("injected failure of the sync of a new directory's parent")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +314,56 @@ mod tests {
             .map(|n| SUPPORTED.contains(&n.to_ascii_lowercase().as_str()))
             .unwrap_or(false);
         assert_eq!(supports_durability(&here.join("not-yet-created")), expected);
+    }
+
+    #[test]
+    fn a_durable_sync_first_confirms_the_new_directories_on_its_path() {
+        let mut unsynced = UnsyncedParents::default();
+        unsynced.record("/d/new".into(), "/d".into());
+        unsynced.record("/d/new/sub".into(), "/d/new".into());
+        unsynced.record("/d/other".into(), "/d".into());
+        // A sync elsewhere needs none of them.
+        let mut synced = Vec::new();
+        unsynced
+            .settle(Path::new("/e"), &mut |p| {
+                synced.push(p.to_path_buf());
+                Ok(())
+            })
+            .unwrap();
+        assert!(synced.is_empty());
+        // A failure is reported and keeps the directory recorded.
+        let failed = unsynced.settle(Path::new("/d/new/sub/deeper"), &mut |p| {
+            if p == Path::new("/d") {
+                Err(std::io::Error::other("no"))
+            } else {
+                synced.push(p.to_path_buf());
+                Ok(())
+            }
+        });
+        assert!(failed.unwrap_err().to_string().contains("/d/new"));
+        assert_eq!(synced, [PathBuf::from("/d/new")]);
+        synced.clear();
+        unsynced
+            .settle(Path::new("/d/new/sub"), &mut |p| {
+                synced.push(p.to_path_buf());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(synced, [PathBuf::from("/d")]);
+        synced.clear();
+        // Settled once, a path needs nothing more; /d/other is still open.
+        unsynced
+            .settle(Path::new("/d/new/sub"), &mut |p| {
+                synced.push(p.to_path_buf());
+                Ok(())
+            })
+            .unwrap();
+        assert!(synced.is_empty());
+        assert_eq!(unsynced.entries.len(), 1);
+        // Past the limit nothing durable is confirmed.
+        for i in 0..MAX_UNSYNCED {
+            unsynced.record(format!("/x/{i}").into(), "/x".into());
+        }
+        assert!(unsynced.settle(Path::new("/e"), &mut |_| Ok(())).is_err());
     }
 }

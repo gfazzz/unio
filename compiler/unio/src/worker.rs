@@ -12,7 +12,12 @@
 //! starts before its own rules apply and which may write exactly those files.
 //!
 //! The tool keeps the time limit and, on macOS, the memory limit: a worker over a limit is
-//! stopped, and the tool reports it with code 102 instead of hanging.
+//! stopped with its whole process tree, and the tool reports it with code 102 instead of
+//! hanging. The worker runs in a process tree of its own (`unio_runtime::sandbox::tree`): a
+//! process group that no descendant can leave on Linux, found also through parents and the
+//! marker of the Seatbelt profile of the link step on macOS, and a Job Object the worker joins
+//! while still suspended on Windows. When the worker ends, at a limit or not, what is left of
+//! its tree is stopped; a tree that cannot be set up stops the tool with code 103.
 //!
 //! `unio build` links in a second worker, the link step: it may execute exactly the C compiler
 //! and the programs it runs, read the toolchain, the object file, and `libunio.a`, and write
@@ -27,7 +32,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use unio_runtime::sandbox::{self, worker as os, Scope};
+use unio_runtime::sandbox::{self, tree, worker as os, Scope};
 
 /// The first argument of a worker process.
 pub const ARG: &str = "__unio-worker";
@@ -45,6 +50,11 @@ pub const EXIT_LIMIT: u8 = 102;
 pub const EXIT_SANDBOX: u8 = 103;
 /// The code of a worker that ended abnormally.
 pub const EXIT_ABNORMAL: u8 = 101;
+
+/// The least memory of the compile step of `unio run` and `unio test`: the heap limit of a
+/// policy given to them is also the program's, which may be 2 MiB (C-17), while loading the
+/// compiler and the standard library in a worker takes about 150 MB of address space on Linux.
+pub const COMPILE_MEMORY_FLOOR: u64 = 256 << 20;
 
 // ---------------------------------------------------------------- what a worker gets
 
@@ -248,9 +258,11 @@ struct Config {
     cpu: Option<u64>,
     allow_weaker: bool,
     probe: Option<String>,
+    /// The marker of the process tree, for the profile of the link step (macOS).
+    tree: Option<tree::Marker>,
 }
 
-fn encode(spec: &Spec, temp: &Path) -> String {
+fn encode(spec: &Spec, temp: &Path, marker: Option<&tree::Marker>) -> String {
     let mut out = format!(
         "unio-worker {VERSION}\nparent {}\ntemp {}\n",
         std::process::id(),
@@ -278,6 +290,9 @@ fn encode(spec: &Spec, temp: &Path) -> String {
         out.push_str(&format!("cpu {cpu}\n"));
     }
     out.push_str(&format!("weaker {}\n", u8::from(spec.allow_weaker)));
+    if let Some(marker) = marker {
+        out.push_str(&format!("tree {}\n", marker.token()));
+    }
     if let Some(probe) = std::env::var_os(PROBE) {
         out.push_str(&format!("probe {}\n", hex(probe.as_encoded_bytes())));
     }
@@ -315,6 +330,7 @@ fn decode(text: &str) -> Result<Config, String> {
             "memory" => config.memory = Some(value.parse().map_err(|_| bad(line))?),
             "cpu" => config.cpu = Some(value.parse().map_err(|_| bad(line))?),
             "weaker" => config.allow_weaker = value == "1",
+            "tree" => config.tree = Some(tree::Marker::from_token(value).ok_or_else(|| bad(line))?),
             "probe" => {
                 let bytes = unhex(value).ok_or_else(|| bad(line))?;
                 config.probe = Some(String::from_utf8_lossy(&bytes).into_owned());
@@ -483,6 +499,7 @@ fn enter_tool(config: Config, rest: &[String]) -> Entered {
         execute: Vec::new(),
         processes: false,
         limits: os_limits(&config),
+        marker: None,
     };
     if let Err(code) = apply(&rules, config.allow_weaker) {
         return Entered::Done(code);
@@ -559,6 +576,7 @@ fn link_step(config: &Config, arguments: &[String]) -> ExitCode {
         execute: toolchain.execute,
         processes: true,
         limits: os_limits(config),
+        marker: config.tree.clone(),
     };
     if let Err(code) = apply(&rules, config.allow_weaker) {
         return code;
@@ -651,6 +669,11 @@ pub fn start(
     for (name, value) in extra_env {
         command.env(name, value);
     }
+    // The worker and every process it starts form a tree that is stopped as a whole. The link
+    // step runs under a profile that carries the marker of the tree (macOS).
+    tree::prepare(&mut command);
+    tree::stop_on_termination();
+    let marker = (role == "link").then(tree::Marker::new);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -658,7 +681,14 @@ pub fn start(
             return Err(EXIT_SANDBOX);
         }
     };
-    let config = encode(spec, temp.path());
+    let mut process_tree = match tree::Tree::start(&mut child, marker.clone()) {
+        Ok(process_tree) => process_tree,
+        Err(e) => {
+            eprintln!("unio: the process tree of the worker cannot be set up: {e}");
+            return Err(EXIT_SANDBOX);
+        }
+    };
+    let config = encode(spec, temp.path(), marker.as_ref());
     if let Some(mut stdin) = child.stdin.take() {
         // A worker that ends early closes the pipe; its code tells why.
         let _ = stdin.write_all(config.as_bytes());
@@ -707,10 +737,19 @@ pub fn start(
     let mut pause = Duration::from_micros(200);
     let mut stopped: Option<String> = None;
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {}
-            Err(_) => break None,
+        // The worker has ended but is not reaped yet: what is left of its tree is stopped
+        // while the number of its process group still belongs to it.
+        match tree::has_exited(&mut child) {
+            Ok(true) => {
+                process_tree.stop();
+                break child.wait().ok();
+            }
+            Ok(false) => {}
+            Err(_) => {
+                process_tree.stop();
+                let _ = child.kill();
+                break child.wait().ok();
+            }
         }
         if started.elapsed() >= deadline {
             stopped = Some(format!(
@@ -723,6 +762,7 @@ pub fn start(
             ));
         }
         if stopped.is_some() {
+            process_tree.stop();
             let _ = child.kill();
             break child.wait().ok();
         }

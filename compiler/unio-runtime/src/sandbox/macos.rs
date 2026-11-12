@@ -22,9 +22,19 @@ pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
     APPLIED
         .get_or_init(|| {
             apply_rlimits(limits)?;
-            init(&profile(permissions))
+            init(&profile(permissions))?;
+            if !permissions.process.is_empty() {
+                super::tree::set_marked();
+            }
+            Ok(())
         })
         .clone()
+}
+
+/// Applies a profile to this process, for the tests of other modules.
+#[cfg(test)]
+pub(super) fn init_profile(profile: &str) -> Result<(), String> {
+    init(profile)
 }
 
 fn init(profile: &str) -> Result<(), String> {
@@ -101,7 +111,8 @@ pub fn profile(permissions: &Permissions) -> String {
     // A child may execute exactly the listed programs and the interpreters of listed scripts
     // (children.rs), and read and map the system libraries: the dyld shared cache and /usr/lib.
     // Nothing else may be executed (docs/runtime.md 9.5 and 9.6). Listing the descendants of a
-    // child lets the runtime stop those that left its process group (9.5).
+    // child lets the runtime stop those that left its process group, and the marker of the
+    // profile finds those whose parent has ended (9.5, `tree.rs`).
     if !permissions.process.is_empty() {
         p.push_str("(allow process-fork)\n(allow signal (target same-sandbox))\n");
         p.push_str(
@@ -120,6 +131,7 @@ pub fn profile(permissions: &Permissions) -> String {
                 quoted(&path)
             ));
         }
+        p.push_str(&super::tree::own_marker().rules());
     }
     p
 }
@@ -235,14 +247,20 @@ pub fn apply_link_worker(
     write: &[Scope],
     cwd: &Path,
     execute: &[std::path::PathBuf],
+    marker: Option<&super::tree::Marker>,
 ) -> Result<(), String> {
-    init(&link_profile(read, write, cwd, execute))
+    let mut profile = link_profile(read, write, cwd, execute);
+    if let Some(marker) = marker {
+        profile.push_str(&marker.rules());
+    }
+    init(&profile)
 }
 
 /// The profile of the link step: that of a worker, and it may start processes that execute
 /// exactly the listed programs (the compiler and the linker it runs), map the libraries of the
 /// read trees (the developer tools) and of the system, and signal its children. It still has
-/// no network and writes only its temporary directory.
+/// no network and writes only its temporary directory. [`apply_link_worker`] adds the marker
+/// the tool gave, by which the tool finds every process of the link step to stop it.
 pub fn link_profile(
     read: &[Scope],
     write: &[Scope],
@@ -305,6 +323,10 @@ mod tests {
         let mut with_sh = permissions.clone();
         with_sh.process.insert("sh".into());
         let p = profile(&with_sh);
+        assert!(
+            p.ends_with(&crate::sandbox::tree::own_marker().rules()),
+            "the marker goes last: {p}"
+        );
         let exec: Vec<&str> = p.lines().filter(|l| l.contains("process-exec")).collect();
         assert!(!exec.is_empty(), "{p}");
         assert!(

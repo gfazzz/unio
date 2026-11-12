@@ -148,6 +148,43 @@ fn captured_output_counts_against_the_heap_limit() {
     );
 }
 
+/// A child that writes far more than the limit on both streams, as fast as it can: the call
+/// ends with OutputTooLarge once a stream passes the limit, and stops the child, instead of
+/// reading on.
+#[test]
+fn a_child_that_writes_far_more_than_the_limit_is_stopped_at_it() {
+    let started = std::time::Instant::now();
+    let script = "head -c 4294967296 /dev/zero >&2 & head -c 4294967296 /dev/zero; wait";
+    assert_eq!(kind(run("sh", &["-c", script], 120)), "OutputTooLarge");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The output on its way from the pipes to the call is bounded and counts against the heap
+/// limit for the whole call: a heap with less room than that bound is exhausted before the
+/// child starts.
+#[test]
+fn the_output_on_its_way_counts_against_the_heap_limit() {
+    let mut rt = Runtime::new(vec![]);
+    rt.heap_limit =
+        Some(unio_runtime::reserve::RESERVE_BYTES + unio_runtime::externs::process::IN_FLIGHT / 2);
+    let outcome = call(
+        &mut rt,
+        "std.process.run",
+        &mut [Value::text("true"), Value::list(vec![]), Value::Int(30)],
+    );
+    assert!(
+        matches!(
+            outcome,
+            Err(Unwind::Exhausted(unio_runtime::Exhaustion::Heap))
+        ),
+        "{outcome:?}"
+    );
+}
+
 /// Whether python3 can run here; the tests of leaving the process group need `os.setsid`.
 fn python() -> bool {
     std::process::Command::new("python3")
@@ -194,7 +231,10 @@ time.sleep(60)
 
 /// A double fork into a new session: the grandchild exits at once, so the great-grandchild is
 /// orphaned before it calls `setsid`. Linux denies `setsid` and `setpgid` to every descendant
-/// of a child, so it stays in the group and is stopped with it.
+/// of a child, so it stays in the group and is stopped with it. On macOS such an orphan is
+/// found only by the marker of the Seatbelt profile of a program (`sandbox/tree.rs`), and this
+/// test calls the runtime without a sandbox; `tests/sandbox.rs` of the tool checks it there
+/// (`a_double_fork_into_a_new_session_is_stopped_with_the_tree`).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_double_fork_into_a_new_session_does_not_escape_the_tree() {

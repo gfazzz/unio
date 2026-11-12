@@ -1,0 +1,40 @@
+# `or` on an Option gives the inner value when its right side has the inner type and an
+# Option when its right side is an Option (semantics 4.3), whatever the right side is
+# written as: a name, a call, `some(...)` or `none`.
+
+function first_or(items as List[Int], fallback as Option[Int]) returns Option[Int]:
+    return items.get(0) or fallback
+
+function either[T](a as Option[T], b as Option[T]) returns Option[T]:
+    return a or b
+
+function first_or_value[T](items as List[T], fallback as T) returns T:
+    return items.get(0) or fallback
+
+function backup() returns Option[Int]:
+    return some(8)
+
+function show(value as Option[Int]) returns Text:
+    match value:
+        case some(v):
+            return "some {v}"
+        case none:
+            return "none"
+
+public function main():
+    let empty as List[Int] = []
+    let saved = some(7)
+    print(show(first_or([1], none)))
+    print(show(first_or(empty, saved)))
+    print(show(first_or(empty, none)))
+    print(show(either(some(2), none)))
+    print(show(either(none, saved)))
+    let left as Option[Int] = some(3)
+    print(show(left or saved))
+    print(show(empty.get(0) or backup()))
+    print(show([5].get(0) or backup()))
+    print(show(left or some(4)))
+    print("{empty.get(0) or 9}")
+    print("{[4].get(0) or 9}")
+    print("{left or 5}")
+    print("{first_or_value([6], 0)} {first_or_value(empty, 1)}")

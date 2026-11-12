@@ -377,10 +377,11 @@ fn externals(program: &mut Program) {
     }
 }
 
-/// The defaults of parameters and fields, for their effects only: what a default calls,
-/// allocates or uses counts for its function, or for every function that builds its type
-/// (semantics 8.4). Their diagnostics are left out: the checks of defaults are not part of
-/// docs/semantics.md yet.
+/// The defaults of parameters and fields. Each is checked for names and types against the
+/// type of its parameter or field (semantics 3.2); a default of a parameter sees the
+/// generics of its function and the parameters before it. What a default calls, allocates
+/// or uses counts for its function, or for every function that builds its type (semantics
+/// 8.4).
 fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId, Ty>) {
     // Each default with the parameter or the field it is for.
     type Defaults = Vec<(Slot, ast::Expr)>;
@@ -461,13 +462,60 @@ fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId,
         }
     }
     for (module, holder, exprs) in work {
-        let before = program.diagnostics.len();
         let mut checker = Checker::new(program, known, const_types, module);
         checker.holder = Some(Holder::from(holder));
         checker.scopes.push(Vec::new());
+        // The parameters of a function with a body, each visible to the defaults after it
+        // (runtime 1.3); the default of an external is evaluated alone and sees none.
+        let mut params: Vec<(String, Ty, bool)> = Vec::new();
+        let mut sees_params = false;
+        match holder {
+            Node::Func(f) => {
+                params = checker.enter_function(f);
+                let def = &checker.p.funcs[f];
+                sees_params = def.body.is_some() || matches!(def.owner, Owner::Interface(_));
+            }
+            Node::Def(d) => {
+                for g in checker.p.defs[d].generics.clone() {
+                    checker.generics.insert(checker.p.params[g].name.clone(), g);
+                }
+            }
+            _ => {}
+        }
+        let mut bound = 0;
         for (slot, e) in &exprs {
-            let ty = checker.expr(e, &Ty::Unknown);
-            let flow = checker.value_of(e, &ty);
+            let expected = match slot {
+                Slot::Param(f, i) => {
+                    if sees_params {
+                        while bound < *i {
+                            let (name, ty, var) = params[bound].clone();
+                            checker.bind_param(*f, bound, name, ty, var);
+                            bound += 1;
+                        }
+                    }
+                    params.get(*i).map(|p| p.1.clone())
+                }
+                Slot::Field(d, name) => match &checker.p.defs[*d].kind {
+                    DefKind::Struct(fields) | DefKind::Error(fields) => fields
+                        .iter()
+                        .find(|f| f.name == *name)
+                        .map(|f| f.ty.clone()),
+                    _ => None,
+                },
+            }
+            .unwrap_or(Ty::Unknown);
+            let ty = checker.expr(e, &expected);
+            let flow = checker.value_of(
+                e,
+                if matches!(expected, Ty::Unknown) {
+                    &ty
+                } else {
+                    &expected
+                },
+            );
+            if !matches!(expected, Ty::Unknown) {
+                checker.expect(&ty, &expected, e.span);
+            }
             if flow.is_empty() {
                 continue;
             }
@@ -484,7 +532,6 @@ fn defaults(program: &mut Program, known: &Known, const_types: &HashMap<ConstId,
                     .extend(flow),
             }
         }
-        program.diagnostics.truncate(before);
     }
 }
 
@@ -630,19 +677,37 @@ impl<'a> Checker<'a> {
 
     fn function(&mut self, f: FnId, block: &ast::Block) {
         let def = &self.p.funcs[f];
+        let fails = def.fails.clone();
+        let name_span = def.span;
+        self.current_fn = Some(f);
+        self.signature = self.signature_span(f).map(|sp| (sp, !fails.is_empty()));
+        let params = self.enter_function(f);
+        self.scopes.push(Vec::new());
+        for (i, (name, ty, var)) in params.into_iter().enumerate() {
+            self.bind_param(f, i, name, ty, var);
+        }
+        let completes = self.block(block);
+        let ret = self.resolved(&self.ret.clone());
+        if completes && !matches!(ret, Ty::Unit | Ty::Never | Ty::Unknown) {
+            let shown = self.p.show(&ret);
+            self.err("E0082", name_span, catalog::missing_return(&shown));
+        }
+    }
+
+    /// Takes the generics, `Self`, result and errors of function `f` as the context of the
+    /// checks, and gives its parameters (without `self`) with `Self` replaced.
+    fn enter_function(&mut self, f: FnId) -> Vec<(String, Ty, bool)> {
+        let def = &self.p.funcs[f];
         let mut generics: Vec<ParamId> = def.generics.clone();
         let owner = def.owner;
         let ret = def.ret.clone();
         let fails = def.fails.clone();
-        let name_span = def.span;
         self.self_var = def.self_param == Some(true);
-        let params: Vec<(String, Ty, Span, bool)> = def
+        let params: Vec<(String, Ty, bool)> = def
             .params
             .iter()
-            .map(|p| (p.name.clone(), p.ty.clone(), p.span, p.var))
+            .map(|p| (p.name.clone(), p.ty.clone(), p.var))
             .collect();
-        self.current_fn = Some(f);
-        self.signature = self.signature_span(f).map(|sp| (sp, !fails.is_empty()));
         match owner {
             Owner::Impl(i) => {
                 let target = self.p.impls[i].target.clone();
@@ -666,31 +731,29 @@ impl<'a> Checker<'a> {
         };
         self.ret = subst(&ret);
         self.fn_fails = fails.iter().map(&subst).collect();
-        self.scopes.push(Vec::new());
-        for (i, (name, ty, _, var)) in params.into_iter().enumerate() {
-            let ty = subst(&ty);
-            let kind = if var {
-                LocalKind::VarParam
-            } else {
-                LocalKind::Param
-            };
-            // A parameter holds what each call passes (RFC 0005).
-            let flow = self.new_flow(vec![Atom::Param(Holder::Func(f), i)]);
-            self.scopes.last_mut().unwrap().push(Local {
-                name,
-                ty,
-                kind,
-                span: Span::default(),
-                read: std::cell::Cell::new(true),
-                flow: Some(flow),
-            });
-        }
-        let completes = self.block(block);
-        let ret = self.resolved(&self.ret.clone());
-        if completes && !matches!(ret, Ty::Unit | Ty::Never | Ty::Unknown) {
-            let shown = self.p.show(&ret);
-            self.err("E0082", name_span, catalog::missing_return(&shown));
-        }
+        params
+            .into_iter()
+            .map(|(name, ty, var)| (name, subst(&ty), var))
+            .collect()
+    }
+
+    /// Binds parameter `i` of function `f` in the innermost scope.
+    fn bind_param(&mut self, f: FnId, i: usize, name: String, ty: Ty, var: bool) {
+        let kind = if var {
+            LocalKind::VarParam
+        } else {
+            LocalKind::Param
+        };
+        // A parameter holds what each call passes (RFC 0005).
+        let flow = self.new_flow(vec![Atom::Param(Holder::Func(f), i)]);
+        self.scopes.last_mut().unwrap().push(Local {
+            name,
+            ty,
+            kind,
+            span: Span::default(),
+            read: std::cell::Cell::new(true),
+            flow: Some(flow),
+        });
     }
 
     /// The span of a function's signature, for the fix that extends its `fails with`.
@@ -3469,6 +3532,8 @@ impl<'a> Checker<'a> {
                         if self.compatible(&rt, &inner) {
                             inner
                         } else {
+                            // The run gives the left Option itself when it has a value.
+                            self.p.option_ors.insert((self.module, span_key(span)));
                             self.expect(&rt, &lt, right.span);
                             lt
                         }

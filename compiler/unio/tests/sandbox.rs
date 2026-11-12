@@ -337,6 +337,8 @@ fn a_link_inside_a_scope_does_not_lead_out_of_it() {
         "{PROGRAM_HEAD}public function main():
     report(\"files.read_text through a link\", read_text_denied(Path(\"open/link\")))
     report(\"files.write_text through a link\", write_text_denied(Path(\"open/dir-link/x.txt\")))
+    report(\"files.read_text through a link and ..\", read_text_denied(Path(\"open/dir-link/../closed/secret.txt\")))
+    report(\"files.write_text through a link and ..\", write_text_denied(Path(\"open/dir-link/../closed/x.txt\")))
 "
     );
     let manifest =
@@ -350,6 +352,8 @@ fn a_link_inside_a_scope_does_not_lead_out_of_it() {
         &[
             "files.read_text through a link",
             "files.write_text through a link",
+            "files.read_text through a link and ..",
+            "files.write_text through a link and ..",
         ],
     );
     assert!(!dir.join("closed/x.txt").exists());
@@ -533,6 +537,104 @@ fn a_descendant_that_leaves_the_process_group_is_stopped_at_the_timeout() {
     assert!(
         !still,
         "a descendant that left the process group still runs"
+    );
+}
+
+/// A double fork into a new session under the sandbox of a program: the middle process ends at
+/// once, so its child is orphaned (reparented to init or launchd) before it calls `setsid`, and
+/// neither the process group nor the parents lead to it. It is still stopped with the tree at
+/// the deadline (docs/runtime.md 9.5): on Linux it cannot leave the group, on macOS the
+/// runtime finds it by the marker of the Seatbelt profile it inherited. The child is a small C
+/// program, since an interpreter such as python3 cannot run under the profile on macOS; the
+/// processes are found by a marker in their command line with `ps`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_double_fork_into_a_new_session_is_stopped_with_the_tree() {
+    let program_marker = format!("unio-orphan-marker-{}", std::process::id());
+    let program = format!(
+        "{PROGRAM_HEAD}public function main():
+    let output = try process.run(\"$HELPER\", [\"{program_marker}\"], timeout_seconds = 2) on ProcessError as e:
+        report(\"an orphan outlives the deadline\", e.kind == ProcessErrorKind.TimedOut)
+        return
+    print(\"BREACH the call did not time out: {{output.status}} {{output.stderr}}\")
+"
+    );
+    let dir = package("child-orphan", "[permissions]\n", &program);
+    let source = dir.join("helper.c");
+    fs::write(
+        &source,
+        "#include <unistd.h>\n\
+         int main(void) {\n\
+         \x20   if (fork() == 0) {\n\
+         \x20       if (fork() != 0) _exit(0);\n\
+         \x20       sleep(1);\n\
+         \x20       setsid();\n\
+         \x20       for (;;) pause();\n\
+         \x20   }\n\
+         \x20   for (;;) pause();\n\
+         }\n",
+    )
+    .unwrap();
+    let helper = dir.join("helper");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    if !Command::new(&cc)
+        .arg("-o")
+        .arg(&helper)
+        .arg(&source)
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        let _ = fs::remove_dir_all(&dir);
+        eprintln!("skipped: no C compiler {cc}");
+        return;
+    }
+    let helper_text = helper.to_string_lossy().into_owned();
+    fs::write(
+        dir.join("main.unio"),
+        program.replace("$HELPER", &helper_text),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("unio.toml"),
+        with_decoys(&format!("[permissions]\nprocess = [\"{helper_text}\"]\n")),
+    )
+    .unwrap();
+    let output = run(&dir, &[], &[]);
+    let alive = || {
+        let listed = Command::new("ps")
+            .args(["-A", "-o", "pid=,stat=,args="])
+            .output()
+            .unwrap();
+        text(&listed.stdout)
+            .lines()
+            .filter(|l| l.contains(&program_marker))
+            .filter(|l| {
+                !l.split_whitespace()
+                    .nth(1)
+                    .is_some_and(|s| s.starts_with('Z'))
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let mut still = alive();
+    for _ in 0..100 {
+        if still.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        still = alive();
+    }
+    for line in &still {
+        if let Some(pid) = line.split_whitespace().next() {
+            let _ = Command::new("kill").args(["-9", pid]).status();
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert_denied(&output, &["an orphan outlives the deadline"]);
+    assert!(
+        still.is_empty(),
+        "an orphan that left the process group still runs:\n{}",
+        still.join("\n")
     );
 }
 

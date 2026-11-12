@@ -572,6 +572,27 @@ fn types_of_one_name_in_two_modules_match_the_interpreter() {
 }
 
 #[test]
+fn or_with_an_option_on_the_right_matches_the_interpreter() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("option-or");
+    let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/option_or/main.unio");
+    for release in [false, true] {
+        let exe = build(&program, &dir, release);
+        let output = native(&exe, &case(program.clone(), &[], &dir));
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        assert_eq!(
+            text(&output.stdout),
+            "some 1\nsome 7\nnone\nsome 2\nsome 7\nsome 3\nsome 8\nsome 5\nsome 3\n9\n4\n3\n6 1\n"
+        );
+    }
+    let differences = compare(&[case(program, &[], &dir)], &dir);
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn two_builds_are_byte_for_byte_the_same() {
     if !supported() {
         return;
@@ -960,6 +981,39 @@ fn an_incompatible_image_is_refused() {
 }
 
 #[test]
+fn a_program_with_an_invalid_default_is_not_built() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("invalid-default");
+    for (name, code) in [
+        ("default_wrong_type", "E0061"),
+        ("default_unknown_name", "E0056"),
+        ("default_later_parameter", "E0056"),
+        ("field_default_wrong_type", "E0061"),
+        ("method_default_wrong_type", "E0061"),
+    ] {
+        let file = repo_root().join(format!("spec/tests/semantic/invalid/{name}.unio"));
+        let out = dir.join(exe_name(name));
+        let output = operator(&mut Command::new(env!("CARGO_BIN_EXE_unio")))
+            .arg("build")
+            .arg(&file)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        assert!(
+            errors(&output).contains(code),
+            "{name}: {}",
+            errors(&output)
+        );
+        assert!(!out.exists(), "{name}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_program_that_does_not_compile_is_not_built() {
     if !supported() {
         return;
@@ -1176,4 +1230,39 @@ fn the_executable_does_not_release_on_exhaustion() {
     common::assert_target_unchanged(&filled);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&filled);
+}
+
+#[test]
+fn the_executable_ends_with_102_when_a_release_exhausts_the_reserve_and_frees_it() {
+    if !supported() {
+        return;
+    }
+    // One large block and many small ones, freed again before a check of the heap, with
+    // 100,000 bytes of the heap beside the reserve (common::SPIKES).
+    for kind in ["Spike", "Crowd"] {
+        let dir = common::reserve_package(
+            "unio-native",
+            &format!("spike-{kind}"),
+            &common::SPIKES.replace("KIND", kind),
+        );
+        let (_, found) = run_both(&dir, Some(100_000));
+        let out = text(&found.stdout);
+        assert_eq!(
+            found.status.code(),
+            Some(102),
+            "{kind}: {}{out}",
+            errors(&found)
+        );
+        assert_eq!(
+            errors(&found),
+            "fault: memory exhausted; the program ends with code 102\n"
+        );
+        assert!(out.starts_with("releasing spike\n"), "{kind}: {out}");
+        assert!(!out.contains("first"), "{kind}: {out}");
+        assert_eq!(common::temporaries(&dir).len(), 1, "{kind}");
+        common::assert_target_unchanged(&dir);
+        let (_, roomy) = run_both(&dir, Some(6_000_000));
+        assert_eq!(roomy.status.code(), Some(101), "{kind}: {}", errors(&roomy));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

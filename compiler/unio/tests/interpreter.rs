@@ -90,6 +90,30 @@ fn every_test_block_of_the_repository_runs_and_passes() {
     assert!(output.status.success());
 }
 
+/// The invalid defaults of the semantic corpus: a default of a parameter or a field that
+/// names nothing or has the wrong type is reported by the check, so neither `unio run` nor
+/// a native build ever evaluates it.
+const INVALID_DEFAULTS: &[(&str, &str)] = &[
+    ("default_wrong_type", "E0061"),
+    ("default_unknown_name", "E0056"),
+    ("default_later_parameter", "E0056"),
+    ("field_default_wrong_type", "E0061"),
+    ("method_default_wrong_type", "E0061"),
+];
+
+#[test]
+fn a_program_with_an_invalid_default_does_not_run() {
+    for (name, code) in INVALID_DEFAULTS {
+        let file = repo_root().join(format!("spec/tests/semantic/invalid/{name}.unio"));
+        let output = unio().arg("run").arg(&file).output().unwrap();
+        let err = program_err(&output);
+        assert_eq!(output.status.code(), Some(1), "{name}: {err}");
+        assert!(err.contains(code), "{name}: {err}");
+        assert!(!err.contains("internal"), "{name}: {err}");
+        assert!(output.stdout.is_empty(), "{name}");
+    }
+}
+
 #[test]
 fn unio_test_reports_a_failing_test_and_a_test_that_does_not_compile() {
     let dir = scratch("failing");
@@ -315,6 +339,23 @@ fn faults_release_resources_and_end_with_their_codes() {
     assert_eq!(output.status.code(), Some(1));
     assert!(text(&output.stderr).contains("E0056"));
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// What `tests/programs/option_or/main.unio` prints: `or` on an Option gives an Option when
+/// its right side is one and the inner value otherwise (semantics 4.3).
+const OPTION_OR_OUTPUT: &str =
+    "some 1\nsome 7\nnone\nsome 2\nsome 7\nsome 3\nsome 8\nsome 5\nsome 3\n9\n4\n3\n6 1\n";
+
+/// `items.get(i) or fallback` and `a or b` whose right side is an Option named, called or
+/// passed in keep the Option: the type decides, not the spelling of the right side.
+#[test]
+fn or_with_an_option_on_the_right_gives_an_option() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/option_or");
+    expect(
+        &run(&dir.join("main.unio"), &[], &dir, &[]),
+        0,
+        OPTION_OR_OUTPUT,
+    );
 }
 
 /// What `tests/programs/same_names/main.unio` prints: every call reaches the method, the
@@ -572,6 +613,40 @@ fn exhausting_the_reserve_in_release_ends_with_102() {
     assert!(common::temporaries(&dir)[0].contains("unio-tmp"));
     common::assert_target_unchanged(&dir);
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_release_that_exhausts_the_reserve_and_frees_it_ends_with_102() {
+    for kind in ["Spike", "Crowd"] {
+        let dir = common::reserve_package(
+            "unio-interpreter",
+            &format!("spike-{kind}"),
+            &common::SPIKES.replace("KIND", kind),
+        );
+        let output = run_reserve(&dir, "run", Some(100_000));
+        let err = program_err(&output);
+        let out = text(&output.stdout);
+        assert_eq!(output.status.code(), Some(102), "{kind}: {err}{out}");
+        assert_eq!(
+            err, "fault: memory exhausted; the program ends with code 102\n",
+            "{kind}"
+        );
+        assert!(out.starts_with("releasing spike\n"), "{kind}: {out}");
+        assert!(!out.contains("first"), "{kind}: {out}");
+        assert_eq!(common::temporaries(&dir).len(), 1, "{kind}");
+        common::assert_target_unchanged(&dir);
+        // With room on the heap the same release is no exhaustion: the limit applies again
+        // once the reserve is full, and it allows the memory.
+        let roomy = run_reserve(&dir, "run", Some(6_000_000));
+        assert_eq!(
+            roomy.status.code(),
+            Some(101),
+            "{kind}: {}",
+            program_err(&roomy)
+        );
+        assert!(text(&roomy.stdout).contains("released first"), "{kind}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]

@@ -205,6 +205,9 @@ pub struct Program {
     pub effect_facts: crate::effects::Facts,
     /// The tests that run, whose values count in the effects analysis (RFC 0005).
     pub tests: TestScope,
+    /// The `or` expressions on an Option whose right side is an Option too, by module and
+    /// place: they give an Option, the others the inner value (semantics 4.3).
+    pub option_ors: HashSet<(ModId, (usize, usize))>,
     by_path: HashMap<PathBuf, ModId>,
     stdlib_root: Option<PathBuf>,
 }
@@ -373,6 +376,7 @@ impl Program {
             usages: Vec::new(),
             effect_facts: Default::default(),
             tests: TestScope::None,
+            option_ors: HashSet::new(),
             by_path: HashMap::new(),
             stdlib_root: None,
         }
@@ -440,6 +444,7 @@ impl Program {
             usages: Vec::new(),
             effect_facts: Default::default(),
             tests: TestScope::None,
+            option_ors: HashSet::new(),
             by_path: HashMap::new(),
             stdlib_root,
         };

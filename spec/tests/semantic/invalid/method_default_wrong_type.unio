@@ -1,0 +1,10 @@
+# expect-error: 6 E0061
+struct Counter:
+    count as Int
+
+extend Counter:
+    function plus(self, step as Int = true) returns Int:
+        return self.count + step
+
+function main():
+    print("{Counter(count = 1).plus()}")
