@@ -120,7 +120,19 @@ wall_seconds = 60           # 102 when exceeded
 cpu_seconds = 30            # 102 when exceeded; each child gets RLIMIT_CPU
 processes = 4               # process.run calls; more fail with PermissionDenied
 file_size_bytes = 1_048_576 # writes over it fail; RLIMIT_FSIZE on Linux and macOS
+
+[compile]                   # the workers of the tools, not the program (RFC 0006)
+memory_bytes = 268_435_456  # each worker; default 2 GiB; at least 192 MiB, or 103 before compiling
+wall_seconds = 120          # each worker; default 600
+cpu_seconds = 60            # each worker; RLIMIT_CPU; no default
 ```
+
+The `[limits]` table holds for the program only; the `[compile]` table holds for every worker
+of the tools alike: `check`, `fmt`, `outline`, `symbol`, `parse`, the compile steps of `run` and
+`test`, and both steps of `build` (the compile step and the link step), each worker separately.
+A worker over one of them is stopped with 102 (on Windows the end at the CPU limit is not yet reported as 102). The tool never raises a limit of the operator: a
+`compile.memory_bytes` below the 192 MiB a worker needs to start and compile is refused with 103
+before anything is compiled (docs/runtime.md 9.7). `unio.toml` sets neither table.
 
 A permission of the policy that the manifest does not have is a warning and has no effect.
 Unknown keys are errors. Paths in either file may start with `$HOME`, `$CWD` or `$TEMP`, end
@@ -162,8 +174,8 @@ below 2 MiB is refused with code 103. The reserve opens only when a fault is cre
 message and trace are allocated; then the allocator of the runtime
 (`unio-runtime/src/reserve.rs`, the global allocator of every build) serves the fault, its trace,
 and the `release` calls of the unwinding from the reserved pages, so they run on a full heap. A
-`release` that overflows the reserve on a full heap ends with 102 and skips the remaining
-releases; exhaustion never opens it. The test hook `UNIO_TEST_HEAP_FREE=N` counts the heap as
+`release` that goes beyond the reserve ends with 102 and skips the remaining releases, with or
+without a heap limit and whatever room the heap has; exhaustion never opens it. The test hook `UNIO_TEST_HEAP_FREE=N` counts the heap as
 full but for `N` bytes before `main`, so tests reach a fault on a full heap exactly.
 
 ## What is implemented
@@ -521,8 +533,10 @@ The tests were written before the code (concept, section 1.2):
 - Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows a worker has only a
   Job Object (memory, one process) and its files and network are not restricted, so the tools
   refuse there with 103 unless the operator allows the weaker sandbox; `stat` is not
-  restricted anywhere; the compile steps of `run` and `test` take the memory limit of the policy
-  only down to a floor of 256 MiB, because `limits.heap_bytes` is also the heap of the program; the tool still reads the manifest and the policy itself for the sandboxes
+  restricted anywhere; the link step of `build` runs the system linker, whose memory depends on
+  the toolchain and on `libunio.a` (about 130 MiB of address space with the library of a release
+  build, about 530 MiB with the 290 MB library of a debug build, on Linux x86-64), so a
+  `compile.memory_bytes` above the minimum can still be too small for it; the tool still reads the manifest and the policy itself for the sandboxes
   of `run` and `test`; the language server (SB-13), the package operations (SB-12) and the
   archives of SB-15 do not exist yet.
 - The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object for

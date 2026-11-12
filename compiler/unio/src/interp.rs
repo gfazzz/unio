@@ -1776,8 +1776,8 @@ impl Interp {
         if let Err(exhausted @ Unwind::Exhausted(_)) = result {
             return Err(exhausted);
         }
-        // On the path of a fault, a release that overflowed the reserve on a full heap is
-        // exhaustion even when it reached no check of the heap itself (C-17, C-18).
+        // On the path of a fault, a release that went beyond the reserve is exhaustion, with or
+        // without a heap limit, even when it reached no check of the heap itself (C-17, C-18).
         rt.check_heap()?;
         result
     }
@@ -3591,7 +3591,7 @@ pub fn run_main(interp: &Rc<Interp>, rt: &mut Runtime, module: ModId) -> i32 {
 pub(crate) fn end(rt: &mut Runtime, e: Unwind) -> i32 {
     match e {
         // The fault was built on the reserve for `release`, and the releases ran from it; if
-        // they overflowed it on a full heap, the program ends as exhausted (C-17, C-18).
+        // they went beyond it, the program ends as exhausted, whatever the heap (C-17, C-18).
         Unwind::Fault(_) if rt.check_heap().is_err() => {
             rt.write_error(rf::Exhaustion::Heap.message());
             rf::EXIT_EXHAUSTED

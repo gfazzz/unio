@@ -11,12 +11,12 @@
 //! `release` calls of the open `using` blocks are served by it. While it is open, every
 //! allocation of the thread that set it aside comes from the reserved pages: the global
 //! allocator of this crate ([`ReserveAllocator`]) hands out blocks of the reserve instead of
-//! asking the system. When the reserve has no room left, the allocation goes to the system and
-//! the reserve is marked as overflowed; from then on the heap limit applies again, so that a
-//! `release` that exhausts the reserve on a full heap ends the program with code 102 at the next
-//! check of the heap, and the remaining releases are skipped (C-18). The check also sees a block
-//! that went to the system and was freed before it: [`demand`] keeps the most the heap counted
-//! with such a block until the reserve closes.
+//! asking the system. The reserve bounds the whole path of the fault: when it has no room left
+//! for an allocation, the allocation goes to the system (an allocator cannot unwind) and the
+//! reserve is marked as overflowed, and the next check of the heap ends the program with code
+//! 102, the remaining releases skipped (C-18). That holds whether or not the policy sets a heap
+//! limit and whether or not the heap has room, and the mark stays until the reserve closes, so
+//! that a block freed again before the check is exhaustion as well ([`room`]).
 //!
 //! Exhaustion (code 102) never opens the reserve: no user code runs after it. `expect_fault`
 //! closes the reserve again when it received the fault, so that a test goes on with the budget
@@ -66,8 +66,6 @@ thread_local! {
     static CURRENT: Cell<usize> = const { Cell::new(0) };
     /// The reserve that serves the allocations of this thread now; 0 while it is closed.
     static ROUTE: Cell<usize> = const { Cell::new(0) };
-    /// The most heap the path of a fault asked for beyond the reserve (see [`demand`]).
-    static DEMAND: Cell<usize> = const { Cell::new(0) };
 }
 
 fn current() -> usize {
@@ -80,10 +78,6 @@ fn route() -> usize {
 
 fn set_route(start: usize) {
     let _ = ROUTE.try_with(|r| r.set(start));
-}
-
-fn set_demand(bytes: usize) {
-    let _ = DEMAND.try_with(|d| d.set(bytes));
 }
 
 /// The state of one reserve, kept in its first bytes.
@@ -306,14 +300,10 @@ unsafe fn routed_alloc(layout: Layout) -> *mut u8 {
     let mut locked = Locked::new(start);
     let p = locked.alloc(layout);
     if p.is_null() {
-        // The block goes to the system, and the heap limit applies to it as to a counted
-        // value: what the heap counts now and the block. Remembered until the reserve closes,
-        // so that a block freed again before the next check of the heap is still exhaustion
-        // (C-17, C-18).
+        // The block goes to the system, and the path of the fault has gone beyond the reserve:
+        // exhaustion at the next check of the heap, also when the block is freed again before
+        // it (C-17, C-18).
         locked.state().overflowed = true;
-        drop(locked);
-        let wanted = crate::heap::live_bytes().saturating_add(layout.size());
-        set_demand(demand().max(wanted));
     }
     p
 }
@@ -501,7 +491,6 @@ fn close_locked(locked: &mut Locked) {
     }
     state.open = false;
     state.overflowed = false;
-    set_demand(0);
     if state.routed {
         state.routed = false;
         if route() == start {
@@ -546,7 +535,8 @@ pub fn open() {
                     REGISTERED.fetch_add(1, Ordering::AcqRel);
                     state.slot = slot;
                 }
-                // More open reserves than slots: this one only changes the accounting.
+                // More open reserves than slots: this one does not serve, and the path of the
+                // fault runs on the heap as without a reserve.
                 None => return,
             }
         }
@@ -567,24 +557,24 @@ pub fn is_open() -> bool {
     with_current(|l| l.state().open).unwrap_or(false)
 }
 
-/// Whether the reserve of this thread is open, has not overflowed, and has `bytes` free at its
-/// top: then the path of a fault may go on although the heap is full.
-pub fn covers(bytes: usize) -> bool {
+/// The bound of the path of a fault on this thread. `None` while no reserve serves it: then the
+/// heap limit of the policy applies. Otherwise the reserve alone decides, whatever the heap
+/// limit and the room on the heap: `Some(true)` when no allocation of the path has gone beyond
+/// it and `bytes` more fit at its top, `Some(false)` for exhaustion (C-17, C-18).
+pub fn room(bytes: usize) -> Option<bool> {
+    // Almost always no reserve is open in the process: one relaxed load.
+    if OPEN.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
     with_current(|l| {
         let end = l.end();
         let start = l.start;
         let state = l.state();
-        state.open && !state.overflowed && start + state.top + bytes <= end
+        (state.open && state.routed).then(|| {
+            !state.overflowed && start.saturating_add(state.top).saturating_add(bytes) <= end
+        })
     })
-    .unwrap_or(false)
-}
-
-/// The most heap the path of a fault on this thread needed once the reserve had no room: for
-/// each block that went to the system, the bytes the heap counted at that moment plus the
-/// block. Above the heap limit it is exhaustion even when the block was freed before any check
-/// of the heap; zero while the reserve is closed or has not overflowed.
-pub fn demand() -> usize {
-    DEMAND.try_with(Cell::get).unwrap_or(0)
+    .flatten()
 }
 
 /// Whether an allocation found no room in the open reserve of this thread.

@@ -51,14 +51,18 @@ pub const EXIT_SANDBOX: u8 = 103;
 /// The code of a worker that ended abnormally.
 pub const EXIT_ABNORMAL: u8 = 101;
 
-/// The least memory of the compile step of `unio run` and `unio test`: the heap limit of a
-/// policy given to them is also the program's, which may be 2 MiB (C-17), while loading the
-/// compiler and the standard library in a worker takes about 150 MB of address space on Linux.
-pub const COMPILE_MEMORY_FLOOR: u64 = 256 << 20;
+/// The least memory limit of a worker, `compile.memory_bytes` of a policy (RFC 0006,
+/// docs/runtime.md 9.7). A smaller limit cannot be honoured, so the tool refuses it with code
+/// 103 before it compiles anything; it never raises a limit of the operator. On Linux x86-64
+/// the smallest address space with which a worker starts and compiles an empty program was
+/// 109 MiB for `check`, `run`, and `test` and 127 MiB for `build` with its link step (release
+/// build of the tool), 121 MiB and 139 MiB for the compile steps of a debug build; 192 MiB
+/// leaves a margin of about half over the release numbers.
+pub const MINIMUM_COMPILE_MEMORY: u64 = 192 << 20;
 
 // ---------------------------------------------------------------- what a worker gets
 
-/// The limits of a worker: the policy's, or the defaults of SB-11.
+/// The limits of a worker: the `[compile]` table of the policy, or the defaults of SB-11.
 #[derive(Clone, Debug)]
 pub struct Limits {
     pub memory_bytes: u64,
@@ -156,22 +160,33 @@ impl Spec {
     }
 }
 
-/// The limits of the policy (`--policy` or `UNIO_POLICY`, SB-3a) for a worker, or the defaults
-/// of SB-11; the permissions of a policy do not apply to the tools, whose scopes are fixed.
+/// The limits of a worker: the `[compile]` table of the policy (`--policy` or `UNIO_POLICY`,
+/// SB-3a, RFC 0006), or the defaults of SB-11. The limits of the program (`[limits]`) do not
+/// reach a worker, and the permissions of a policy do not apply to the tools, whose scopes are
+/// fixed. A memory limit below [`MINIMUM_COMPILE_MEMORY`] is refused with code 103.
 fn limits(options: &unio::sandbox_cli::Options) -> Result<(Limits, bool), u8> {
     let policy = unio::sandbox_cli::read_policy(options).map_err(|message| {
         eprintln!("unio: {message}");
         EXIT_SANDBOX
     })?;
     let defaults = Limits::default();
-    Ok((
-        Limits {
-            memory_bytes: policy.limits.heap_bytes.unwrap_or(defaults.memory_bytes),
-            wall_seconds: policy.limits.wall_seconds.unwrap_or(defaults.wall_seconds),
-            cpu_seconds: policy.limits.cpu_seconds,
-        },
-        options.allow_weaker || policy.allow_weaker,
-    ))
+    let limits = Limits {
+        memory_bytes: policy.compile.memory_bytes.unwrap_or(defaults.memory_bytes),
+        wall_seconds: policy.compile.wall_seconds.unwrap_or(defaults.wall_seconds),
+        cpu_seconds: policy.compile.cpu_seconds,
+    };
+    if limits.memory_bytes < MINIMUM_COMPILE_MEMORY {
+        eprintln!(
+            "unio: error: compile.memory_bytes = {} of the policy is below the minimum of \
+             {MINIMUM_COMPILE_MEMORY} bytes ({} MiB) that a worker of the tools needs to start \
+             and compile; the tool does not raise a limit of the operator, so it compiles \
+             nothing (RFC 0006, docs/runtime.md 9.7)",
+            limits.memory_bytes,
+            MINIMUM_COMPILE_MEMORY >> 20
+        );
+        return Err(EXIT_SANDBOX);
+    }
+    Ok((limits, options.allow_weaker || policy.allow_weaker))
 }
 
 // ---------------------------------------------------------------- the temporary directory
@@ -785,10 +800,29 @@ pub fn start(
             ));
         }
     }
+    #[cfg(unix)]
+    if stopped.is_none() {
+        use std::os::unix::process::ExitStatusExt;
+        // The system ends a worker that spent its processor time (`RLIMIT_CPU`, whose soft and
+        // hard limits are equal) with SIGKILL (Linux) or SIGXCPU; it cannot have spent it in
+        // less wall time, since it computes on one thread at a time.
+        const SIGKILL: i32 = 9;
+        const SIGXCPU: i32 = 24;
+        if let (Some(seconds), Some(SIGKILL | SIGXCPU)) =
+            (spec.limits.cpu_seconds, status.and_then(|s| s.signal()))
+        {
+            if started.elapsed() >= Duration::from_secs(seconds) {
+                stopped = Some(format!(
+                    "it used more than the CPU time limit of {seconds} s"
+                ));
+            }
+        }
+    }
     if let Some(why) = stopped {
         eprintln!(
             "unio: error: the worker of the tool was stopped: {why} (SB-11; the limits come from \
-             limits.heap_bytes and limits.wall_seconds of the policy)"
+             compile.memory_bytes, compile.wall_seconds, and compile.cpu_seconds of the policy, \
+             RFC 0006)"
         );
         return Err(EXIT_LIMIT);
     }

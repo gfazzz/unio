@@ -102,10 +102,11 @@ function divide(a as Int, b as Int) returns Int:
 
 /// Releases that exhaust the reserve with memory they free again before any check of the
 /// heap: one large block (a text of 2.4 MB built by concatenation, which no check of the heap
-/// follows) and many small ones (40,000 texts in a list that is dropped at once). The heap
-/// has 100,000 bytes beside the reserve, so both are exhaustion: code 102, the preallocated
-/// diagnostic, the release of `first` skipped, the temporary file kept and the target
-/// unchanged (C-17, C-18, plan section 12 condition 1).
+/// follows) and many small ones (40,000 texts in a list that is dropped at once). Both are
+/// exhaustion whatever the heap, with a full heap, with room on it, and without a heap limit:
+/// code 102, the preallocated diagnostic, the release of `first` skipped, the temporary file
+/// kept and the target unchanged (C-17, C-18, plan section 12 condition 1). `KIND` may also be
+/// `Hungry` of [`RESERVE_PRELUDE`], which keeps its list until the check.
 #[allow(dead_code)]
 pub const SPIKES: &str = "struct Spike:
     name as Text
@@ -164,6 +165,40 @@ pub fn reserve_package(prefix: &str, name: &str, body: &str) -> PathBuf {
     )
     .unwrap();
     fs::canonicalize(dir).unwrap()
+}
+
+/// Writes the policy of a reserve package with a heap limit of `heap` bytes, or without a heap
+/// limit for `None` (on Windows also allowing the weaker sandbox).
+#[allow(dead_code)]
+pub fn set_heap_limit(dir: &Path, heap: Option<usize>) {
+    let weaker = if cfg!(windows) {
+        "allow_weaker = true\n"
+    } else {
+        ""
+    };
+    let limits = match heap {
+        Some(bytes) => format!("[limits]\nheap_bytes = {bytes}\n"),
+        None => String::new(),
+    };
+    fs::write(dir.join("policy.toml"), format!("{weaker}{limits}")).unwrap();
+}
+
+/// Puts a reserve package back as it was made: no temporary file, the old target.
+#[allow(dead_code)]
+pub fn reset_target(dir: &Path) {
+    for name in temporaries(dir) {
+        fs::remove_file(dir.join("open").join(name)).unwrap();
+    }
+    fs::write(dir.join("open/target.txt"), "old content").unwrap();
+}
+
+/// The resources of [`SPIKES`] without its `main`, for programs of their own.
+#[allow(dead_code)]
+pub fn spike_resources() -> &'static str {
+    SPIKES
+        .split("public function main")
+        .next()
+        .expect("the resources of SPIKES")
 }
 
 /// The names in `open/` of a reserve package other than the target: a temporary file of

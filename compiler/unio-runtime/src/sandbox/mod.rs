@@ -387,13 +387,26 @@ pub struct Limits {
     pub file_size_bytes: Option<u64>,
 }
 
+/// The limits of the workers of the tools, the `[compile]` table of a policy (SB-3a, SB-11,
+/// RFC 0006): apart from the limits of the program, which never reach a worker. `None` leaves
+/// the default of the tools; a program ignores this table.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompileLimits {
+    pub memory_bytes: Option<u64>,
+    pub wall_seconds: Option<u64>,
+    pub cpu_seconds: Option<u64>,
+}
+
 /// The external policy of the operator (SB-3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Policy {
     /// `None` when the policy has no `[permissions]` table and narrows nothing; otherwise the
     /// only permissions it lets through: a kind it does not list is not permitted.
     pub permissions: Option<Permissions>,
+    /// The limits of the program.
     pub limits: Limits,
+    /// The limits of the workers of the tools.
+    pub compile: CompileLimits,
     pub allow_weaker: bool,
 }
 
@@ -531,6 +544,9 @@ pub fn parse_policy(source: &str, places: &Places) -> Result<Policy, String> {
             "limits.cpu_seconds" => &mut policy.limits.cpu_seconds,
             "limits.processes" => &mut policy.limits.processes,
             "limits.file_size_bytes" => &mut policy.limits.file_size_bytes,
+            "compile.memory_bytes" => &mut policy.compile.memory_bytes,
+            "compile.wall_seconds" => &mut policy.compile.wall_seconds,
+            "compile.cpu_seconds" => &mut policy.compile.cpu_seconds,
             _ => return Err(format!("unknown policy key {key}")),
         };
         let TomlValue::Int(n) = value else {
@@ -1373,6 +1389,41 @@ mod tests {
         assert!(parse_policy("[limits]\nheap_bytes = 2_097_152\n", &p).is_ok());
         assert!(parse_policy("allow_weaker = 1\n", &p).is_err());
         assert!(parse_policy("[limits\n", &p).is_err());
+    }
+
+    /// The limits of the workers of the tools are a table of their own (RFC 0006): the limits
+    /// of the program leave them unset, and their keys follow the rules of the other limits.
+    #[test]
+    fn policies_read_compile_limits_apart_from_the_program_limits() {
+        let p = Places::current(&std::env::temp_dir());
+        let policy = parse_policy(
+            "[limits]\nheap_bytes = 2_097_152\nwall_seconds = 1\ncpu_seconds = 1\n",
+            &p,
+        )
+        .unwrap();
+        assert_eq!(policy.compile, CompileLimits::default());
+        let policy = parse_policy(
+            "[compile]\nmemory_bytes = 536_870_912\nwall_seconds = 30\ncpu_seconds = 20\n",
+            &p,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.compile,
+            CompileLimits {
+                memory_bytes: Some(536_870_912),
+                wall_seconds: Some(30),
+                cpu_seconds: Some(20),
+            }
+        );
+        assert_eq!(policy.limits, Limits::default());
+        let unknown = parse_policy("[compile]\nheap_bytes = 1\n", &p).unwrap_err();
+        assert!(
+            unknown.contains("unknown policy key compile.heap_bytes"),
+            "{unknown}"
+        );
+        assert!(parse_policy("[compile]\nwall_seconds = 0\n", &p).is_err());
+        assert!(parse_policy("[compile]\nmemory_bytes = -1\n", &p).is_err());
+        assert!(parse_policy("[compile]\ncpu_seconds = \"1\"\n", &p).is_err());
     }
 
     #[cfg(unix)]

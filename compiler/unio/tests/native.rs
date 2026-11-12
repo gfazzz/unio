@@ -1096,12 +1096,7 @@ fn run_both(dir: &Path, free: Option<usize>) -> (Output, Output) {
             None => command.env_remove("UNIO_TEST_HEAP_FREE"),
         };
     };
-    let reset = || {
-        for name in common::temporaries(dir) {
-            fs::remove_file(dir.join("open").join(name)).unwrap();
-        }
-        fs::write(dir.join("open/target.txt"), "old content").unwrap();
-    };
+    let reset = || common::reset_target(dir);
     reset();
     let mut interpreter = Command::new(env!("CARGO_BIN_EXE_unio"));
     interpreter.args(["run", "main.unio"]);
@@ -1261,8 +1256,81 @@ fn the_executable_ends_with_102_when_a_release_exhausts_the_reserve_and_frees_it
         assert!(!out.contains("first"), "{kind}: {out}");
         assert_eq!(common::temporaries(&dir).len(), 1, "{kind}");
         common::assert_target_unchanged(&dir);
+        // With room on the heap the same: the reserve bounds the path of the fault.
         let (_, roomy) = run_both(&dir, Some(6_000_000));
-        assert_eq!(roomy.status.code(), Some(101), "{kind}: {}", errors(&roomy));
+        assert_exhausted_in_release(&dir, &roomy, &format!("{kind}, room on the heap"));
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// What a release beyond the reserve leaves in the executable: code 102 with the preallocated
+/// diagnostic, the release of `first` skipped, the temporary file kept, the target unchanged.
+#[track_caller]
+fn assert_exhausted_in_release(dir: &Path, found: &Output, case: &str) {
+    let out = text(&found.stdout);
+    assert_eq!(
+        found.status.code(),
+        Some(102),
+        "{case}: {}{out}",
+        errors(found)
+    );
+    assert_eq!(
+        errors(found),
+        "fault: memory exhausted; the program ends with code 102\n",
+        "{case}"
+    );
+    assert!(out.starts_with("releasing spike\n"), "{case}: {out}");
+    assert!(!out.contains("first"), "{case}: {out}");
+    assert_eq!(common::temporaries(dir).len(), 1, "{case}");
+    common::assert_target_unchanged(dir);
+}
+
+/// Once a fault opens the reserve, its path is bounded by the reserve: a release beyond it is
+/// exhaustion with the whole heap limit free and without a heap limit in the policy (plan
+/// section 12, condition 1); a release within it runs to its end without a limit as well.
+#[test]
+fn the_executable_ends_a_release_beyond_the_reserve_with_102_without_a_heap_limit() {
+    if !supported() {
+        return;
+    }
+    for kind in ["Spike", "Crowd", "Hungry"] {
+        let dir = common::reserve_package(
+            "unio-native",
+            &format!("beyond-{kind}"),
+            &common::SPIKES.replace("KIND", kind),
+        );
+        let (_, found) = run_both(&dir, None);
+        assert_exhausted_in_release(&dir, &found, &format!("{kind}, limit"));
+        common::set_heap_limit(&dir, None);
+        let (_, found) = run_both(&dir, None);
+        assert_exhausted_in_release(&dir, &found, &format!("{kind}, no limit"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+    let dir = common::reserve_package(
+        "unio-native",
+        "within",
+        "public function main() returns Int:
+    try:
+        using first = Log(name = \"first\"):
+            using file = try files.open_atomic(Path(\"open/target.txt\")):
+                try file.write(\"new content\")
+                using second = Log(name = \"second\"):
+                    return divide(1, 0)
+    on IoError as e:
+        print(\"error {e.reason}\")
+    return 0
+",
+    );
+    common::set_heap_limit(&dir, None);
+    let (_, found) = run_both(&dir, None);
+    let err = errors(&found);
+    assert_eq!(found.status.code(), Some(101), "{err}");
+    assert_eq!(
+        text(&found.stdout),
+        "released second: 2000 words, last second 1999\nreleased first: 2000 words, last first 1999\n"
+    );
+    assert_eq!(common::temporaries(&dir), Vec::<String>::new());
+    common::assert_target_unchanged(&dir);
+    assert!(err.starts_with("fault: division by zero\n"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
 }

@@ -26,8 +26,8 @@ const USAGE: &str = "Usage:
     unio explain CODE
 
 The language of messages is taken from --lang, then from UNIO_LANG, and is English otherwise.
-Every command that reads sources takes --policy FILE (or UNIO_POLICY) for the limits of its
-worker and --allow-weaker-sandbox (docs/runtime.md 9.7).";
+Every command that reads sources takes --policy FILE (or UNIO_POLICY), whose [compile] table
+limits its worker, and --allow-weaker-sandbox (docs/runtime.md 9.7).";
 
 /// Finds `link.exe` of Visual Studio as rustc does (compiler/README.md "The linker on Windows").
 #[cfg(windows)]
@@ -463,12 +463,9 @@ fn compile_in_worker(
     files: &[PathBuf],
     sandbox: &sandbox_cli::Options,
 ) -> Result<Vec<u8>, ExitCode> {
-    let mut spec = worker::Spec::for_files(files, sandbox).map_err(ExitCode::from)?;
-    // The limits of the operator's policy hold for the compile step as for every worker
-    // (SB-11). Its heap limit is also the program's (SB-3), which may be as low as 2 MiB
-    // (C-17), so for the compile step it narrows the memory down to a floor that compiling
-    // needs (docs/runtime.md 9.7).
-    spec.limits.memory_bytes = spec.limits.memory_bytes.max(worker::COMPILE_MEMORY_FLOOR);
+    // The compile limits of the policy hold here as for every worker (SB-11, RFC 0006); the
+    // limits of the program apply only to the program.
+    let spec = worker::Spec::for_files(files, sandbox).map_err(ExitCode::from)?;
     let temp = worker::TempDir::new().map_err(|problem| {
         eprintln!("unio: {problem}");
         ExitCode::from(worker::EXIT_SANDBOX)
@@ -556,6 +553,12 @@ fn build(arguments: &[String]) -> ExitCode {
         };
         return build_object(&file, release, &toolchain);
     }
+    // The policy and its compile limits, which hold for the compile step and the link step
+    // alike, are read first: a limit that cannot be honoured stops the build here (RFC 0006).
+    let mut spec = match worker::Spec::for_files(std::slice::from_ref(&file), &sandbox) {
+        Ok(spec) => spec,
+        Err(code) => return ExitCode::from(code),
+    };
     let Some(target) = unio::native::Target::host() else {
         return fail(unio::native::unsupported());
     };
@@ -572,10 +575,6 @@ fn build(arguments: &[String]) -> ExitCode {
     let runtime = match unio::native::runtime_library() {
         Ok(runtime) => runtime,
         Err(m) => return fail(m),
-    };
-    let mut spec = match worker::Spec::for_files(std::slice::from_ref(&file), &sandbox) {
-        Ok(spec) => spec,
-        Err(code) => return ExitCode::from(code),
     };
     let temp = match worker::TempDir::new() {
         Ok(temp) => temp,

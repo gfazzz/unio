@@ -615,6 +615,30 @@ fn exhausting_the_reserve_in_release_ends_with_102() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// What a release beyond the reserve leaves: code 102 with the preallocated diagnostic, the
+/// release of `first` skipped, the temporary file of `open_atomic` kept, the target unchanged.
+#[track_caller]
+fn assert_exhausted_in_release(dir: &Path, output: &Output, case: &str) {
+    let err = program_err(output);
+    let out = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(102), "{case}: {err}{out}");
+    assert_eq!(
+        err, "fault: memory exhausted; the program ends with code 102\n",
+        "{case}"
+    );
+    assert!(out.starts_with("releasing spike\n"), "{case}: {out}");
+    // The spike reaches no check of the heap before its last line; the others do.
+    if !case.starts_with("Spike") {
+        assert!(!out.contains("released spike"), "{case}: {out}");
+    }
+    assert!(!out.contains("first"), "{case}: {out}");
+    assert_eq!(common::temporaries(dir).len(), 1, "{case}");
+    common::assert_target_unchanged(dir);
+}
+
+/// Releases that exhaust the reserve with memory they free again before any check of the heap
+/// (common::SPIKES): code 102 on a full heap and also with room on the heap, since the reserve,
+/// not the heap limit, bounds the path of a fault (plan section 12, condition 1).
 #[test]
 fn a_release_that_exhausts_the_reserve_and_frees_it_ends_with_102() {
     for kind in ["Spike", "Crowd"] {
@@ -623,30 +647,114 @@ fn a_release_that_exhausts_the_reserve_and_frees_it_ends_with_102() {
             &format!("spike-{kind}"),
             &common::SPIKES.replace("KIND", kind),
         );
-        let output = run_reserve(&dir, "run", Some(100_000));
-        let err = program_err(&output);
-        let out = text(&output.stdout);
-        assert_eq!(output.status.code(), Some(102), "{kind}: {err}{out}");
-        assert_eq!(
-            err, "fault: memory exhausted; the program ends with code 102\n",
-            "{kind}"
-        );
-        assert!(out.starts_with("releasing spike\n"), "{kind}: {out}");
-        assert!(!out.contains("first"), "{kind}: {out}");
-        assert_eq!(common::temporaries(&dir).len(), 1, "{kind}");
-        common::assert_target_unchanged(&dir);
-        // With room on the heap the same release is no exhaustion: the limit applies again
-        // once the reserve is full, and it allows the memory.
-        let roomy = run_reserve(&dir, "run", Some(6_000_000));
-        assert_eq!(
-            roomy.status.code(),
-            Some(101),
-            "{kind}: {}",
-            program_err(&roomy)
-        );
-        assert!(text(&roomy.stdout).contains("released first"), "{kind}");
+        for free in [100_000, 6_000_000] {
+            common::reset_target(&dir);
+            let output = run_reserve(&dir, "run", Some(free));
+            assert_exhausted_in_release(&dir, &output, &format!("{kind}, free {free}"));
+        }
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// Once a fault opens the reserve, its path is bounded by the reserve: a release that needs
+/// more is exhaustion whether or not the policy sets a heap limit and whether or not the heap
+/// has room (plan section 12, condition 1; docs/runtime.md 3.6). One large block and many
+/// small ones freed before a check of the heap, and a list kept until the check.
+#[test]
+fn a_release_beyond_the_reserve_ends_with_102_without_a_heap_limit() {
+    for kind in ["Spike", "Crowd", "Hungry"] {
+        let dir = common::reserve_package(
+            "unio-interpreter",
+            &format!("beyond-{kind}"),
+            &common::SPIKES.replace("KIND", kind),
+        );
+        // The heap limit of 8 MiB with the whole of it free.
+        let output = run_reserve(&dir, "run", None);
+        assert_exhausted_in_release(&dir, &output, &format!("{kind}, limit"));
+        // No heap limit at all: the system would give the memory, the reserve does not.
+        common::set_heap_limit(&dir, None);
+        common::reset_target(&dir);
+        let output = run_reserve(&dir, "run", None);
+        assert_exhausted_in_release(&dir, &output, &format!("{kind}, no limit"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// A release that stays within the reserve runs to its end without a heap limit as with one:
+/// code 101, every release ran, the temporary file is gone and the target unchanged.
+#[test]
+fn a_release_within_the_reserve_ends_with_101_without_a_heap_limit() {
+    let dir = common::reserve_package("unio-interpreter", "within", FAULT_ON_A_FULL_HEAP);
+    common::set_heap_limit(&dir, None);
+    let output = run_reserve(&dir, "run", None);
+    let err = program_err(&output);
+    assert_eq!(output.status.code(), Some(101), "{err}");
+    assert_eq!(
+        text(&output.stdout),
+        "released log: 2000 words, last log 1999\n"
+    );
+    assert_eq!(common::temporaries(&dir), Vec::<String>::new());
+    common::assert_target_unchanged(&dir);
+    assert!(err.starts_with("fault: division by zero\n"), "{err}");
+    assert!(!err.contains("exhausted"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The same bound in `unio test` without a heap limit: a test whose release goes beyond the
+/// reserve fails with exhaustion, and `expect_fault` does not receive such a fault.
+#[test]
+fn unio_test_ends_a_release_beyond_the_reserve_with_exhaustion() {
+    let dir = common::reserve_package(
+        "unio-interpreter",
+        "unio-test-beyond",
+        &format!(
+            "{}function expected():
+    using first = Log(name = \"expected\"):
+        using hungry = Hungry(name = \"hungry\"):
+            assert divide(1, 0) == 0
+
+test \"a release beyond the reserve\":
+    using first = Log(name = \"plain\"):
+        using spike = Spike(name = \"spike\"):
+            assert divide(1, 0) == 0
+
+test \"expect_fault and a release beyond the reserve\":
+    expect_fault(expected)
+    print(\"received\")
+
+test \"a release within the reserve\":
+    using log = Log(name = \"within\"):
+        expect_fault(expected_within)
+    print(\"after the fault\")
+
+function expected_within():
+    using log = Log(name = \"inner\"):
+        assert divide(1, 0) == 0
+",
+            common::spike_resources()
+        ),
+    );
+    common::set_heap_limit(&dir, None);
+    let output = run_reserve(&dir, "test", None);
+    let out = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{out}{}",
+        text(&output.stderr)
+    );
+    // Both tests beyond the reserve end as exhausted, their remaining releases skipped.
+    assert_eq!(out.matches("memory exhausted").count(), 2, "{out}");
+    assert!(out.contains("releasing spike"), "{out}");
+    assert!(out.contains("releasing hungry"), "{out}");
+    assert!(!out.contains("released hungry"), "{out}");
+    assert!(!out.contains("released plain"), "{out}");
+    assert!(!out.contains("released expected"), "{out}");
+    assert!(!out.contains("received"), "{out}");
+    assert!(!out.contains("fault: division by zero"), "{out}");
+    // Within the reserve, expect_fault receives the fault after the release.
+    assert!(out.contains("1 passed"), "{out}");
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

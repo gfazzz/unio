@@ -26,3 +26,4 @@ RFC (request for comments) — способ изменить синтаксис,
 | [0003](0003-native-speed-against-go.md) | Скорость и память нативного кода относительно Go | accepted |
 | [0004](0004-external-functions-and-unsafe-modules.md) | Внешние функции и небезопасные модули в 0.1 | accepted |
 | [0005](0005-effects-of-function-values.md) | Эффекты функциональных значений переносятся вызовами | accepted (семантика реализована в `unio check` и `unio symbol`; тесты реализации добавляются) |
+| [0006](0006-compile-limits-apart-from-program-limits.md) | Пределы компиляции отдельно от пределов программы | accepted (реализовано в инструментах; проверки в macOS и Windows ждут CI) |

@@ -26,3 +26,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 | [0003](0003-native-speed-against-go.md) | Native speed and memory measured against Go | accepted |
 | [0004](0004-external-functions-and-unsafe-modules.md) | External functions and unsafe modules in 0.1 | accepted |
 | [0005](0005-effects-of-function-values.md) | Effects of function values are carried by calls | accepted (semantics implemented in `unio check` and `unio symbol`; tests of the implementation being added) |
+| [0006](0006-compile-limits-apart-from-program-limits.md) | Compile limits apart from program limits | accepted (implemented in the tools; macOS and Windows checks pending in CI) |

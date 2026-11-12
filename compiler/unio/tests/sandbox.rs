@@ -945,6 +945,60 @@ fn a_heap_limit_below_the_minimum_ends_with_103() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The `[compile]` table of a policy follows the rules of the other limits (SB-3a, RFC 0006):
+/// an unknown key, a zero, or a text there stops `unio run` and `unio check` with code 103
+/// before anything is compiled or run, naming the key; the known keys are accepted.
+#[test]
+fn unknown_or_invalid_keys_of_the_compile_table_end_with_103() {
+    let program = "public function main():\n    print(\"ran\")\n";
+    let dir = package("compile-keys", "[package]\nname = \"x\"\n", program);
+    let cases = [
+        (
+            "[compile]\nheap_bytes = 268435456\n",
+            "unknown policy key compile.heap_bytes",
+        ),
+        (
+            "[compile]\nprocesses = 1\n",
+            "unknown policy key compile.processes",
+        ),
+        (
+            "[compile]\nwall_seconds = 0\n",
+            "compile.wall_seconds must be positive",
+        ),
+        (
+            "[compile]\nmemory_bytes = \"1 GiB\"\n",
+            "compile.memory_bytes must be a whole number",
+        ),
+    ];
+    for (body, message) in cases {
+        let file = policy(&dir, body);
+        let file = file.to_string_lossy().into_owned();
+        let check = Command::new(env!("CARGO_BIN_EXE_unio"))
+            .current_dir(&dir)
+            .env_remove("UNIO_POLICY")
+            .args(["check", "--policy", &file, "main.unio"])
+            .output()
+            .unwrap();
+        for (command, output) in [
+            ("run", run(&dir, &["--policy", &file], &[])),
+            ("check", check),
+        ] {
+            let err = text(&output.stderr);
+            assert_eq!(output.status.code(), Some(103), "{command} {body}: {err}");
+            assert!(err.contains(message), "{command} {body}: {err}");
+            assert_eq!(text(&output.stdout), "", "{command} {body}");
+        }
+    }
+    let file = policy(
+        &dir,
+        "[compile]\nmemory_bytes = 1073741824\nwall_seconds = 120\ncpu_seconds = 120\n",
+    );
+    let output = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stdout), "ran\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// list_tree does not follow links to directories, so a cycle of links ends (std.files).
 #[cfg(unix)]
 #[test]

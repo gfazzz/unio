@@ -403,43 +403,75 @@ fn the_worker_cannot_start_a_process_on_windows() {
     assert_denied(&output, &probes);
 }
 
-/// (f) A worker that runs longer than the time limit of the policy is stopped, and the tool
-/// reports it with code 102 instead of hanging.
-#[test]
-fn a_worker_over_the_time_limit_is_stopped() {
-    let p = Project::new("time");
-    let policy = p.policy("[limits]\nwall_seconds = 1\n");
-    let started = Instant::now();
-    let output = p.unio(
-        &["check", "--policy", &policy.to_string_lossy(), "main.unio"],
-        &[("UNIO_WORKER_PROBE", "spin")],
-    );
-    let elapsed = started.elapsed();
-    assert_eq!(output.status.code(), Some(102), "{}", all(&output));
-    assert!(
-        text(&output.stderr).contains("time limit of 1 s"),
-        "{}",
-        all(&output)
-    );
-    assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+/// The least memory limit of the workers of the tools, `compile.memory_bytes` (RFC 0006,
+/// docs/runtime.md 9.7): the same number as `MINIMUM_COMPILE_MEMORY` in `src/worker.rs`.
+const MINIMUM_COMPILE_MEMORY: u64 = 192 << 20;
+
+/// Whether `unio build` makes executables on this system (docs/runtime.md 8.4).
+const BUILDS: bool = cfg!(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+));
+
+/// The commands whose compile step runs in a worker under the compile limits of the policy,
+/// each with the policy by `--policy`: `check`, `build` where it makes executables, `run`, and
+/// `test` (RFC 0006).
+fn compile_commands(p: &Project, policy: &Path) -> Vec<(&'static str, Vec<String>)> {
+    let policy = policy.to_string_lossy().into_owned();
+    let mut commands = vec![("check", vec!["check".to_string()])];
+    if BUILDS {
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            all(target_os = "macos", target_arch = "aarch64"),
+        ))]
+        ensure_runtime_library();
+        commands.push(("build", vec!["build".to_string()]));
+    }
+    commands.push(("run", vec!["run".to_string()]));
+    commands.push(("test", vec!["test".to_string()]));
+    for (name, args) in &mut commands {
+        args.extend([
+            "--policy".to_string(),
+            policy.clone(),
+            "main.unio".to_string(),
+        ]);
+        if *name == "build" {
+            args.extend([
+                "-o".to_string(),
+                p.path("outside/hello").to_string_lossy().into_owned(),
+            ]);
+        }
+    }
+    commands
 }
 
-/// (f) The compile steps of `unio run` and `unio test` are workers under the same time limits
-/// of the operator's policy, given by `--policy` or by `UNIO_POLICY`: a compile step that does
-/// not end is stopped at the limit of the policy with code 102, not at the default of ten
-/// minutes, and the program does not run.
+fn unio_with(p: &Project, args: &[String], envs: &[(&str, &str)]) -> Output {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    p.unio(&args, envs)
+}
+
+/// (f) A worker that runs longer than `compile.wall_seconds` of the policy is stopped, and the
+/// tool reports it with code 102 instead of hanging: alike for `check`, `build`, `run`, and
+/// `test`, with the policy given by `--policy` or by `UNIO_POLICY`, and the program does not
+/// run (RFC 0006).
 #[test]
-fn the_compile_steps_of_run_and_test_keep_the_time_limit_of_the_policy() {
+fn a_worker_over_the_compile_time_limit_is_stopped_alike_in_every_command() {
     let p = Project::new("compile-time");
-    let policy = p.policy("[limits]\nwall_seconds = 1\n");
-    let policy = policy.to_string_lossy().into_owned();
-    for command in ["run", "test"] {
+    let policy = p.policy("[compile]\nwall_seconds = 1\n");
+    for (name, args) in compile_commands(&p, &policy) {
         for by_variable in [false, true] {
-            let mut args = vec![command];
-            if !by_variable {
-                args.extend(["--policy", &policy]);
+            let mut args = args.clone();
+            if by_variable {
+                let at = args.iter().position(|a| a == "--policy").unwrap();
+                args.drain(at..at + 2);
             }
-            args.push("main.unio");
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let mut unio = p.command(&args, &[("UNIO_WORKER_PROBE", "spin")]);
             if by_variable {
                 unio.env("UNIO_POLICY", &policy);
@@ -447,10 +479,11 @@ fn the_compile_steps_of_run_and_test_keep_the_time_limit_of_the_policy() {
             let started = Instant::now();
             let output = unio.output().unwrap();
             let elapsed = started.elapsed();
-            let case = format!("{command}, policy by variable: {by_variable}");
+            let case = format!("{name}, policy by variable: {by_variable}");
             assert_eq!(output.status.code(), Some(102), "{case}: {}", all(&output));
             assert!(
-                text(&output.stderr).contains("time limit of 1 s"),
+                text(&output.stderr).contains("time limit of 1 s")
+                    && text(&output.stderr).contains("compile.wall_seconds"),
                 "{case}: {}",
                 all(&output)
             );
@@ -458,64 +491,162 @@ fn the_compile_steps_of_run_and_test_keep_the_time_limit_of_the_policy() {
             assert!(elapsed < Duration::from_secs(20), "{case}: {elapsed:?}");
         }
     }
-    // Without the probe the same policy runs the program.
-    let output = p.unio(&["run", "--policy", &policy, "main.unio"], &[]);
-    assert_eq!(output.status.code(), Some(0), "{}", all(&output));
-    assert_eq!(text(&output.stdout), "hello\n");
-}
-
-/// (f) The memory limit of the policy narrows the compile steps of `unio run` and `unio test`
-/// too, down to the floor that compiling needs: above it a compile step that takes more is
-/// stopped with code 102; a heap limit below it is the program's alone, so the program runs.
-#[test]
-fn the_compile_steps_of_run_and_test_keep_the_memory_limit_of_the_policy() {
-    let p = Project::new("compile-memory");
-    let policy = p.policy("[limits]\nheap_bytes = 536870912\nwall_seconds = 60\n");
-    let policy = policy.to_string_lossy().into_owned();
-    for command in ["run", "test"] {
-        let output = p.unio(
-            &[command, "--policy", &policy, "main.unio"],
-            &[("UNIO_WORKER_PROBE", "alloc=1073741824")],
-        );
-        assert_eq!(
-            output.status.code(),
-            Some(102),
-            "{command}: {}",
-            all(&output)
-        );
-        assert!(
-            text(&output.stderr).contains("memory limit"),
-            "{command}: {}",
-            all(&output)
-        );
-        assert!(!text(&output.stdout).contains("hello"), "{command}");
-    }
-    let small = p.policy("[limits]\nheap_bytes = 2_097_152\n");
+    // Without the probe the same policy compiles and runs the program.
     let output = p.unio(
-        &["run", "--policy", &small.to_string_lossy(), "main.unio"],
+        &["run", "--policy", &policy.to_string_lossy(), "main.unio"],
         &[],
     );
     assert_eq!(output.status.code(), Some(0), "{}", all(&output));
     assert_eq!(text(&output.stdout), "hello\n");
 }
 
-/// (f) A worker that uses more memory than the limit of the policy is stopped by the operating
-/// system (Linux: the address space; macOS: the footprint the tool watches; Windows: the Job
-/// Object), and the tool reports it with code 102.
+/// (f) A worker that uses more memory than `compile.memory_bytes` of the policy is stopped by
+/// the operating system (Linux: the address space; macOS: the footprint the tool watches;
+/// Windows: the Job Object), and the tool reports it with code 102: alike for `check`,
+/// `build`, `run`, and `test` (RFC 0006).
 #[test]
-fn a_worker_over_the_memory_limit_is_stopped() {
-    let p = Project::new("memory");
-    let policy = p.policy("[limits]\nheap_bytes = 536870912\nwall_seconds = 60\n");
-    let output = p.unio(
-        &["check", "--policy", &policy.to_string_lossy(), "main.unio"],
-        &[("UNIO_WORKER_PROBE", "alloc=4294967296")],
-    );
-    assert_eq!(output.status.code(), Some(102), "{}", all(&output));
-    assert!(
-        text(&output.stderr).contains("memory limit"),
-        "{}",
-        all(&output)
-    );
+fn a_worker_over_the_compile_memory_limit_is_stopped_alike_in_every_command() {
+    let p = Project::new("compile-memory");
+    let policy = p.policy("[compile]\nmemory_bytes = 536870912\nwall_seconds = 60\n");
+    for (name, args) in compile_commands(&p, &policy) {
+        let output = unio_with(&p, &args, &[("UNIO_WORKER_PROBE", "alloc=1073741824")]);
+        assert_eq!(output.status.code(), Some(102), "{name}: {}", all(&output));
+        assert!(
+            text(&output.stderr).contains("memory limit of 536870912 bytes")
+                && text(&output.stderr).contains("compile.memory_bytes"),
+            "{name}: {}",
+            all(&output)
+        );
+        assert!(!text(&output.stdout).contains("hello"), "{name}");
+    }
+}
+
+/// (f) `compile.cpu_seconds` stops a worker that spends more processor time, alike for every
+/// command, with code 102 (Linux and macOS: `RLIMIT_CPU`).
+#[cfg(unix)]
+#[test]
+fn a_worker_over_the_compile_cpu_limit_is_stopped_alike_in_every_command() {
+    let p = Project::new("compile-cpu");
+    let policy = p.policy("[compile]\ncpu_seconds = 1\nwall_seconds = 60\n");
+    for (name, args) in compile_commands(&p, &policy) {
+        let started = Instant::now();
+        let output = unio_with(&p, &args, &[("UNIO_WORKER_PROBE", "spin")]);
+        assert_eq!(output.status.code(), Some(102), "{name}: {}", all(&output));
+        assert!(
+            text(&output.stderr).contains("CPU time limit of 1 s"),
+            "{name}: {}",
+            all(&output)
+        );
+        assert!(started.elapsed() < Duration::from_secs(30), "{name}");
+    }
+}
+
+/// The limits of the program (`[limits]`) do not reach the workers of the tools: a heap of
+/// 2 MiB, a wall time of 1 s, and a CPU time of 1 s for the program leave the compile step the
+/// defaults of 2 GiB and 10 minutes, so it may take 512 MiB and outlast a second, and the
+/// program then runs (RFC 0006; C-17 for the minimum heap of the program).
+#[test]
+fn the_program_limits_do_not_change_the_compile_limits() {
+    let p = Project::new("program-limits");
+    let policy = p.policy("[limits]\nheap_bytes = 2_097_152\nwall_seconds = 1\ncpu_seconds = 1\n");
+    let probes = "alloc=536870912;sleep=2";
+    for (name, args) in compile_commands(&p, &policy) {
+        let output = unio_with(&p, &args, &[("UNIO_WORKER_PROBE", probes)]);
+        assert_eq!(output.status.code(), Some(0), "{name}: {}", all(&output));
+        assert!(
+            text(&output.stderr)
+                .contains("unio worker probe: alloc=536870912: allowed 536870912 bytes"),
+            "{name}: {}",
+            all(&output)
+        );
+        if name == "run" {
+            assert_eq!(text(&output.stdout), "hello\n");
+        }
+    }
+    // A heap of 2 MiB for the program with no compile keys: the program compiles and runs.
+    for command in ["run", "test"] {
+        let output = p.unio(
+            &[command, "--policy", &policy.to_string_lossy(), "main.unio"],
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(0), "{command}: {}", all(&output));
+        if command == "run" {
+            assert_eq!(text(&output.stdout), "hello\n");
+        }
+    }
+}
+
+/// A compile memory below the least a worker needs to start and compile an empty program is
+/// refused before anything is compiled, with code 103 and a diagnostic that names the key, the
+/// limit, and the minimum; the tool never raises it. Every command that starts a worker refuses
+/// alike, and the worker does not start (its probe reports nothing). At the minimum the empty
+/// program of the project compiles and runs (RFC 0006, docs/runtime.md 9.7).
+#[test]
+fn a_compile_memory_below_the_minimum_is_refused_before_compiling() {
+    let p = Project::new("compile-minimum");
+    let below = MINIMUM_COMPILE_MEMORY - 1;
+    let policy = p.policy(&format!("[compile]\nmemory_bytes = {below}\n"));
+    let policy_text = policy.to_string_lossy().into_owned();
+    let mut commands = compile_commands(&p, &policy);
+    for args in [
+        vec!["fmt", "--check", "main.unio"],
+        vec!["outline", "main.unio"],
+        vec!["symbol", "main.main"],
+        vec!["parse", "--ast", "main.unio"],
+    ] {
+        let mut args: Vec<String> = args.into_iter().map(String::from).collect();
+        args.extend(["--policy".to_string(), policy_text.clone()]);
+        commands.push(("other", args));
+    }
+    for (name, args) in commands {
+        let output = unio_with(&p, &args, &[("UNIO_WORKER_PROBE", "write-temp")]);
+        let err = text(&output.stderr);
+        let case = format!("{name} {args:?}");
+        assert_eq!(output.status.code(), Some(103), "{case}: {}", all(&output));
+        assert!(
+            err.contains(&format!("compile.memory_bytes = {below}"))
+                && err.contains(&format!("minimum of {MINIMUM_COMPILE_MEMORY} bytes")),
+            "{case}: {}",
+            all(&output)
+        );
+        assert!(
+            !err.contains("unio worker probe"),
+            "{case}: the worker started: {err}"
+        );
+        assert!(!text(&output.stdout).contains("hello"), "{case}");
+    }
+    let minimum = p.policy(&format!(
+        "[compile]\nmemory_bytes = {MINIMUM_COMPILE_MEMORY}\n"
+    ));
+    // The link step of a debug build of the tool reads a `libunio.a` with debug information
+    // (about 290 MB), which the system linker maps whole: it needs more than the minimum, which
+    // is measured for the compile steps (docs/runtime.md 9.7).
+    let commands = compile_commands(&p, &minimum)
+        .into_iter()
+        .filter(|(name, _)| *name != "build" || !cfg!(debug_assertions));
+    for (name, args) in commands {
+        let output = unio_with(&p, &args, &[]);
+        assert_eq!(output.status.code(), Some(0), "{name}: {}", all(&output));
+        if name == "run" {
+            assert_eq!(text(&output.stdout), "hello\n");
+        }
+    }
+}
+
+/// A project cannot set the limits of the workers in `unio.toml`: a `[compile]` or `[limits]`
+/// table there changes nothing, so a worker that outlasts its second still ends normally.
+#[test]
+fn the_manifest_does_not_set_the_compile_limits() {
+    let p = Project::new("manifest-limits");
+    fs::write(
+        p.pkg().join("unio.toml"),
+        "[package]\nname = \"hostile\"\n\n[compile]\nmemory_bytes = 1\nwall_seconds = 1\n\n\
+         [limits]\nheap_bytes = 1\nwall_seconds = 1\n",
+    )
+    .unwrap();
+    let output = p.unio(&["check", "main.unio"], &[("UNIO_WORKER_PROBE", "sleep=2")]);
+    assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+    assert!(probe_result(&output, "sleep=2").starts_with("allowed"));
 }
 
 /// (f) Pathological sources: deep nesting is refused by the parser's bound (E0013) at once; a
@@ -539,7 +670,7 @@ fn pathological_sources_end_with_a_diagnostic() {
         huge.push_str(line);
     }
     fs::write(p.pkg().join("huge.unio"), huge).unwrap();
-    let policy = p.policy("[limits]\nheap_bytes = 268435456\nwall_seconds = 30\n");
+    let policy = p.policy("[compile]\nmemory_bytes = 268435456\nwall_seconds = 30\n");
     let started = Instant::now();
     let output = p.unio(
         &["check", "--policy", &policy.to_string_lossy(), "huge.unio"],
@@ -745,7 +876,7 @@ fn the_link_step_over_the_time_limit_ends_with_its_process_tree() {
     .unwrap();
     fs::set_permissions(&cc, fs::Permissions::from_mode(0o755)).unwrap();
     let cc_text = cc.to_string_lossy().into_owned();
-    let policy = p.policy("[limits]\nwall_seconds = 3\n");
+    let policy = p.policy("[compile]\nwall_seconds = 3\n");
     let output = p.unio(
         &[
             "build",
