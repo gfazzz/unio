@@ -15,10 +15,12 @@ pub mod http;
 pub mod index;
 pub mod lock;
 pub mod manifest;
+pub mod registry;
 pub mod resolve;
 pub mod semver;
 pub mod signature;
 pub mod tree;
+pub mod trust;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

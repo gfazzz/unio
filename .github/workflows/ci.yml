@@ -224,6 +224,26 @@ jobs:
         run: sh .github/scripts/pinned_toolchain.sh
       - name: Release build in the installed layout
         run: sh .github/scripts/release_build.sh "$RUNNER_TEMP/unio-install"
+      # R-6, R-6a: the SBOM (CycloneDX, from Cargo.lock) and the signed manifest of the release.
+      # The release key is the operator's, kept offline and never given to CI
+      # (docs/cryptography.md, section 4); CI signs with a key made for this run only and
+      # verifies the result, which checks the path, not the release. The operator verifies the
+      # artifacts and the reproducible build, then signs them with the release key.
+      - name: SBOM and a release manifest signed with a key of this run (not the release key)
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/unio-install"
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/sbom.py "$prefix/share/doc/unio/sbom.cdx.json"
+          unio="$prefix/bin/unio"
+          "$unio" key new ci-run --dir "$RUNNER_TEMP/ci-run-key"
+          cd "$prefix"
+          files=$(find bin lib share -type f | sort)
+          subject="unio-${{ runner.os }}-ci-run-${{ github.run_id }}"
+          "$unio" release sign --key "$RUNNER_TEMP/ci-run-key/ci-run.key" --subject "$subject" --sequence "${{ github.run_number }}" --out RELEASE-CI-TEST $files
+          "$unio" release verify RELEASE-CI-TEST --public "$RUNNER_TEMP/ci-run-key/ci-run.pub" --subject "$subject"
+          cp "$RUNNER_TEMP/ci-run-key/ci-run.pub" RELEASE-CI-TEST.pub
+          rm -rf "$RUNNER_TEMP/ci-run-key"
       - name: Executable of a reference program and the hashes of the build
         if: runner.os == 'Linux'
         run: |

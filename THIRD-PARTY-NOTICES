@@ -122,6 +122,41 @@ arbitrary 1.5.0
   | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
   | DEALINGS IN THE SOFTWARE.
 
+block-buffer 0.12.1
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/utils
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2018-2025 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
 bumpalo 3.20.3
   Licence:  MIT OR Apache-2.0
   Upstream: https://github.com/fitzgen/bumpalo
@@ -167,6 +202,76 @@ cfg-if 1.0.5
 
   LICENSE-MIT:
   | Copyright (c) 2014 Alex Crichton
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+cmov 0.5.4
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/utils
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2022-2026 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+cpufeatures 0.3.1
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/utils
+  Targets:  cfg(target_arch = "aarch64")
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2020-2026 The RustCrypto Project Developers
   |
   | Permission is hereby granted, free of charge, to any
   | person obtaining a copy of this software and associated
@@ -301,6 +406,112 @@ crc32fast 1.5.4
   | LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   | OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   | SOFTWARE.
+
+crypto-common 0.2.2
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/traits
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2021-2026 RustCrypto Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+ctutils 0.4.8
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/utils
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2025-2026 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+digest 0.11.3
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/traits
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2017-2025 RustCrypto Developers
+  | Copyright (c) 2017 Artyom Pavlov
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
 
 equivalent 1.0.3
   Licence:  Apache-2.0 OR MIT
@@ -536,6 +747,41 @@ hashbrown 0.17.1
   | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
   | DEALINGS IN THE SOFTWARE.
 
+hybrid-array 0.4.15
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/hybrid-array
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2022-2026 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
 indexmap 2.14.2
   Licence:  Apache-2.0 OR MIT
   Upstream: https://github.com/indexmap-rs/indexmap
@@ -545,6 +791,75 @@ indexmap 2.14.2
 
   LICENSE-MIT:
   | Copyright (c) 2016--2017
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+keccak 0.2.2
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/sponges
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2018-2026 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+libc 0.2.191
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-lang/libc
+  Targets:  cfg(target_arch = "aarch64")
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) The Rust Project Developers
   |
   | Permission is hereby granted, free of charge, to any
   | person obtaining a copy of this software and associated
@@ -673,6 +988,103 @@ memchr 2.8.3
   | OTHER DEALINGS IN THE SOFTWARE.
   |
   | For more information, please refer to <http://unlicense.org/>
+
+ml-dsa 0.1.2
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/signatures
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2024-2026 RustCrypto Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+module-lattice 0.2.4
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/KEMs
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2024-2026 RustCrypto Developers
+  |
+  | Permission is hereby granted, free of charge, to any person obtaining a copy
+  | of this software and associated documentation files (the "Software"), to deal
+  | in the Software without restriction, including without limitation the rights
+  | to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  | copies of the Software, and to permit persons to whom the Software is
+  | furnished to do so, subject to the following conditions:
+  |
+  | The above copyright notice and this permission notice shall be included in all
+  | copies or substantial portions of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  | IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  | FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  | AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  | LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  | OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  | SOFTWARE.
+
+num-traits 0.2.19
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-num/num-traits
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Rust Project Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2014 The Rust Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
 
 object 0.40.0
   Licence:  Apache-2.0 OR MIT
@@ -815,6 +1227,76 @@ serde_core 1.0.229
   | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
   | DEALINGS IN THE SOFTWARE.
 
+shake 0.1.0
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/XOFs
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2026 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+signature 3.0.0
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/traits
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2018-2026 RustCrypto Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
 smallvec 1.16.5
   Licence:  MIT OR Apache-2.0
   Upstream: https://github.com/servo/rust-smallvec
@@ -825,6 +1307,41 @@ smallvec 1.16.5
 
   LICENSE-MIT:
   | Copyright (c) 2018 The Servo Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+sponge-cursor 0.1.0
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/RustCrypto/utils
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  RustCrypto Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2026 The RustCrypto Project Developers
   |
   | Permission is hereby granted, free of charge, to any
   | person obtaining a copy of this software and associated
@@ -893,6 +1410,39 @@ target-lexicon 0.13.5
   Authors:  Dan Gohman <sunfish@mozilla.com>
   LICENSE: the Apache License 2.0, as in LICENSE-APACHE
 
+typenum 1.20.1
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/paholg/typenum
+  Targets:  all
+  NOTICE:   none in the crate
+
+  LICENSE:
+  | MIT OR Apache-2.0
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | The MIT License (MIT)
+  |
+  | Copyright (c) 2014 Paho Lurie-Gregg
+  |
+  | Permission is hereby granted, free of charge, to any person obtaining a copy
+  | of this software and associated documentation files (the "Software"), to deal
+  | in the Software without restriction, including without limitation the rights
+  | to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  | copies of the Software, and to permit persons to whom the Software is
+  | furnished to do so, subject to the following conditions:
+  |
+  | The above copyright notice and this permission notice shall be included in all
+  | copies or substantial portions of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  | IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  | FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  | AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  | LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  | OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  | SOFTWARE.
+
 wasmtime-internal-core 50.0.1
   Licence:  Apache-2.0 WITH LLVM-exception
   Upstream: https://crates.io/crates/wasmtime-internal-core
@@ -900,3 +1450,38 @@ wasmtime-internal-core 50.0.1
   NOTICE:   none in the crate
   Authors:  The Wasmtime Project Developers
   Licence files: none in the crate; the licence of its manifest applies, with the copyright of its authors above
+
+zeroize 1.9.1
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/RustCrypto/utils
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The RustCrypto Project Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2018-2026 The RustCrypto Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.

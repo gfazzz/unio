@@ -16,15 +16,18 @@ generator of `unio build` uses Cranelift (`cranelift-codegen`, `cranelift-fronte
 `cranelift-module`, `cranelift-object`, a stable release pinned to exact versions, with the
 crates they need recorded in `Cargo.lock`), the one dependency that requirements section 10 names;
 an executable contains none of it, because the linker drops what the runtime does not call. On
-Windows the compiler also uses `find-msvc-tools`; see "The linker on Windows" below. The
+Windows the compiler also uses `find-msvc-tools`; see "The linker on Windows" below; signatures
+use `ml-dsa`, see "Signatures" below. The
 sandbox calls Landlock, seccomp, resource limits and Seatbelt through `extern` declarations in
 `unio-runtime/src/sandbox/`, as the runtime already does for `fsync`, `getpwuid` and
 `MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6). The package commands
-(`unio add`, `remove`, `update`, `install`; [docs/packages.md](../docs/packages.md)) add none
-either: SHA-384, the archive format (uncompressed ustar), the HTTP/1.1 client of the download
-worker, semantic versions, and the resolver are written with the standard library in
-`unio/src/package/` and `unio/src/packages.rs`. HTTPS is not supported, because a TLS
-implementation would be a new dependency; that decision is open (docs/status.md, gap 12).
+(`unio add`, `remove`, `update`, `install`, `publish`; [docs/packages.md](../docs/packages.md))
+add none besides `ml-dsa`: SHA-384, the archive format (uncompressed ustar), the HTTP/1.1 client
+of the download worker, semantic versions, the resolver, the signature envelopes, and the trust
+of registries are written with the standard library in `unio/src/package/`,
+`unio/src/envelope.rs`, and `unio/src/packages.rs`. There is no TLS in 0.1, by a decision of
+2026-11-12: packages travel over HTTP and are installed only with a valid signature and hash;
+TLS comes with the networking of 0.2 (docs/status.md, gap 12).
 
 The library crate `unio` is also built as a static library, `target/<profile>/libunio.a` (on
 Windows `unio.lib`): the runtime that `unio build` links into every executable, found through
@@ -99,10 +102,51 @@ its own; `Cargo.lock` records its checksum, and an update is a deliberate change
   bytes.
 - Its role is temporary: it belongs to the bootstrap compiler in Rust. It is reviewed when the
   compiler moves to tools of its own (the self-hosted compiler of concept section 10, by 1.0),
-  or earlier if a linker is shipped with Unio; until then it is the only dependency besides
-  Cranelift. It is called by the `unio` tool only (`compiler/unio/src/main.rs`), not by the
+  or earlier if a linker is shipped with Unio; until then it is, with `ml-dsa` (see
+  "Signatures"), the only dependency besides Cranelift. It is called by the `unio` tool only (`compiler/unio/src/main.rs`), not by the
   library whose static form is the runtime, so it is not part of what `unio build` puts into
   programs.
+
+### Signatures
+
+The signatures of packages, registries, and release manifests are ML-DSA-65 of FIPS 204
+([docs/cryptography.md](../docs/cryptography.md), sections 4 and 7; T-8, T-8a, R-6a). The
+compiler does not implement the primitive itself (cryptography.md, section 5: no invented
+primitives); it uses one vetted implementation in pure Rust, the crate
+[`ml-dsa`](https://github.com/RustCrypto/signatures/tree/master/ml-dsa) of RustCrypto:
+
+- Pinned to `=0.1.2` in `unio/Cargo.toml`, licensed `Apache-2.0 OR MIT`, with `Cargo.lock`
+  recording its checksum. No default features: no random number generator (`unio key new` reads
+  the seed from the system itself, and signing is deterministic) and no PKCS#8; the feature
+  `zeroize` clears the expanded keys when they are dropped. It is used by the library crate
+  (`unio/src/envelope.rs`), so `libunio.a` contains it, but an executable of `unio build` does
+  not: the runtime never calls it, and the linker drops it.
+- Its dependencies, each licensed `MIT OR Apache-2.0` (in one order or the other):
+  `crypto-common`, `hybrid-array`, `ctutils`, `cmov`, `typenum`, `module-lattice`,
+  `num-traits` (with `autocfg` at build time only), `shake`, `digest`, `keccak`, `cfg-if`,
+  `cpufeatures` (which uses `libc` only on AArch64 Linux), `sponge-cursor`, `signature`, and
+  `zeroize`, without procedural macros. `THIRD-PARTY-NOTICES` lists them
+  (`.github/scripts/third_party_notices.py`).
+- Why this crate: it implements the final FIPS 204, is maintained by the RustCrypto project with
+  the Wycheproof vectors in its own tests, needs no C compiler or system library, and is small
+  enough to read. Unio checks it itself (`unio/tests/signatures.rs`): the ACVP known-answer
+  vectors of NIST in `unio/tests/data/fips204` (their source and the NIST notice are in the
+  `SOURCE` file there) and interoperability with an independent implementation, the crate
+  `fips204` (`=0.5.0`, `MIT OR Apache-2.0`), which is a dev-dependency only, like `sha2`
+  (`=0.10.9`), which checks Unio's own SHA-384; neither is part of `unio` or `libunio.a`.
+- Its role is temporary, as the bootstrap compiler's: it is reviewed when the compiler moves to
+  tools of its own (by 1.0), and a Unio implementation replaces it only after it passes the same
+  checks and an external review. No independent review of it has been made yet, so no
+  post-quantum compliance is claimed (R-6c).
+
+The release job of CI writes the SBOM of `unio` (`.github/scripts/sbom.py`, CycloneDX 1.5 from
+`Cargo.lock`, the same crates as `THIRD-PARTY-NOTICES`) into `share/doc/unio/sbom.cdx.json`, and
+signs the installed layout with `unio release sign` using a key made for that run only. The
+release key belongs to the operator, stays offline, and is never given to CI: the operator signs
+a release with it after verifying the artifacts and the reproducible build
+(`unio release sign --key release.key --subject unio-0.1.0-linux-x86_64 --sequence N --out
+RELEASE FILE...`, checked by `unio release verify RELEASE --public release.pub --subject ...
+--at-least N`).
 
 ## Commands
 
@@ -117,6 +161,7 @@ its own; `Cargo.lock` records its checksum, and an update is a deliberate change
 | `unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`, in the sandbox described below. The sandbox options come before FILE, or between FILE and `--`. Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion (heap, stack, wall or CPU time of the policy), 103 when the policy or the manifest cannot be read or parsed or the sandbox cannot be applied, 1 if the program does not compile |
 | `unio build [--release] FILE [-o OUT]`, `unio build --print-toolchain` | Checks the program like `unio run` and, without errors, compiles it to one executable OUT (by default the name of FILE without `.unio`, with `.exe` on Windows) for the machine the compiler runs on: Linux on x86-64 or AArch64, macOS on AArch64, Windows on x86-64; elsewhere it stops with a message naming these. `--release` optimises the generated code. The executable runs `main` with its arguments as `std.args.list()`, in the sandbox of the manifest of FILE's package narrowed by `UNIO_POLICY`, and ends with the codes of `unio run`, or with 104 when its program image is of another format, was made by another compiler than its runtime, or is damaged. `$CWD`, `$HOME` and `$TEMP` in the manifest are those of the run; a relative entry of `files.read` or `files.write` stops the build, since an installed executable has no directory of its manifest. A construct not compiled natively yet stops the build with its place (docs/runtime.md 8.4). The image of the executable records the identity of the linker and the SDK (their names and versions); `--print-toolchain` prints it without building. A missing linker stops the build with a message that says what to install. Exit code 0 when built, 1 otherwise, 2 on wrong usage |
 | `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). Each file's tests run in the sandbox of its package, with the same options and codes as `unio run`. The effects analysis counts exactly the tests that run: those of the given files that FILTER selects, not those of imported modules or of the standard library unless their files are given; `unio check` and `unio run` count no test (RFC 0005, runtime 6.2). Exit code 0 when every test passed, 1 otherwise |
+| `unio add`, `remove`, `update`, `install`, `publish`, `unio key`, `unio registry`, `unio release` | Dependencies, the signed registry, keys, and release manifests: [docs/packages.md](../docs/packages.md), sections 3 and 7, and "Signatures" above |
 | `unio lsp [--policy FILE] [--allow-weaker-sandbox] [--lang=en\|ru]` | The language server over LSP on standard input and output (T-10): diagnostics of the open documents with their codes and a link to the explanation (`unio-explain:/CODE`, answered by the request `unio/explain`), go to definition, hover with the type of a name or an expression and, for a function, its signature, documentation, errors, effects, and layer as `unio symbol` reports them, type hints for bindings written without a type, completion (names in scope, members by type, module members, keywords), formatting as `unio fmt`, and rename of every reference in the package (refused for the standard library, another package, a module, or a keyword). Every analysis runs in a worker of the tools with the `[compile]` limits; unsaved buffers reach it on its standard input (SB-13, docs/runtime.md 9.7). The editors start it: [editors/README.md](../editors/README.md) |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,

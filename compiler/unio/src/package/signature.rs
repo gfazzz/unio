@@ -1,50 +1,51 @@
-//! The signature check of a package from a registry (T-8, T-8a, SB-12): the hook the unpack
-//! worker calls after the hash of the archive matches and before anything is unpacked.
+//! The signature check of a package from a registry (T-8, T-8a, SB-12), which the unpack worker
+//! runs after the SHA-384 of the archive matches and before anything of the archive is read.
 //!
-//! Verification is not implemented yet: the post-quantum signature envelope, its trust anchors,
-//! rotation, revocation, and rollback protection are the work of the registry and signing task
-//! (docs/cryptography.md, section 4; status gap 12). Until then the check fails closed: a
-//! package of a registry is refused, signed or not, unless the operator set
-//! `allow_unsigned = true` for that registry in the packages configuration, which installs it
-//! unverified and says so. A signature that is present is never treated as verified.
-//! Dependencies from a directory or from an archive with the hash in the manifest are not
-//! registry packages: the root package's own manifest names their exact content.
+//! The archive must carry an envelope (`<version>.tar.sig`; [`crate::envelope`]) with the
+//! purpose `package-archive`, the subject `owner/name@version`, and the SHA-384 of the archive,
+//! signed with ML-DSA-65 by a key that the operator's trust anchor establishes for the registry
+//! today ([`super::trust`]). Anything else is refused: no signature, another algorithm, a key
+//! that is not trusted, revoked, or expired, an envelope for another package or version, a
+//! changed archive, or trust files that were changed or rolled back. There is no option to
+//! accept a registry package unverified (docs/cryptography.md, section 3: no exception may
+//! authorize package installation); a package whose exact content the root manifest names
+//! (an archive dependency with its `sha384`, or a path) is not a registry package.
+
+use super::trust::{Bundle, Trust, Verified};
 
 /// What the unpack worker knows when it checks the signature of an archive.
 pub struct Request<'a> {
+    /// `owner/name`.
     pub package: &'a str,
     pub version: &'a str,
+    /// The registry, for messages.
     pub registry: &'a str,
     pub archive: &'a [u8],
     pub signature: Option<&'a [u8]>,
-    pub allow_unsigned: bool,
+    pub trust: &'a Bundle,
 }
 
-/// The verdict: `Ok(note)` lets the unpacking go on, with a note for the person installing;
-/// `Err` refuses the package.
-pub fn check(request: &Request) -> Result<String, String> {
+/// The verdict: `Ok` lets the unpacking go on; `Err` refuses the package.
+pub fn check(request: &Request) -> Result<Verified, String> {
     let what = format!(
         "{} {} from {}",
         request.package, request.version, request.registry
     );
-    // The place of the verifier: once it exists, a valid signature by a trusted key returns
-    // Ok here, and every other case is refused, whatever `allow_unsigned` says about packages
-    // without a signature.
-    if request.allow_unsigned {
-        return Ok(format!(
-            "unio: warning: {what} is installed without signature verification: the operator \
-             allowed unsigned packages for this registry, and verification is not implemented \
-             yet (T-8)"
+    let refused = |why: String| format!("{what} is refused before unpacking: {why}");
+    let Some(signature) = request.signature else {
+        return Err(refused(
+            "it has no signature, and a registry package is installed only with a valid ML-DSA-65 \
+             signature (T-8)"
+                .into(),
         ));
-    }
-    let signature = if request.signature.is_some() {
-        "its signature cannot be verified yet"
-    } else {
-        "it has no signature"
     };
-    Err(format!(
-        "{what} is refused: {signature}, and this unio does not verify registry signatures yet \
-         (T-8, docs/cryptography.md). The operator can accept the packages of this registry \
-         unverified with allow_unsigned = true in the packages configuration"
-    ))
+    let trust = Trust::load(request.trust, &super::trust::today()).map_err(&refused)?;
+    trust
+        .verify(
+            signature,
+            "package-archive",
+            &format!("{}@{}", request.package, request.version),
+            request.archive,
+        )
+        .map_err(refused)
 }

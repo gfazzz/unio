@@ -8,6 +8,7 @@
 #[path = "lsp/server.rs"]
 mod lsp_server;
 mod packages;
+mod publish;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -34,6 +35,15 @@ const USAGE: &str = "Usage:
     unio remove ALIAS
     unio update [ALIAS...] [--unsafe-ok] [--offline]
     unio install [--offline] [--unsafe-ok]
+    unio key new NAME [--dir DIR]
+    unio key id FILE
+    unio key endorse PUBLIC.pub --key SIGNER.key --registry DIR [--expires YYYY-MM-DD]
+    unio key revoke PUBLIC.pub|sha384:ID --key ANCHOR.key --registry DIR
+    unio registry init DIR --anchor ANCHOR.key
+    unio registry resign DIR --key KEY.key
+    unio publish --registry DIR --owner OWNER --key KEY.key
+    unio release sign --key KEY.key --subject NAME --sequence N --out MANIFEST FILE...
+    unio release verify MANIFEST --public KEY.pub --subject NAME [--at-least N]
 
 The language of messages is taken from --lang, then from UNIO_LANG, and is English otherwise.
 Every command that reads sources takes --policy FILE (or UNIO_POLICY), whose [compile] table
@@ -76,6 +86,13 @@ fn main() -> ExitCode {
         arguments.first().map(String::as_str)
     {
         return packages::command(command, &arguments[1..]);
+    }
+    match arguments.first().map(String::as_str) {
+        Some("key") => return publish::key(&arguments[1..]),
+        Some("registry") => return publish::registry_command(&arguments[1..]),
+        Some("publish") => return publish::publish(&arguments[1..]),
+        Some("release") => return publish::release(&arguments[1..]),
+        _ => {}
     }
     let (sandbox, arguments) = match sandbox_cli::take(&arguments) {
         Ok(taken) => taken,

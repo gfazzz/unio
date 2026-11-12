@@ -5,7 +5,7 @@
 //! two resolutions to the same packages give the same bytes.
 //!
 //! ```toml
-//! lock_version = 1
+//! lock_version = 2
 //!
 //! [root]
 //! dependencies = ["util||path+../util"]
@@ -21,8 +21,11 @@
 //! An edge is `alias|requirement|identity`; the requirement is empty where the manifest gives
 //! none. `content` is the hash of the unpacked files ([`super::tree`]); `archive` the SHA-384 of
 //! the archive bytes, for packages that come as an archive; `fetch` where the archive is
-//! downloaded from; `index` the hash of the registry index the version was chosen from;
-//! `unsafe_modules` and `permissions` what the review of T-9 showed.
+//! downloaded from; `signature` where its signature envelope is, and `signer` the key whose
+//! verified signature it carried (T-8); `index` the hash of the registry index the version was
+//! chosen from and `index_sequence` its sequence, the floor below which an index of that
+//! package is a rollback; `unsafe_modules` and `permissions` what the review of T-9 showed.
+//! Version 2 added `signer` and `index_sequence`; version 1 is still read.
 
 use std::collections::BTreeMap;
 
@@ -31,7 +34,7 @@ use unio_runtime::sandbox::toml::{self, TomlValue};
 use super::manifest::valid_alias;
 
 pub const FILE: &str = "unio.lock";
-const LOCK_VERSION: i64 = 1;
+const LOCK_VERSION: i64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Edge {
@@ -56,6 +59,10 @@ pub struct Entry {
     pub signature: Option<String>,
     /// `sha384:<hex>` of the registry index the version was chosen from.
     pub index: Option<String>,
+    /// The sequence of that index.
+    pub index_sequence: Option<u64>,
+    /// `sha384:<hex>`, the identity of the key whose signature of the archive was verified.
+    pub signer: Option<String>,
     pub unsafe_modules: Vec<String>,
     pub permissions: Vec<String>,
     pub dependencies: Vec<Edge>,
@@ -160,10 +167,14 @@ impl Lock {
                 ("fetch", &e.fetch),
                 ("signature", &e.signature),
                 ("index", &e.index),
+                ("signer", &e.signer),
             ] {
                 if let Some(v) = value {
                     out.push_str(&format!("{key} = {}\n", quote(v)));
                 }
+            }
+            if let Some(n) = e.index_sequence {
+                out.push_str(&format!("index_sequence = {n}\n"));
             }
             out.push_str(&format!("unsafe_modules = {}\n", list(&e.unsafe_modules)));
             out.push_str(&format!("permissions = {}\n", list(&e.permissions)));
@@ -176,11 +187,11 @@ impl Lock {
     pub fn parse(source: &str) -> Result<Lock, String> {
         let table = toml::parse(source)?;
         match table.get("lock_version") {
-            Some(TomlValue::Int(LOCK_VERSION)) => {}
+            Some(TomlValue::Int(1 | LOCK_VERSION)) => {}
             Some(TomlValue::Int(n)) => {
                 return Err(format!(
-                    "lock_version {n} is not supported; this unio reads version {LOCK_VERSION}"
-                ))
+                "lock_version {n} is not supported; this unio reads versions 1 and {LOCK_VERSION}"
+            ))
             }
             _ => return Err("lock_version is missing".into()),
         }
@@ -242,6 +253,8 @@ impl Lock {
                     "fetch",
                     "signature",
                     "index",
+                    "index_sequence",
+                    "signer",
                     "unsafe_modules",
                     "permissions",
                     "dependencies",
@@ -260,6 +273,16 @@ impl Lock {
                 fetch: text("fetch")?,
                 signature: text("signature")?,
                 index: text("index")?,
+                index_sequence: match fields.get("index_sequence") {
+                    None => None,
+                    Some(TomlValue::Int(n)) if *n > 0 => Some(*n as u64),
+                    Some(_) => {
+                        return Err(format!(
+                            "package.{n}.index_sequence must be a whole number above 0"
+                        ))
+                    }
+                },
+                signer: text("signer")?,
                 unsafe_modules: texts("unsafe_modules")?,
                 permissions: texts("permissions")?,
                 dependencies: texts("dependencies")?
@@ -341,6 +364,8 @@ mod tests {
                     content: hash('b'),
                     archive: Some(hash('c')),
                     fetch: Some("http://r.example/x/archives/acme/text/1.2.0.tar".into()),
+                    index_sequence: Some(4),
+                    signer: Some(hash('d')),
                     unsafe_modules: vec!["raw".into()],
                     permissions: vec!["env HOME".into()],
                     ..Entry::default()
@@ -367,7 +392,7 @@ mod tests {
         let mut lock = sample();
         lock.packages.remove(1);
         assert!(Lock::parse(&lock.write()).is_err());
-        assert!(Lock::parse("lock_version = 2\n").is_err());
+        assert!(Lock::parse("lock_version = 3\n").is_err());
         assert!(Lock::parse("lock_version = 1\nextra = 1\n").is_err());
     }
 }

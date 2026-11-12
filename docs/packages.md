@@ -1,6 +1,6 @@
 # Packages and dependencies
 
-Version: 0.1 (draft). Russian localization: [ru/packages.md](ru/packages.md). This document describes the package manager of the `unio` tool as implemented: the manifest, the lock file, the commands, the cache, the configuration of the operator, the static layout of a registry, and the archive format. The normative requirements are T-6 to T-9 and T-14 of [requirements.md](requirements.md) with sections 5 and 6 of [language-contracts.md](language-contracts.md), and SB-10 to SB-15 for the isolation of the work; the workers are described in [runtime.md](runtime.md) 9.7. What is missing is listed at the end and in [status.md](status.md).
+Version: 0.1 (draft). Russian localization: [ru/packages.md](ru/packages.md). This document describes the package manager of the `unio` tool as implemented: the manifest, the lock file, the commands, the cache, the configuration of the operator, the signed registry served as static files with its keys and publishing, and the archive format. The normative requirements are T-6 to T-9 and T-14 of [requirements.md](requirements.md) with sections 5 and 6 of [language-contracts.md](language-contracts.md), and SB-10 to SB-15 for the isolation of the work; the workers are described in [runtime.md](runtime.md) 9.7. What is missing is listed at the end and in [status.md](status.md).
 
 ## 1. The manifest
 
@@ -35,7 +35,7 @@ The identity of a package is its origin (T-14): `registry+<registry URL>#<owner>
 
 Resolution (`unio add`, `remove`, `update`) is deterministic backtracking over the identities in sorted order, trying the versions that satisfy every requirement in descending semantic-version order. A package that is locked and not in the requested update keeps its locked version without asking the registry. When no version fits, the error names every path that requires the package (`the root package -> acme/b 1.0.0 requires ^1`), and for a kept version it suggests `unio update <alias>`. Two hidden copies of one package are never made.
 
-`unio.lock` lists every package, direct and transitive, with its exact version, the content hash of its files, the SHA-384 of its archive, where the archive and its signature are downloaded from, the hash of the registry index it was chosen from, what the review of T-9 showed, and its own dependencies as `alias|requirement|identity`. Packages are sorted and every list is sorted, so the same resolution gives the same bytes; the format is versioned by `lock_version`. Commit the lock with the package.
+`unio.lock` lists every package, direct and transitive, with its exact version, the content hash of its files, the SHA-384 of its archive, where the archive and its signature are downloaded from, the key whose signature of the archive was verified (`signer`), the hash and the sequence of the registry index it was chosen from (`index`, `index_sequence`; section 7.3), what the review of T-9 showed, and its own dependencies as `alias|requirement|identity`. Packages are sorted and every list is sorted, so the same resolution gives the same bytes; the format is versioned by `lock_version` (2; version 1, without `signer` and `index_sequence`, is still read). Commit the lock with the package.
 
 The content hash is SHA-384 over a versioned canonical form of the files (`unio-package-content-v1`: every file in the byte order of its name, framed with its length). It names the entry of the package in the cache and binds the lock to the files that were reviewed. It authenticates nothing by itself ([cryptography.md](cryptography.md)).
 
@@ -49,8 +49,12 @@ The content hash is SHA-384 over a versioned canonical form of the files (`unio-
 | `unio remove ALIAS` | removes the dependency and the packages nothing needs any more from the lock |
 | `unio update [ALIAS...]` | resolves again, with the named dependencies (or all) free to change |
 | `unio install` | installs exactly the packages of `unio.lock` into the cache; it never resolves and never changes the lock |
+| `unio publish --registry DIR --owner OWNER --key KEY` | publishes the package of the working directory into a registry directory, signed (section 7.4) |
+| `unio key new NAME [--dir DIR]`, `key id FILE` | makes an ML-DSA-65 key pair outside any package; prints the identity of a key file |
+| `unio key endorse PUBLIC --key SIGNER --registry DIR [--expires DATE]`, `key revoke PUBLIC\|ID --key ANCHOR --registry DIR` | endorses a signing key, or revokes one, in the trust files of a registry |
+| `unio registry init DIR --anchor ANCHOR`, `registry resign DIR --key KEY` | makes a new registry; signs every archive and index again after a key was revoked |
 
-Every command takes `--offline` (no download: a package that is not in the cache and needs the network is an error), `--unsafe-ok` (the confirmation of T-9, section 6), and `--policy FILE` and `--allow-weaker-sandbox` for its workers, as the other commands do. The commands look for `unio.toml` in the working directory and above it. Nothing is written until everything was fetched, checked, and confirmed: a failed or refused command leaves `unio.toml`, `unio.lock`, and the cache as they were. A path dependency is copied into the cache: after changing its files, run `unio update <alias>`; `unio install` reports the change instead of locking it silently.
+The commands from `add` to `install` take `--offline` (no download: a package that is not in the cache and needs the network is an error), `--unsafe-ok` (the confirmation of T-9, section 6), and `--policy FILE` and `--allow-weaker-sandbox` for its workers, as the other commands do. The commands look for `unio.toml` in the working directory and above it. Nothing is written until everything was fetched, checked, and confirmed: a failed or refused command leaves `unio.toml`, `unio.lock`, and the cache as they were. A path dependency is copied into the cache: after changing its files, run `unio update <alias>`; `unio install` reports the change instead of locking it silently.
 
 `unio install` checks first that the lock matches the manifest (the same aliases, identities, and requirements, and every locked version satisfies the requirements on it); otherwise it stops and suggests `unio update`. For a package that is already in the cache it reads the entry again in a worker and checks its content hash.
 
@@ -58,7 +62,7 @@ Every command takes `--offline` (no download: a package that is not in the cache
 
 ## 4. The cache
 
-The cache is `UNIO_CACHE`, or the cache directory of the system (`$XDG_CACHE_HOME/unio` or `~/.cache/unio` on Linux, `~/Library/Caches/unio` on macOS, `%LOCALAPPDATA%\unio\cache` on Windows). An entry is `packages/<hex digest of the content hash>/` and holds the files of one package. Entries are made in `staging/` by the unpack worker and renamed into place by the tool once the package is checked and confirmed; an entry is never changed afterwards. The workers of the compiler may read only the entries that the lock of their package names (SB-11), never the whole cache.
+The cache is `UNIO_CACHE`, or the cache directory of the system (`$XDG_CACHE_HOME/unio` or `~/.cache/unio` on Linux, `~/Library/Caches/unio` on macOS, `%LOCALAPPDATA%\unio\cache` on Windows). An entry is `packages/<hex digest of the content hash>/` and holds the files of one package. Entries are made in `staging/` by the unpack worker and renamed into place by the tool once the package is checked and confirmed; an entry is never changed afterwards. The workers of the compiler may read only the entries that the lock of their package names (SB-11), never the whole cache. `trust/state` in the cache keeps the highest sequences of signed registry files seen on this machine (section 7.3).
 
 ## 5. The configuration of the operator
 
@@ -67,7 +71,7 @@ Registries and limits are set by the operator, never by a project: `UNIO_PACKAGE
 ```toml
 [registry.main]
 url = "http://registry.example.org/unio"
-allow_unsigned = false      # see section 7
+anchor = "keys/main.pub"    # the trust anchor of the registry, relative to this file (section 7.2)
 
 [limits]
 archive_bytes = 67108864    # the largest archive
@@ -77,7 +81,7 @@ entries = 10000             # entries of one archive
 depth = 32                  # directories in a name
 ```
 
-The download worker may reach only the hosts of the configured registries (SB-12): an archive URL on another host is refused before anything is downloaded, and so is a package that must be downloaded from a registry the configuration does not list.
+The download worker may reach only the hosts of the configured registries (SB-12): an archive URL on another host is refused before anything is downloaded, and so is a package that must be downloaded from a registry the configuration does not list. Every registry needs `anchor`, the public key file of its trust anchor, which the operator obtains independently of the registry (from its operator, in person, or from a channel the operator trusts); a key that only the registry names is never trusted. The former `allow_unsigned`, which installed registry packages unverified, is refused with a message: no option accepts a registry package without a valid signature ([cryptography.md](cryptography.md), section 3: no exception may authorize package installation). Code that has no signature can still be used as an archive dependency, whose `sha384` the root manifest itself names.
 
 ## 6. The review of T-9
 
@@ -85,22 +89,27 @@ Installing a package that has modules marked `unsafe module` (listed in `unsafe_
 
 The confirmation grants nothing. The permissions of a dependency never widen the root package's: a program runs with the permissions of the manifest of its own package narrowed by the policy (SB-2), and the dependency's `[permissions]` are not read for the sandbox. Statically, a call from the root package into a dependency carries the effects of the dependency, so the root's manifest must permit them (E0085), while the modules of the dependency are checked against its own manifest.
 
-## 7. A registry served as static files
+## 7. A signed registry served as static files
 
-A registry is a directory tree that any static HTTP server can serve:
+A registry is a directory tree that any static HTTP server can serve. `unio registry init`, `unio key`, and `unio publish` write it on the publisher's machine; serving it, or copying it to a server, is up to the publisher (no upload service exists):
 
 ```text
-<registry>/index/<owner>/<name>.json
-<registry>/archives/<owner>/<name>/<version>.tar
+<registry>/index/<owner>/<name>.json              the index of a package
+<registry>/index/<owner>/<name>.json.sig          its signature envelope
+<registry>/archives/<owner>/<name>/<version>.tar  the archive of a version (section 8)
 <registry>/archives/<owner>/<name>/<version>.tar.sig
+<registry>/trust/keys                             endorsements of signing keys
+<registry>/trust/revocations                      the revocation list, signed by the anchor
+<registry>/trust/anchor.pub                       the anchor's public key, for reference only
 ```
 
 The index of a package:
 
 ```json
 {
-  "format": "unio-registry-index-1",
+  "format": "unio-registry-index-2",
   "package": "acme/json",
+  "sequence": 3,
   "versions": [
     {
       "version": "1.2.0",
@@ -113,11 +122,58 @@ The index of a package:
 }
 ```
 
-Paths are relative to the registry and may not leave it (`..`, absolute paths, and other hosts are refused); dependencies name packages of the same registry. The manifest in the archive must have the name and version of the index entry and the same dependencies, or the package is refused. The client sends `GET` with `Connection: close`, follows no redirect, and limits the size of every response.
+`sequence` grows with every change of the index. Every version has a signature; format 1, which had none, is refused. Paths are relative to the registry and may not leave it (`..`, absolute paths, and other hosts are refused); dependencies name packages of the same registry. The manifest in the archive must have the name and version of the index entry and the same dependencies, or the package is refused. The client sends `GET` with `Connection: close`, follows no redirect, and limits the size of every response.
 
-Signatures: the unpack worker calls the signature check after the hash of the archive matches and before it unpacks anything. Verification is not implemented yet (T-8, T-8a: the post-quantum envelope, trust anchors, rotation, revocation, and rollback protection are the work of the registry task). Until then a package of a registry is refused, signed or not, unless the operator set `allow_unsigned = true` for that registry; it is then installed with a warning that it was not verified. A present signature is never treated as verified. Path and archive dependencies are not registry packages: the root manifest names their exact content (the archive hash).
+### 7.1 Signatures
 
-Only `http://` is supported: HTTPS needs a TLS implementation, which the compiler does not have (it adds no dependency for it yet; [compiler/README.md](../compiler/README.md)). The content of a package is bound by its hash in the lock and, once verification exists, by its signature, never by the transport.
+Every signature of Unio is an envelope of nine ASCII lines ([cryptography.md](cryptography.md), section 7): the format `unio-envelope-1`, the purpose, the algorithm `ml-dsa-65` and the parameter set `fips204-ml-dsa-65`, the identity of the key (`sha384:` and the SHA-384 of its public key with a domain prefix), the subject, a sequence, the SHA-384 of the whole payload, and the ML-DSA-65 signature (FIPS 204, the pure variant with the context `unio-envelope-1`) of the eight lines before it. Another algorithm, parameter set, format, or purpose is refused, never verified some other way.
+
+| Purpose | Payload | Subject | Sequence | Signed by |
+|---|---|---|---|---|
+| `package-archive` | the archive | `owner/name@version` | 0 | a trusted key |
+| `registry-index` | the index document | `owner/name` | the index's `sequence` | a trusted key |
+| `key-endorsement` | the endorsed key and its expiry | the key's identity | 0 | the anchor or a trusted key |
+| `revocations` | the revocation list | `registry` | the list's sequence | the anchor only |
+| `release-manifest` | the manifest of a release | the release | the release's number | the release key ([compiler/README.md](../compiler/README.md)) |
+
+### 7.2 Trust
+
+- The **anchor** is the key of `anchor` in the operator's configuration. Nothing the registry serves can replace it.
+- **Endorsements** in `trust/keys` make other keys trusted: each names a public key and an optional expiry date (`expires 2027-06-30`, the first day it is no longer trusted, in UTC) and is signed by the anchor or by a key that is trusted itself, at most eight endorsements from the anchor. **Rotation** is an endorsement of the new key, by the old key or by the anchor.
+- The **revocation list** in `trust/revocations` is signed by the anchor alone and has a sequence. A revoked key is not trusted, and neither is a key endorsed only through it, nor anything they signed. After a rotation by the old key, the anchor endorses the new key itself before it revokes the old one.
+- A trust file whose signature does not hold, or that is malformed, refuses the whole installation.
+
+### 7.3 What installation checks
+
+1. The tool downloads `trust/keys` and `trust/revocations` and the envelope of the index as they are, and parses none of them.
+2. The download worker checks the trust files against the anchor and the envelope of the index, with the lowest sequence it may accept, *before* it parses the index: a trusted key, the purpose `registry-index`, the subject of the package, the digest of exactly the downloaded bytes, and a sequence no lower than the floor; the document's `sequence` must equal the signed one.
+3. A version that the lock records must still be in the index with the same archive hash: a registry that removed or replaced a published version is refused (T-8).
+4. The unpack worker checks the SHA-384 of the archive against the index or the lock, then its envelope (`package-archive`, `owner/name@version`, the digest of the archive, a trusted key), and only then reads the archive.
+5. `unio install` from a lock does the same for every package it downloads: a lock edited to name another archive, or a package whose key was revoked since, is refused.
+
+Rollback protection: the floors are the highest sequences seen, of each index and of each registry's revocation list, kept in the cache (`trust/state`), and the `index_sequence` of the lock. An older index or revocation list, validly signed or not, is refused. A failure at any step leaves `unio.toml`, `unio.lock`, and the cache as they were. The lock records the signer and the sequence of every registry package. Packages already in the cache were verified when they were installed and are checked against their content hash.
+
+### 7.4 Publishing and keys
+
+`unio key new NAME` makes an ML-DSA-65 key pair from 32 bytes of the system's random source (if it fails, no key is made): `NAME.key`, the secret seed, readable by its owner only (on Linux and macOS; on Windows the file takes the permissions of its directory), and `NAME.pub`. The default directory is `keys/` in the configuration directory of Unio; a directory inside a package is refused, so that a key is never committed or published, and an existing key is never overwritten. The seed is overwritten with zeros when the tool is done with it. Signing is the deterministic variant of FIPS 204 and needs no randomness.
+
+`unio publish --registry DIR --owner OWNER --key KEY` publishes the package of the working directory as `OWNER/<name>`: it makes the archive with the rules of a path dependency (section 8; the same files always give the same bytes, and with deterministic signing the same signature), refuses a package that contains a secret key file or a dependency that is not a package of the same registry with a version requirement, writes the archive and its envelope, and adds the version to the index with the next sequence and a new envelope. A version that is already published with the same content changes nothing; with other content it is refused: a published version is never replaced or removed, and no command deletes one (T-8). Yanking is not part of the requirements and does not exist.
+
+The procedure of an operator:
+
+```sh
+unio key new anchor --dir /media/offline        # the anchor stays offline
+unio registry init /srv/reg --anchor /media/offline/anchor.key
+unio key new signer                              # in ~/.config/unio/keys/
+unio key endorse ~/.config/unio/keys/signer.pub --key /media/offline/anchor.key --registry /srv/reg
+cd mypackage && unio publish --registry /srv/reg --owner acme --key ~/.config/unio/keys/signer.key
+```
+
+Rotation: `unio key endorse new.pub --key signer.key` (or `--key anchor.key`), then publish with the new key. A compromised key: `unio key revoke signer.pub --key anchor.key --registry /srv/reg`, endorse a replacement with the anchor, and `unio registry resign /srv/reg --key replacement.key`, which checks every archive against its index and signs every archive and index again with the next sequences. Clients give the registry's anchor public key (`trust/anchor.pub` is the same file, for reference) to their operators by a channel they trust.
+
+### 7.5 Transport
+
+Only `http://` is supported in 0.1, by a decision of 2026-11-12: integrity, authenticity, and protection against substitution and rollback come from the signatures and the signed sequences above, whatever the transport. What the transport does not give is not given: an observer of the network sees which packages and versions are downloaded (no privacy), and an attacker on the path can withhold updates or keep serving the newest index the client has already seen (no freshness: indexes carry no signed time). TLS comes with the networking of 0.2, whose RFC defines the profiles ([cryptography.md](cryptography.md), section 5).
 
 ## 8. The archive format
 
@@ -127,8 +183,10 @@ Accepted are regular files and directories with portable relative names: ASCII l
 
 ## 9. What is not done
 
-- Signature verification and the registry service with signed publishing (T-8, T-8a): the next task. The hook above refuses registry packages until then, unless the operator accepts them unverified.
-- HTTPS (no TLS implementation; see section 7).
+- HTTPS, and with it the privacy of downloads: 0.2 (section 7.5). No signed time for indexes, so withheld updates are not detected.
+- An independent security review, fuzzing of the parsers of envelopes, trust files, and indexes (they are strict and bounded, and tested with modified and truncated inputs), and a review of the timing of the ML-DSA implementation: until then no component claims post-quantum compliance (R-6c; [cryptography.md](cryptography.md), section 7).
+- One signature per object: no threshold of several keys; SLH-DSA as an independent alternative is not selected.
+- An upload service: a registry is a directory that its publisher serves or copies.
 - Target and runtime requirements in manifests (language-contracts section 6 asks installation to validate them); 0.1 manifests declare none.
-- `unio publish`, yanking, and removing old cache entries.
+- Yanking, which the requirements do not ask for, and removing old cache entries.
 - On Windows the workers have no restriction of files and the network yet (SB-4), so the download worker connects itself and the tools need the weaker sandbox there ([runtime.md](runtime.md) 9.7).

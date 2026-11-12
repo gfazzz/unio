@@ -8,9 +8,9 @@
 //! ```toml
 //! [registry.main]
 //! url = "http://registry.example.org/unio"
-//! # Until signature verification exists (T-8), a registry's packages are refused unless the
-//! # operator accepts them unsigned for this registry.
-//! allow_unsigned = false
+//! # The trust anchor of the registry: a public key file (`unio key new`) that the operator
+//! # obtained independently of the registry, relative to this file (T-8a).
+//! anchor = "keys/main-anchor.pub"
 //!
 //! [limits]
 //! archive_bytes = 67108864
@@ -32,7 +32,8 @@ use super::http::Url;
 pub struct Registry {
     pub name: String,
     pub url: Url,
-    pub allow_unsigned: bool,
+    /// The public key file of the trust anchor, absolute once loaded.
+    pub anchor: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -99,6 +100,13 @@ impl Config {
             .map_err(|e| format!("the packages configuration {}: {e}", file.display()))?;
         let mut config = Config::parse(&text)
             .map_err(|e| format!("the packages configuration {}: {e}", file.display()))?;
+        let dir = std::path::absolute(&file)
+            .ok()
+            .and_then(|f| f.parent().map(PathBuf::from))
+            .unwrap_or_default();
+        for registry in config.registries.values_mut() {
+            registry.anchor = dir.join(&registry.anchor);
+        }
         config.file = Some(file);
         Ok(config)
     }
@@ -106,7 +114,7 @@ impl Config {
     pub fn parse(text: &str) -> Result<Config, String> {
         let table = toml::parse(text)?;
         let mut config = Config::default();
-        let mut registries: BTreeMap<String, (Option<String>, bool)> = BTreeMap::new();
+        let mut registries: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
         for (key, value) in &table {
             if let Some(rest) = key.strip_prefix("registry.") {
                 let (name, field) = rest
@@ -118,7 +126,17 @@ impl Config {
                 let entry = registries.entry(name.to_string()).or_default();
                 match (field, value) {
                     ("url", TomlValue::Text(url)) => entry.0 = Some(url.clone()),
-                    ("allow_unsigned", TomlValue::Bool(b)) => entry.1 = *b,
+                    ("anchor", TomlValue::Text(path)) if !path.is_empty() => {
+                        entry.1 = Some(path.clone())
+                    }
+                    ("allow_unsigned", _) => {
+                        return Err(format!(
+                            "{key} is no longer accepted: a registry package is installed only \
+                             with a valid ML-DSA-65 signature (T-8, docs/cryptography.md); give \
+                             the registry its trust anchor with anchor = \"FILE.pub\", or use an \
+                             archive dependency whose sha384 the manifest names"
+                        ))
+                    }
                     _ => return Err(format!("unknown or mistyped key {key}")),
                 }
                 continue;
@@ -137,15 +155,21 @@ impl Config {
                 _ => return Err(format!("unknown key {key}")),
             }
         }
-        for (name, (url, allow_unsigned)) in registries {
+        for (name, (url, anchor)) in registries {
             let url = url.ok_or_else(|| format!("registry.{name} has no url"))?;
+            let anchor = anchor.ok_or_else(|| {
+                format!(
+                    "registry.{name} has no anchor: the operator provisions the public key file \
+                     of the registry's trust anchor, anchor = \"FILE.pub\" (T-8a)"
+                )
+            })?;
             let url = Url::parse(&url).map_err(|e| format!("registry.{name}.url: {e}"))?;
             config.registries.insert(
                 name.clone(),
                 Registry {
                     name,
                     url,
-                    allow_unsigned,
+                    anchor: PathBuf::from(anchor),
                 },
             );
         }
@@ -175,17 +199,23 @@ mod tests {
     #[test]
     fn registries_and_limits() {
         let c = Config::parse(
-            "[registry.main]\nurl = \"http://127.0.0.1:9/reg/\"\nallow_unsigned = true\n[limits]\nentries = 5\n",
+            "[registry.main]\nurl = \"http://127.0.0.1:9/reg/\"\nanchor = \"a.pub\"\n[limits]\nentries = 5\n",
         )
         .unwrap();
         let main = &c.registries["main"];
         assert_eq!(main.url.canonical(), "http://127.0.0.1:9/reg");
-        assert!(main.allow_unsigned);
+        assert_eq!(main.anchor, PathBuf::from("a.pub"));
+        assert!(Config::parse("[registry.main]\nurl = \"http://x/\"\n").is_err());
+        assert!(Config::parse(
+            "[registry.main]\nurl = \"http://x/\"\nanchor = \"a.pub\"\nallow_unsigned = true\n"
+        )
+        .unwrap_err()
+        .contains("no longer accepted"));
         assert_eq!(c.limits.entries, 5);
         assert!(c.allows(&Url::parse("http://127.0.0.1:9/other").unwrap()));
         assert!(!c.allows(&Url::parse("http://127.0.0.1:10/reg").unwrap()));
         assert!(Config::parse("[registry.main]\nurl = \"https://x/\"\n").is_err());
-        assert!(Config::parse("[registry.main]\nallow_unsigned = true\n").is_err());
+        assert!(Config::parse("[registry.main]\nanchor = \"a.pub\"\n").is_err());
         assert!(Config::parse("[limits]\nentries = 0\n").is_err());
         assert!(Config::parse("colour = 1\n").is_err());
     }

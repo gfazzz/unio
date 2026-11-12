@@ -5,16 +5,17 @@
 //! the download worker that cannot reach any other host; the review of T-9, which grants
 //! nothing; and no code of a package run during installation or a check.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use unio::envelope::SecretKey;
 use unio::package::archive::{self, Entries, Item};
+use unio::package::registry;
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
@@ -30,23 +31,35 @@ fn sha(bytes: &[u8]) -> String {
 
 // ---------------------------------------------------------------- a static registry
 
-/// A static file server on 127.0.0.1: the layout of a registry (index JSON, archives,
-/// signatures) as plain files, as any static server would serve them.
+/// A static file server on 127.0.0.1 over a registry directory (index JSON, archives,
+/// signatures, trust files), as any static server would serve it. The registry is made with
+/// the library of `unio publish`; its trust anchor and an endorsed signing key are fixed test
+/// keys.
 struct Server {
     port: u16,
-    files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    root: PathBuf,
+    anchor: SecretKey,
+    signer: SecretKey,
     requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
 }
 
+static SERVERS: AtomicU32 = AtomicU32::new(0);
+
 impl Server {
     fn start() -> Server {
+        let n = SERVERS.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("unio-registry-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let anchor = SecretKey::from_seed(&[1; 32]);
+        let signer = SecretKey::from_seed(&[2; 32]);
+        registry::init(&root, &anchor).unwrap();
+        registry::endorse(&root, &anchor, &signer.public(), None).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let files: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
         let requests: Arc<Mutex<Vec<String>>> = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
-        let (f, r, s) = (files.clone(), requests.clone(), stop.clone());
+        let (dir, r, s) = (root.clone(), requests.clone(), stop.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if s.load(Ordering::SeqCst) {
@@ -61,7 +74,10 @@ impl Server {
                 let head = String::from_utf8_lossy(&head).into_owned();
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                 r.lock().unwrap().push(path.clone());
-                let body = f.lock().unwrap().get(&path).cloned();
+                let body = path
+                    .strip_prefix("/reg/")
+                    .filter(|p| !p.split('/').any(|c| c == ".."))
+                    .and_then(|p| fs::read(dir.join(p)).ok());
                 let response = match body {
                     Some(body) => {
                         let mut out = format!(
@@ -79,7 +95,9 @@ impl Server {
         });
         Server {
             port,
-            files,
+            root,
+            anchor,
+            signer,
             requests,
             stop,
         }
@@ -89,24 +107,43 @@ impl Server {
         format!("http://127.0.0.1:{}/reg", self.port)
     }
 
-    fn put(&self, path: &str, body: Vec<u8>) {
-        self.files
-            .lock()
-            .unwrap()
-            .insert(format!("/reg/{path}"), body);
+    fn path(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
     }
 
-    /// Publishes versions of `owner/name`: (version, files, dependencies as (alias, package,
-    /// requirement)).
+    fn put(&self, relative: &str, body: Vec<u8>) {
+        let path = self.path(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    fn get(&self, relative: &str) -> Vec<u8> {
+        fs::read(self.path(relative)).unwrap()
+    }
+
+    /// Publishes versions of `owner/name` with the signing key: (version, files,
+    /// dependencies as (alias, package, requirement)).
     #[allow(clippy::type_complexity)]
     fn publish(
         &self,
         package: &str,
         versions: &[(&str, Vec<(&str, &str)>, Vec<(&str, &str, &str)>)],
     ) {
-        let name = package.split('/').nth(1).unwrap();
-        let mut entries = Vec::new();
+        self.publish_with(&self.signer, package, versions);
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn publish_with(
+        &self,
+        key: &SecretKey,
+        package: &str,
+        versions: &[(&str, Vec<(&str, &str)>, Vec<(&str, &str, &str)>)],
+    ) {
+        let (owner, name) = package.split_once('/').unwrap();
         for (version, files, deps) in versions {
+            let dir = self.root.with_extension(format!("src-{name}-{version}"));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
             let mut manifest = format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n");
             if !deps.is_empty() {
                 manifest.push_str("\n[dependencies]\n");
@@ -116,28 +153,13 @@ impl Server {
                     ));
                 }
             }
-            let mut list: Vec<(&str, String)> = vec![("unio.toml", manifest)];
-            list.extend(files.iter().map(|(n, t)| (*n, t.to_string())));
-            let bytes = tar(&list);
-            let path = format!("archives/{package}/{version}.tar");
-            let deps_json: Vec<String> = deps
-                .iter()
-                .map(|(a, p, r)| {
-                    format!(r#"{{"alias": "{a}", "package": "{p}", "version": "{r}"}}"#)
-                })
-                .collect();
-            entries.push(format!(
-                r#"{{"version": "{version}", "archive": "{path}", "sha384": "{}", "dependencies": [{}]}}"#,
-                sha(&bytes),
-                deps_json.join(", ")
-            ));
-            self.put(&path, bytes);
+            fs::write(dir.join("unio.toml"), manifest).unwrap();
+            for (file, text) in files {
+                fs::write(dir.join(file), text).unwrap();
+            }
+            registry::publish(&self.root, owner, &dir, key).unwrap();
+            fs::remove_dir_all(&dir).unwrap();
         }
-        let index = format!(
-            r#"{{"format": "unio-registry-index-1", "package": "{package}", "versions": [{}]}}"#,
-            entries.join(", ")
-        );
-        self.put(&format!("index/{package}.json"), index.into_bytes());
     }
 
     fn requested(&self) -> Vec<String> {
@@ -149,6 +171,7 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -216,6 +239,16 @@ impl Project {
     /// The packages configuration of the operator.
     fn config(&self, body: &str) {
         self.write("packages.toml", body);
+    }
+
+    /// Configures the registry of the server as `main`, with its trust anchor provisioned by
+    /// the operator next to the configuration.
+    fn use_registry(&self, server: &Server) {
+        self.write("anchor.pub", &server.anchor.public().to_file());
+        self.config(&format!(
+            "[registry.main]\nurl = \"{}\"\nanchor = \"anchor.pub\"\n",
+            server.url()
+        ));
     }
 
     /// A package `util` in `dir` with `strings.shout`.
@@ -319,10 +352,7 @@ fn a_path_dependency_is_locked_installed_and_imported() {
 fn a_registry_dependency_and_its_dependency_run_end_to_end() {
     let server = Server::start();
     let p = Project::new("registry");
-    p.config(&format!(
-        "[registry.main]\nurl = \"{}\"\nallow_unsigned = true\n",
-        server.url()
-    ));
+    p.use_registry(&server);
     server.publish(
         "acme/text",
         &[
@@ -353,11 +383,16 @@ fn a_registry_dependency_and_its_dependency_run_end_to_end() {
     ]);
     ok(&add);
     assert!(
-        all(&add).contains("without signature verification"),
+        all(&add).contains("verified acme/util 1.2.0: ML-DSA-65 signature of the key"),
         "{}",
         all(&add)
     );
     let lock = p.read("app/unio.lock");
+    assert!(
+        lock.contains(&format!("signer = \"{}\"", server.signer.public().id)),
+        "{lock}"
+    );
+    assert!(lock.contains("index_sequence = 3"), "{lock}");
     let origin = format!("registry+http://127.0.0.1:{}/reg", server.port);
     assert!(
         lock.contains(&format!("id = \"{origin}#acme/util\"")),
@@ -384,10 +419,7 @@ fn a_registry_dependency_and_its_dependency_run_end_to_end() {
 fn a_locked_build_and_an_offline_install_touch_no_network() {
     let server = Server::start();
     let p = Project::new("offline");
-    p.config(&format!(
-        "[registry.main]\nurl = \"{}\"\nallow_unsigned = true\n",
-        server.url()
-    ));
+    p.use_registry(&server);
     server.publish(
         "acme/util",
         &[(
@@ -462,10 +494,7 @@ fn a_hash_mismatch_is_refused_before_unpacking() {
     ok(&p.unio(&["run", "main.unio"]));
     // A registry index whose hash does not match its archive is refused too.
     let server = Server::start();
-    p.config(&format!(
-        "[registry.main]\nurl = \"{}\"\nallow_unsigned = true\n",
-        server.url()
-    ));
+    p.use_registry(&server);
     server.publish("acme/other", &[("1.0.0", vec![], vec![])]);
     server.put(
         "archives/acme/other/1.0.0.tar",
@@ -658,10 +687,7 @@ fn the_download_worker_reaches_only_the_configured_registry() {
     other.set_nonblocking(true).unwrap();
     let other_address = other.local_addr().unwrap();
     let p = Project::new("download");
-    p.config(&format!(
-        "[registry.main]\nurl = \"{}\"\nallow_unsigned = true\n",
-        server.url()
-    ));
+    p.use_registry(&server);
     server.publish(
         "acme/util",
         &[(
@@ -715,12 +741,11 @@ fn the_download_worker_reaches_only_the_configured_registry() {
 }
 
 #[test]
-fn https_and_unsigned_packages_are_refused_unless_the_operator_allows_them() {
+fn https_unsigned_and_unanchored_registries_are_refused() {
     let server = Server::start();
     let p = Project::new("unsigned");
-    p.config(&format!("[registry.main]\nurl = \"{}\"\n", server.url()));
     server.publish("acme/util", &[("1.0.0", vec![], vec![])]);
-    let out = p.unio(&[
+    let add = [
         "add",
         "util",
         "1",
@@ -728,22 +753,42 @@ fn https_and_unsigned_packages_are_refused_unless_the_operator_allows_them() {
         "acme/util",
         "--registry",
         "main",
-    ]);
-    refused(&out, "does not verify registry signatures yet");
+    ];
+    // No trust anchor provisioned by the operator: refused before any download.
+    p.config(&format!("[registry.main]\nurl = \"{}\"\n", server.url()));
+    refused(&p.unio(&add), "has no anchor");
+    // The option that accepted unverified packages is gone.
+    p.write("anchor.pub", &server.anchor.public().to_file());
+    p.config(&format!(
+        "[registry.main]\nurl = \"{}\"\nanchor = \"anchor.pub\"\nallow_unsigned = true\n",
+        server.url()
+    ));
+    refused(&p.unio(&add), "allow_unsigned is no longer accepted");
+    // An anchor file that is missing.
+    p.config(&format!(
+        "[registry.main]\nurl = \"{}\"\nanchor = \"missing.pub\"\n",
+        server.url()
+    ));
+    refused(&p.unio(&add), "the trust anchor of the registry 'main'");
+    // An index of format 1, without signatures.
+    p.use_registry(&server);
+    let index = String::from_utf8(server.get("index/acme/util.json")).unwrap();
+    server.put(
+        "index/acme/util.json",
+        index.replace("index-2", "index-1").into_bytes(),
+    );
+    refused(&p.unio(&add), "the index of acme/util is refused");
     assert!(!p.path("app/unio.lock").exists());
     assert_eq!(p.cache_entries(), 0);
-    p.config("[registry.main]\nurl = \"https://registry.example.org/\"\n");
-    refused(&p.unio(&["install"]), "HTTPS is not supported yet");
+    p.config("[registry.main]\nurl = \"https://registry.example.org/\"\nanchor = \"anchor.pub\"\n");
+    refused(&p.unio(&["install"]), "HTTPS is not supported");
 }
 
 #[test]
 fn incompatible_requirements_fail_with_their_paths() {
     let server = Server::start();
     let p = Project::new("conflict");
-    p.config(&format!(
-        "[registry.main]\nurl = \"{}\"\nallow_unsigned = true\n",
-        server.url()
-    ));
+    p.use_registry(&server);
     server.publish(
         "acme/d",
         &[("1.0.0", vec![], vec![]), ("2.0.0", vec![], vec![])],
@@ -912,4 +957,596 @@ fn the_unpack_worker_writes_only_its_cache_entry() {
     assert!(!err.contains("SECRET"));
     let run = p.unio(&["run", "main.unio"]);
     ok(&run);
+}
+
+// ---------------------------------------------------------------- signed registries (T-8, T-8a)
+
+const ADD_UTIL: [&str; 7] = [
+    "add",
+    "util",
+    "1",
+    "--package",
+    "acme/util",
+    "--registry",
+    "main",
+];
+
+const SHOUT: &str = "public function shout(t as Text) returns Text:\n    return t.to_upper()\n";
+
+/// A secret key file of a test key, outside the package directory.
+fn key_file(p: &Project, name: &str, key: &SecretKey) -> String {
+    p.write(&format!("keys/{name}.key"), &key.to_file());
+    p.write(&format!("keys/{name}.pub"), &key.public().to_file());
+    p.path(&format!("keys/{name}.key")).display().to_string()
+}
+
+#[track_caller]
+fn nothing_installed(p: &Project) {
+    assert!(!p.path("app/unio.lock").exists(), "a lock was written");
+    assert_eq!(p.cache_entries(), 0, "a cache entry was made");
+    let staging = fs::read_dir(p.path("cache/staging")).map_or(0, |d| d.count());
+    assert_eq!(staging, 0, "something was left in the staging area");
+}
+
+/// The whole path with the commands of the operator and the publisher: keys, a registry
+/// directory, `unio publish`, a static HTTP server on 127.0.0.1, and a verified install.
+#[test]
+fn publish_serve_and_install_verified_end_to_end() {
+    let p = Project::new("publish");
+    let unio = |dir: &str, args: &[&str]| {
+        let mut c = p.command(args);
+        c.current_dir(p.path(dir));
+        c.output().unwrap()
+    };
+    // Keys are never made inside a package.
+    refused(
+        &unio("app", &["key", "new", "anchor", "--dir", "secrets"]),
+        "never kept in a project",
+    );
+    ok(&unio(".", &["key", "new", "anchor", "--dir", "keys"]));
+    ok(&unio(".", &["key", "new", "signer", "--dir", "keys"]));
+    assert!(SecretKey::parse_file(&fs::read(p.path("keys/anchor.key")).unwrap()).is_ok());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(p.path("keys/signer.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "the secret key is readable by others");
+    }
+    refused(
+        &unio(".", &["key", "new", "signer", "--dir", "keys"]),
+        "already exists",
+    );
+    let reg = p.path("www/reg").display().to_string();
+    ok(&unio(
+        ".",
+        &["registry", "init", &reg, "--anchor", "keys/anchor.key"],
+    ));
+    ok(&unio(
+        ".",
+        &[
+            "key",
+            "endorse",
+            "keys/signer.pub",
+            "--key",
+            "keys/anchor.key",
+            "--registry",
+            &reg,
+        ],
+    ));
+    p.util("util", "1.0.0");
+    let publish = [
+        "publish",
+        "--registry",
+        &reg,
+        "--owner",
+        "acme",
+        "--key",
+        "../keys/signer.key",
+    ];
+    let out = unio("util", &publish);
+    ok(&out);
+    assert!(
+        all(&out).contains("published acme/util 1.0.0"),
+        "{}",
+        all(&out)
+    );
+    let tar = fs::read(p.path("www/reg/archives/acme/util/1.0.0.tar")).unwrap();
+    let sig = fs::read(p.path("www/reg/archives/acme/util/1.0.0.tar.sig")).unwrap();
+    // The same content again changes nothing; other content under the version is refused.
+    ok(&unio("util", &publish));
+    p.write("util/strings.unio", SHOUT);
+    refused(&unio("util", &publish), "never replaced or removed");
+    assert_eq!(
+        fs::read(p.path("www/reg/archives/acme/util/1.0.0.tar")).unwrap(),
+        tar
+    );
+    // A secret key in the package is never published.
+    p.write(
+        "util/unio.toml",
+        "[package]\nname = \"util\"\nversion = \"1.1.0\"\n",
+    );
+    fs::copy(p.path("keys/signer.key"), p.path("util/stray.key")).unwrap();
+    refused(&unio("util", &publish), "secret key file");
+    fs::remove_file(p.path("util/stray.key")).unwrap();
+    ok(&unio("util", &publish));
+    // Archives are deterministic: another registry gets the same bytes and, with deterministic
+    // ML-DSA, the same signature.
+    p.util("copy/util", "1.0.0");
+    let other = p.path("www/other").display().to_string();
+    ok(&unio(
+        ".",
+        &["registry", "init", &other, "--anchor", "keys/anchor.key"],
+    ));
+    let publish2 = [
+        "publish",
+        "--registry",
+        &other,
+        "--owner",
+        "acme",
+        "--key",
+        "../../keys/signer.key",
+    ];
+    ok(&unio("copy/util", &publish2));
+    assert_eq!(
+        fs::read(p.path("www/other/archives/acme/util/1.0.0.tar")).unwrap(),
+        tar
+    );
+    assert_eq!(
+        fs::read(p.path("www/other/archives/acme/util/1.0.0.tar.sig")).unwrap(),
+        sig
+    );
+    // Served by a plain static server, installed verified.
+    let server = Server::start();
+    fs::remove_dir_all(&server.root).unwrap();
+    fs::rename(p.path("www/reg"), &server.root).unwrap();
+    fs::copy(p.path("keys/anchor.pub"), p.path("anchor.pub")).unwrap();
+    p.config(&format!(
+        "[registry.main]\nurl = \"{}\"\nanchor = \"anchor.pub\"\n",
+        server.url()
+    ));
+    let out = p.unio(&ADD_UTIL);
+    ok(&out);
+    assert!(
+        all(&out).contains("verified acme/util 1.1.0"),
+        "{}",
+        all(&out)
+    );
+    let run = p.unio(&["run", "main.unio"]);
+    ok(&run);
+    assert_eq!(text(&run.stdout), "HELLO\n");
+}
+
+type Tamper = Box<dyn Fn(&Server)>;
+
+/// Every change an attacker on the path or on the server can make without the signing keys
+/// is refused, before anything of an archive is unpacked, and nothing is installed.
+#[test]
+fn tampered_and_untrusted_registry_files_are_refused_before_unpacking() {
+    let other_tar = tar(&[(
+        "unio.toml",
+        "[package]\nname = \"util\"\nversion = \"1.0.0\"\n# evil\n".into(),
+    )]);
+    let stranger = SecretKey::from_seed(&[9; 32]);
+    let ot = other_tar.clone();
+    let cases: Vec<(&str, Tamper, &str)> = vec![
+        (
+            "tampered archive",
+            Box::new(move |s| s.put("archives/acme/util/1.0.0.tar", ot.clone())),
+            "refused before unpacking",
+        ),
+        (
+            "tampered archive and index",
+            Box::new(move |s| {
+                let old = sha(&s.get("archives/acme/util/1.0.0.tar"));
+                s.put("archives/acme/util/1.0.0.tar", other_tar.clone());
+                let index = String::from_utf8(s.get("index/acme/util.json")).unwrap();
+                s.put(
+                    "index/acme/util.json",
+                    index.replace(&old, &sha(&other_tar)).into_bytes(),
+                );
+            }),
+            "the payload has the digest",
+        ),
+        (
+            "signed by a key nobody endorsed",
+            Box::new(move |s| {
+                fs::remove_dir_all(s.path("index")).unwrap();
+                s.publish_with(
+                    &stranger,
+                    "acme/util",
+                    &[("1.0.0", vec![("strings.unio", SHOUT)], vec![])],
+                );
+            }),
+            "which is not trusted",
+        ),
+        (
+            "revoked key",
+            Box::new(|s| {
+                registry::revoke(&s.root, &s.anchor, &s.signer.public().id).unwrap();
+            }),
+            "it is revoked",
+        ),
+        (
+            "unknown algorithm",
+            Box::new(|s| {
+                let sig = String::from_utf8(s.get("archives/acme/util/1.0.0.tar.sig")).unwrap();
+                s.put(
+                    "archives/acme/util/1.0.0.tar.sig",
+                    sig.replace("ml-dsa-65", "ml-dsa-87").into_bytes(),
+                );
+            }),
+            "is not accepted",
+        ),
+        (
+            "unknown index algorithm",
+            Box::new(|s| {
+                let sig = String::from_utf8(s.get("index/acme/util.json.sig")).unwrap();
+                s.put(
+                    "index/acme/util.json.sig",
+                    sig.replace("algorithm ml-dsa-65", "algorithm ed25519")
+                        .into_bytes(),
+                );
+            }),
+            "only ml-dsa-65",
+        ),
+        (
+            "truncated signature",
+            Box::new(|s| {
+                let mut sig = s.get("archives/acme/util/1.0.0.tar.sig");
+                sig.truncate(sig.len() - 100);
+                s.put("archives/acme/util/1.0.0.tar.sig", sig);
+            }),
+            "refused before unpacking",
+        ),
+        (
+            "a changed byte of the signature",
+            Box::new(|s| {
+                let mut sig = s.get("archives/acme/util/1.0.0.tar.sig");
+                let at = sig.len() - 20;
+                sig[at] = if sig[at] == b'0' { b'1' } else { b'0' };
+                s.put("archives/acme/util/1.0.0.tar.sig", sig);
+            }),
+            "is not valid",
+        ),
+        (
+            "no archive signature",
+            Box::new(|s| fs::remove_file(s.path("archives/acme/util/1.0.0.tar.sig")).unwrap()),
+            "404",
+        ),
+        (
+            "no index signature",
+            Box::new(|s| fs::remove_file(s.path("index/acme/util.json.sig")).unwrap()),
+            "404",
+        ),
+        (
+            "the signature of another version",
+            Box::new(|s| {
+                s.publish(
+                    "acme/util",
+                    &[("0.9.0", vec![("strings.unio", SHOUT)], vec![])],
+                );
+                let sig = s.get("archives/acme/util/0.9.0.tar.sig");
+                s.put("archives/acme/util/1.0.0.tar.sig", sig);
+            }),
+            "refused before unpacking",
+        ),
+        (
+            "the index signature of another package",
+            Box::new(|s| {
+                s.publish("acme/other", &[("1.0.0", vec![], vec![])]);
+                let sig = s.get("index/acme/other.json.sig");
+                s.put("index/acme/util.json.sig", sig);
+            }),
+            "the index of acme/util is refused",
+        ),
+        (
+            "a tampered endorsement",
+            Box::new(|s| {
+                let keys = String::from_utf8(s.get("trust/keys")).unwrap();
+                s.put(
+                    "trust/keys",
+                    keys.replacen("expires never", "expires 2999-12-31", 1)
+                        .into_bytes(),
+                );
+            }),
+            "the endorsement of the key",
+        ),
+        (
+            "a revocation list not signed by the anchor",
+            Box::new(|s| {
+                let list = unio::package::trust::Revocations {
+                    sequence: 9,
+                    revoked: Default::default(),
+                };
+                s.put(
+                    "trust/revocations",
+                    list.file(&s.signer).unwrap().into_bytes(),
+                );
+            }),
+            "not by the trust anchor",
+        ),
+    ];
+    for (name, tamper, expected) in cases {
+        let server = Server::start();
+        server.publish(
+            "acme/util",
+            &[("1.0.0", vec![("strings.unio", SHOUT)], vec![])],
+        );
+        tamper(&server);
+        let p = Project::new(&format!("tamper-{}", name.replace(' ', "-")));
+        p.use_registry(&server);
+        let out = p.unio(&ADD_UTIL);
+        refused(&out, expected);
+        assert!(
+            !all(&out).contains("verified acme/util"),
+            "{name}:\n{}",
+            all(&out)
+        );
+        nothing_installed(&p);
+    }
+}
+
+/// Rotation by the old key and by the anchor, revocation that breaks a chain, expiry, and the
+/// recovery after a compromised signing key (`unio registry resign`).
+#[test]
+fn key_rotation_revocation_expiry_and_recovery() {
+    let server = Server::start();
+    let p = Project::new("rotation");
+    p.use_registry(&server);
+    let anchor = key_file(&p, "anchor", &server.anchor);
+    let old = key_file(&p, "old", &server.signer);
+    let new_key = SecretKey::from_seed(&[3; 32]);
+    let new = key_file(&p, "new", &new_key);
+    let reg = server.root.display().to_string();
+    // Rotation: the old key endorses the new one, which signs from now on.
+    ok(&p.unio(&[
+        "key",
+        "endorse",
+        &p.path("keys/new.pub").display().to_string(),
+        "--key",
+        &old,
+        "--registry",
+        &reg,
+    ]));
+    server.publish_with(
+        &new_key,
+        "acme/util",
+        &[("1.0.0", vec![("strings.unio", SHOUT)], vec![])],
+    );
+    ok(&p.unio(&ADD_UTIL));
+    // The anchor revokes the old key: the new one, endorsed only by it, is no longer trusted.
+    let old_id = server.signer.public().id;
+    ok(&p.unio(&[
+        "key",
+        "revoke",
+        &old_id,
+        "--key",
+        &anchor,
+        "--registry",
+        &reg,
+    ]));
+    refused(
+        &p.unio(&["key", "revoke", &old_id, "--key", &new, "--registry", &reg]),
+        "only the anchor revokes",
+    );
+    let fresh = Project::new("rotation-fresh");
+    fresh.use_registry(&server);
+    refused(&fresh.unio(&ADD_UTIL), "neither the trust anchor");
+    nothing_installed(&fresh);
+    // The anchor endorses the new key itself: trusted again.
+    ok(&p.unio(&[
+        "key",
+        "endorse",
+        &p.path("keys/new.pub").display().to_string(),
+        "--key",
+        &anchor,
+        "--registry",
+        &reg,
+    ]));
+    ok(&fresh.unio(&ADD_UTIL));
+    // An expired endorsement.
+    let short = SecretKey::from_seed(&[4; 32]);
+    key_file(&p, "short", &short);
+    ok(&p.unio(&[
+        "key",
+        "endorse",
+        &p.path("keys/short.pub").display().to_string(),
+        "--key",
+        &anchor,
+        "--registry",
+        &reg,
+        "--expires",
+        "2000-01-01",
+    ]));
+    server.publish_with(&short, "acme/other", &[("1.0.0", vec![], vec![])]);
+    let other = [
+        "add",
+        "other",
+        "1",
+        "--package",
+        "acme/other",
+        "--registry",
+        "main",
+    ];
+    refused(&fresh.unio(&other), "expired on 2000-01-01");
+    // Recovery: the new key is compromised and revoked; a replacement endorsed by the anchor
+    // signs every archive and index again.
+    ok(&p.unio(&[
+        "key",
+        "revoke",
+        &p.path("keys/new.pub").display().to_string(),
+        "--key",
+        &anchor,
+        "--registry",
+        &reg,
+    ]));
+    let third = Project::new("rotation-third");
+    third.use_registry(&server);
+    refused(&third.unio(&ADD_UTIL), "it is revoked");
+    let spare = SecretKey::from_seed(&[5; 32]);
+    let spare_file = key_file(&p, "spare", &spare);
+    ok(&p.unio(&[
+        "key",
+        "endorse",
+        &p.path("keys/spare.pub").display().to_string(),
+        "--key",
+        &anchor,
+        "--registry",
+        &reg,
+    ]));
+    ok(&p.unio(&["registry", "resign", &reg, "--key", &spare_file]));
+    let out = third.unio(&ADD_UTIL);
+    ok(&out);
+    assert!(all(&out).contains(&spare.public().id), "{}", all(&out));
+    // The anchor cannot be revoked by itself.
+    refused(
+        &p.unio(&[
+            "key",
+            "revoke",
+            &server.anchor.public().id,
+            "--key",
+            &anchor,
+            "--registry",
+            &reg,
+        ]),
+        "cannot revoke itself",
+    );
+}
+
+/// An older index or an older revocation list, though validly signed, is refused once a newer
+/// one was seen: by the floor of this machine and by the floor of the lock.
+#[test]
+fn rollback_of_an_index_or_of_the_revocation_list_is_refused() {
+    let server = Server::start();
+    server.publish(
+        "acme/util",
+        &[("1.0.0", vec![("strings.unio", SHOUT)], vec![])],
+    );
+    let old_index = server.get("index/acme/util.json");
+    let old_sig = server.get("index/acme/util.json.sig");
+    let old_revocations = server.get("trust/revocations");
+    server.publish(
+        "acme/util",
+        &[("1.1.0", vec![("strings.unio", SHOUT)], vec![])],
+    );
+    registry::revoke(
+        &server.root,
+        &server.anchor,
+        &SecretKey::from_seed(&[8; 32]).public().id,
+    )
+    .unwrap();
+    let new_index = server.get("index/acme/util.json");
+    let new_sig = server.get("index/acme/util.json.sig");
+    let p = Project::new("rollback");
+    p.use_registry(&server);
+    ok(&p.unio(&ADD_UTIL));
+    let lock = p.read("app/unio.lock");
+    assert!(lock.contains("index_sequence = 2"), "{lock}");
+    // The old index, served again: refused by the floor of this machine...
+    server.put("index/acme/util.json", old_index.clone());
+    server.put("index/acme/util.json.sig", old_sig.clone());
+    refused(&p.unio(&["update"]), "a rollback to an older index");
+    // ...and by the lock, without the state of this machine.
+    fs::remove_file(p.path("cache/trust/state")).unwrap();
+    refused(&p.unio(&["update"]), "a rollback to an older index");
+    assert_eq!(p.read("app/unio.lock"), lock);
+    // Without the lock, the floor of this machine still holds.
+    server.put("index/acme/util.json", new_index);
+    server.put("index/acme/util.json.sig", new_sig);
+    ok(&p.unio(&["update"]));
+    ok(&p.unio(&["remove", "util"]));
+    server.put("index/acme/util.json", old_index);
+    server.put("index/acme/util.json.sig", old_sig);
+    refused(&p.unio(&ADD_UTIL), "a rollback to an older index");
+    // An older revocation list.
+    server.publish(
+        "acme/util",
+        &[("1.2.0", vec![("strings.unio", SHOUT)], vec![])],
+    );
+    server.put("trust/revocations", old_revocations);
+    refused(&p.unio(&ADD_UTIL), "rollback of the trust metadata");
+}
+
+/// `unio install` from a lock verifies the signature again: a revoked key, or a lock edited to
+/// point at another archive, is refused.
+#[test]
+fn install_from_the_lock_verifies_the_signature_again() {
+    let server = Server::start();
+    server.publish(
+        "acme/util",
+        &[
+            ("1.0.0", vec![("strings.unio", SHOUT)], vec![]),
+            (
+                "2.0.0",
+                vec![(
+                    "strings.unio",
+                    "public function shout(t as Text) returns Text:\n    return \"pwned\"\n",
+                )],
+                vec![],
+            ),
+        ],
+    );
+    let p = Project::new("relock");
+    p.use_registry(&server);
+    ok(&p.unio(&ADD_UTIL));
+    let lock = p.read("app/unio.lock");
+    fs::remove_dir_all(p.path("cache/packages")).unwrap();
+    // A lock edited to fetch the archive of 2.0.0 under 1.0.0, with its hash.
+    let v1 = sha(&server.get("archives/acme/util/1.0.0.tar"));
+    let v2 = sha(&server.get("archives/acme/util/2.0.0.tar"));
+    let edited = lock.replace(&v1, &v2).replace(
+        "archives/acme/util/1.0.0.tar\"",
+        "archives/acme/util/2.0.0.tar\"",
+    );
+    p.write("app/unio.lock", &edited);
+    refused(&p.unio(&["install"]), "refused before unpacking");
+    let edited = edited.replace("1.0.0.tar.sig", "2.0.0.tar.sig");
+    p.write("app/unio.lock", &edited);
+    refused(&p.unio(&["install"]), "refused before unpacking");
+    assert_eq!(p.cache_entries(), 0);
+    // The real lock, after the signing key was revoked.
+    p.write("app/unio.lock", &lock);
+    registry::revoke(&server.root, &server.anchor, &server.signer.public().id).unwrap();
+    refused(&p.unio(&["install"]), "it is revoked");
+    assert_eq!(p.cache_entries(), 0);
+}
+
+/// A registry that removes or replaces a locked version, even with a valid signature, is
+/// refused on update (T-8: no deletion of published versions).
+#[test]
+fn a_registry_that_removes_a_locked_version_is_refused() {
+    let server = Server::start();
+    server.publish(
+        "acme/util",
+        &[("1.0.0", vec![("strings.unio", SHOUT)], vec![])],
+    );
+    let p = Project::new("removed");
+    p.use_registry(&server);
+    ok(&p.unio(&ADD_UTIL));
+    server.publish(
+        "acme/util",
+        &[("1.0.1", vec![("strings.unio", SHOUT)], vec![])],
+    );
+    let published = String::from_utf8(server.get("index/acme/util.json")).unwrap();
+    let mut index2 = unio::package::index::Index::parse(&published, "acme/util").unwrap();
+    index2.versions.retain(|v| v.version.to_string() != "1.0.0");
+    index2.sequence += 1;
+    let json = index2.to_json();
+    let sealed = unio::envelope::seal(
+        &server.signer,
+        "registry-index",
+        "acme/util",
+        index2.sequence,
+        json.as_bytes(),
+    )
+    .unwrap();
+    server.put("index/acme/util.json", json.into_bytes());
+    server.put("index/acme/util.json.sig", sealed.into_bytes());
+    refused(
+        &p.unio(&["update"]),
+        "no longer lists the locked version 1.0.0",
+    );
 }

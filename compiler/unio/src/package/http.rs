@@ -1,9 +1,9 @@
 //! The HTTP client of the download worker (SB-12): `GET` over a connection the tool opened to
 //! a configured registry, with `Connection: close`, no redirects, and a limit on the size of
-//! the response. Only `http://` URLs: HTTPS needs a TLS implementation, which this build does
-//! not have (the compiler adds no dependency for it yet; compiler/README.md). The content of a
-//! package is bound by its hash in the lock and, for a registry, by its signature, never by
-//! the transport (docs/cryptography.md, section 4).
+//! the response. Only `http://` URLs: Unio 0.1 has no TLS (a decision of 2026-11-12; TLS comes
+//! with the networking RFC of 0.2, which defines its profiles, docs/cryptography.md). The
+//! content of a package is bound by its ML-DSA-65 signature, its hash, and the signed index,
+//! never by the transport (docs/cryptography.md, section 4); what is downloaded is not private.
 
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -35,10 +35,9 @@ impl Url {
     pub fn parse(text: &str) -> Result<Url, String> {
         if text.starts_with("https://") {
             return Err(format!(
-                "{text}: HTTPS is not supported yet: this build has no TLS implementation \
-                 (the compiler adds no dependency for it, compiler/README.md); use an http:// \
-                 registry, whose packages are bound by their hashes and signatures, not by the \
-                 transport"
+                "{text}: HTTPS is not supported: Unio 0.1 has no TLS (it comes with the \
+                 networking of 0.2); use an http:// registry, whose packages are installed only \
+                 with a valid ML-DSA-65 signature and hash, whatever the transport"
             ));
         }
         let rest = text

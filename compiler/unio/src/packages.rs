@@ -23,6 +23,7 @@ use unio::package::lock::{self, Edge, Entry, Lock};
 use unio::package::manifest::{self, Dependency, Manifest, Source};
 use unio::package::resolve::{self, Candidate, Provider, Requirement};
 use unio::package::semver::{Req, Version};
+use unio::package::trust::{self, Bundle, Trust};
 use unio::package::{edit, signature, tree};
 use unio::sandbox_cli;
 use unio_runtime::sandbox::Scope;
@@ -33,6 +34,8 @@ use crate::worker;
 const INDEX_LIMIT: u64 = 8 << 20;
 /// The largest detached signature the download worker accepts.
 const SIGNATURE_LIMIT: u64 = 1 << 20;
+/// The file of the cache that keeps the highest sequences seen (rollback protection).
+const STATE_FILE: &str = "trust/state";
 
 // ---------------------------------------------------------------- what the unpack worker reports
 
@@ -50,6 +53,10 @@ struct Report {
     /// (alias, kind, a, b, requirement): kind 0 path (a), 1 registry (a registry name or
     /// empty, b package), 2 archive (a location, b SHA-384).
     dependencies: Vec<(String, u32, String, String, String)>,
+    /// For a registry package: the key whose signature was verified, and the sequence of the
+    /// revocation list it was verified with.
+    signer: String,
+    revocations: u64,
 }
 
 fn encode_list(out: &mut worker::Enc, items: &[String]) {
@@ -67,7 +74,7 @@ fn decode_list(d: &mut worker::Dec) -> Option<Vec<String>> {
 impl Report {
     fn encode(&self) -> Vec<u8> {
         let mut out = worker::Enc::default();
-        out.text("unio-unpack-report-1")
+        out.text("unio-unpack-report-2")
             .text(&self.name)
             .text(&self.version)
             .text(&self.content)
@@ -79,12 +86,13 @@ impl Report {
         for (alias, kind, a, b, req) in &self.dependencies {
             out.text(alias).u32(*kind).text(a).text(b).text(req);
         }
+        out.text(&self.signer).text(&self.revocations.to_string());
         out.0
     }
 
     fn decode(data: &[u8]) -> Option<Report> {
         let mut d = worker::Dec::new(data);
-        if d.text()? != "unio-unpack-report-1" {
+        if d.text()? != "unio-unpack-report-2" {
             return None;
         }
         let mut r = Report {
@@ -96,12 +104,16 @@ impl Report {
             unsafe_marked: decode_list(&mut d)?,
             permissions: decode_list(&mut d)?,
             dependencies: Vec::new(),
+            signer: String::new(),
+            revocations: 0,
         };
         let n = d.u32()?;
         for _ in 0..n {
             r.dependencies
                 .push((d.text()?, d.u32()?, d.text()?, d.text()?, d.text()?));
         }
+        r.signer = d.text()?;
+        r.revocations = d.text()?.parse().ok()?;
         d.end().then_some(r)
     }
 
@@ -179,8 +191,9 @@ fn parse_limits(text: &str) -> Option<Limits> {
 // ---------------------------------------------------------------- inside the workers
 
 /// The unpack worker, after its rules apply (`worker.rs`): `dir DIR STAGING LIMITS`,
-/// `archive FILE SHA384 STAGING LIMITS SIGNATURE|- REGISTRY|- PACKAGE VERSION ALLOW`, or
-/// `inspect ENTRY LIMITS`. It writes the report on standard output.
+/// `archive FILE SHA384 STAGING LIMITS PACKAGE|- VERSION|- REGISTRY|-`, or
+/// `inspect ENTRY LIMITS`. For a package of a registry its input holds the trust bundle of the
+/// registry and the signature envelope of the archive. It writes the report on standard output.
 pub fn unpack_worker(arguments: &[String]) -> ExitCode {
     let arguments = arguments.to_vec();
     // Parsing a module may recurse deeply; the stack of the front end, as in other workers.
@@ -223,9 +236,7 @@ fn unpack(arguments: &[String]) -> Result<Report, String> {
             let entries = tree::read_dir(Path::new(entry), &limits(l)?, false)?;
             finish(&entries, None, None)
         }
-        [mode, file, sha, staging, l, sig, registry, package, version, allow]
-            if mode == "archive" =>
-        {
+        [mode, file, sha, staging, l, package, version, registry] if mode == "archive" => {
             let limits = limits(l)?;
             let size = std::fs::metadata(file).map_err(|e| e.to_string())?.len();
             if size > limits.archive_bytes {
@@ -243,28 +254,41 @@ fn unpack(arguments: &[String]) -> Result<Report, String> {
                      before unpacking"
                 ));
             }
-            if registry != "-" {
-                let signature = if sig == "-" {
-                    None
-                } else {
-                    Some(std::fs::read(sig).map_err(|e| format!("the signature: {e}"))?)
-                };
-                let note = signature::check(&signature::Request {
+            // The signature of a registry package, before anything of the archive is parsed
+            // (T-8a, SB-12).
+            let verified = if package != "-" {
+                let parts = trust::unframe(worker::input(), 2)
+                    .ok_or("the unpack worker was given malformed trust data")?;
+                let bundle = Bundle::decode(parts[0])
+                    .ok_or("the unpack worker was given a malformed trust bundle")?;
+                let signature = (!parts[1].is_empty()).then_some(parts[1]);
+                let verified = signature::check(&signature::Request {
                     package,
                     version,
                     registry,
                     archive: &bytes,
-                    signature: signature.as_deref(),
-                    allow_unsigned: allow == "1",
+                    signature,
+                    trust: &bundle,
                 })?;
-                eprintln!("{note}");
-            }
+                eprintln!(
+                    "unio: verified {package} {version}: ML-DSA-65 signature of the key {}",
+                    verified.key
+                );
+                Some(verified)
+            } else {
+                None
+            };
             let entries = unio::package::archive::read(&bytes, &limits)?;
-            finish(
+            let mut report = finish(
                 &entries,
                 Some(Path::new(staging)),
                 Some(format!("sha384:{digest}")),
-            )
+            )?;
+            if let Some(v) = verified {
+                report.signer = v.key;
+                report.revocations = v.revocations;
+            }
+            Ok(report)
         }
         _ => Err(bad()),
     }
@@ -336,12 +360,16 @@ fn finish(
         unsafe_marked: marked,
         permissions,
         dependencies,
+        signer: String::new(),
+        revocations: 0,
     })
 }
 
 /// The download worker, after its rules apply (`worker.rs`): `get HOST PORT PATH LIMIT NAME`
-/// writes the body into the download area as NAME; `index HOST PORT PATH LIMIT PACKAGE` parses
-/// the registry index and writes its normalized lines on standard output.
+/// writes the body into the download area as NAME; `index HOST PORT PATH LIMIT PACKAGE`
+/// verifies the signature of the registry index with the trust bundle, the envelope, and the
+/// lowest acceptable sequence of its input, before it parses the index, and writes its
+/// normalized lines on standard output.
 pub fn download_worker(stream: std::net::TcpStream, temp: &Path, arguments: &[String]) -> ExitCode {
     let fail = |problem: String| {
         eprintln!("unio: the download worker: {problem}");
@@ -364,31 +392,72 @@ pub fn download_worker(stream: std::net::TcpStream, temp: &Path, arguments: &[St
         Err(problem) => return fail(format!("{shown}: {problem}")),
     };
     match mode.as_str() {
-        "get" if extra == "archive" || extra == "signature" => {
+        "get"
+            if [
+                "archive",
+                "signature",
+                "keys",
+                "revocations",
+                "index-signature",
+            ]
+            .contains(&extra.as_str()) =>
+        {
             match std::fs::write(temp.join(extra), &body) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(format!("{shown}: writing the download: {e}")),
             }
         }
-        "index" => {
-            let text = match String::from_utf8(body.clone()) {
-                Ok(text) => text,
-                Err(_) => return fail(format!("{shown}: the index is not UTF-8")),
-            };
-            match Index::parse(&text, extra) {
-                Ok(index) => {
-                    print!(
-                        "digest sha384:{}\n{}",
-                        unio::sha::sha384_hex(&body),
-                        index.encode()
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(problem) => fail(format!("{shown}: {problem}")),
+        "index" => match verified_index(&body, extra) {
+            Ok(lines) => {
+                print!("{lines}");
+                ExitCode::SUCCESS
             }
-        }
+            Err(problem) => fail(format!("{shown}: {problem}")),
+        },
         _ => fail("started with bad arguments".into()),
     }
+}
+
+/// The index of a package, verified before it is parsed (T-8a): its envelope must be signed by
+/// a key the trust bundle establishes, for this package, over exactly these bytes, with a
+/// sequence no lower than the floor. Returns the lines for the tool.
+fn verified_index(body: &[u8], package: &str) -> Result<String, String> {
+    let parts = trust::unframe(worker::input(), 3).ok_or("started with malformed trust data")?;
+    let bundle = Bundle::decode(parts[0]).ok_or("started with a malformed trust bundle")?;
+    let floor: u64 = std::str::from_utf8(parts[2])
+        .ok()
+        .and_then(|f| f.parse().ok())
+        .ok_or("started with a malformed floor")?;
+    let refused = |why: String| format!("the index of {package} is refused: {why}");
+    if parts[1].is_empty() {
+        return Err(refused("it has no signature".into()));
+    }
+    let trust = Trust::load(&bundle, &trust::today()).map_err(&refused)?;
+    let verified = trust
+        .verify(parts[1], "registry-index", package, body)
+        .map_err(&refused)?;
+    if verified.sequence < floor {
+        return Err(refused(format!(
+            "its sequence {} is older than {floor}, which this project or machine has already \
+             seen: a rollback to an older index",
+            verified.sequence
+        )));
+    }
+    let text = std::str::from_utf8(body).map_err(|_| refused("it is not UTF-8".into()))?;
+    let index = Index::parse(text, package).map_err(&refused)?;
+    if index.sequence != verified.sequence {
+        return Err(refused(format!(
+            "the document says sequence {} and its signature {}",
+            index.sequence, verified.sequence
+        )));
+    }
+    Ok(format!(
+        "digest sha384:{}\nsigner {}\nrevocations {}\n{}",
+        unio::sha::sha384_hex(body),
+        verified.key,
+        verified.revocations,
+        index.encode()
+    ))
 }
 
 // ---------------------------------------------------------------- the tool's side
@@ -448,6 +517,57 @@ struct Staged {
     fetch: Option<String>,
     signature: Option<String>,
     index: Option<String>,
+    index_sequence: Option<u64>,
+}
+
+/// The highest sequences seen on this machine, kept in the cache (`trust/state`): of the
+/// revocation list of each registry (`revocations <registry URL>`) and of the index of each
+/// package (`index <identity>`). Together with the lock, they are the floors below which a
+/// signed file is a rollback (T-8a).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct State(BTreeMap<String, u64>);
+
+impl State {
+    fn load(cache: &Path) -> State {
+        let text = std::fs::read_to_string(cache.join(STATE_FILE)).unwrap_or_default();
+        State(
+            text.lines()
+                .filter_map(|l| {
+                    let (key, n) = l.rsplit_once(' ')?;
+                    Some((key.to_string(), n.parse().ok()?))
+                })
+                .collect(),
+        )
+    }
+
+    fn get(&self, key: &str) -> u64 {
+        self.0.get(key).copied().unwrap_or(0)
+    }
+
+    fn raise(&mut self, key: String, n: u64) {
+        let e = self.0.entry(key).or_insert(0);
+        *e = (*e).max(n);
+    }
+
+    fn save(&self, cache: &Path) -> Result<(), String> {
+        let mut text =
+            String::from("# The highest sequences of signed registry files seen here (unio).\n");
+        for (key, n) in &self.0 {
+            text.push_str(&format!("{key} {n}\n"));
+        }
+        let path = cache.join(STATE_FILE);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        write_atomically(&path, &text)
+    }
+}
+
+/// A verified index: the index, the hash of its document, and its signer.
+#[derive(Clone)]
+struct Verified {
+    index: Index,
+    digest: String,
 }
 
 struct Session {
@@ -462,7 +582,12 @@ struct Session {
     unsafe_ok: bool,
     fetch: BTreeMap<String, Fetch>,
     origins: BTreeMap<String, Origin>,
-    indexes: BTreeMap<String, (Index, String)>,
+    indexes: BTreeMap<String, Verified>,
+    /// The trust bundle of each registry, by its canonical URL, as read for this command.
+    bundles: BTreeMap<String, Vec<u8>>,
+    /// The floors of rollback protection as read, and as raised by what this command saw.
+    state: State,
+    seen: State,
     staged: BTreeMap<String, Staged>,
     reports: BTreeMap<String, Report>,
     /// Failures of the provider during resolution, kept to report the code of a worker.
@@ -567,6 +692,7 @@ impl Session {
             .and_then(|()| std::fs::create_dir_all(cache.join("staging")))
             .map_err(|e| format!("the cache {}: {e}", cache.display()))?;
         let cache = std::fs::canonicalize(&cache).unwrap_or(cache);
+        let state = State::load(&cache);
         Ok(Session {
             root,
             manifest_text,
@@ -580,6 +706,9 @@ impl Session {
             fetch: BTreeMap::new(),
             origins: BTreeMap::new(),
             indexes: BTreeMap::new(),
+            bundles: BTreeMap::new(),
+            seen: state.clone(),
+            state,
             staged: BTreeMap::new(),
             reports: BTreeMap::new(),
             failure: None,
@@ -759,8 +888,10 @@ impl Session {
         read: Vec<Scope>,
         read_files: Vec<PathBuf>,
         write: Option<&Path>,
+        input: Vec<u8>,
     ) -> Res<Report> {
         let mut spec = worker::Spec::for_packages(&self.options).map_err(Fail::Code)?;
+        spec.input = input;
         spec.read = read;
         spec.read_files = read_files;
         spec.write = write
@@ -788,6 +919,7 @@ impl Session {
         mode: &str,
         limit: u64,
         extra: &str,
+        input: Vec<u8>,
     ) -> Res<(worker::TempDir, Vec<u8>)> {
         if self.offline {
             return Err(format!(
@@ -811,6 +943,7 @@ impl Session {
             .map_err(|e| format!("{}: {e}", url.origin()))?
             .collect();
         let mut spec = worker::Spec::for_packages(&self.options).map_err(Fail::Code)?;
+        spec.input = input;
         // The connection is opened here, to the configured host only, and passed to the
         // worker, which can open none (Linux and macOS).
         #[cfg(unix)]
@@ -870,21 +1003,113 @@ impl Session {
         Ok((temp, finished.data))
     }
 
-    fn index(&mut self, id: &str, registry: &Registry, package: &str) -> Res<Index> {
-        if let Some((index, _)) = self.indexes.get(id) {
-            return Ok(index.clone());
+    /// Downloads one file of a registry as it is, for a worker to check: the tool never
+    /// parses it.
+    fn fetch_raw(&self, url: &Url, limit: u64, name: &str) -> Res<Vec<u8>> {
+        let (area, _) = self.download(url, "get", limit, name, Vec::new())?;
+        std::fs::read(area.path().join(name))
+            .map_err(|e| Fail::Message(format!("the download of {}: {e}", url.path)))
+    }
+
+    /// The trust bundle of a registry (T-8a): the operator's anchor and the registry's
+    /// endorsements and revocation list, with the floor of its sequence. The workers verify it.
+    fn bundle(&mut self, registry: &Registry) -> Res<Vec<u8>> {
+        let canonical = registry.url.canonical();
+        if let Some(bundle) = self.bundles.get(&canonical) {
+            return Ok(bundle.clone());
         }
+        let anchor = std::fs::read(&registry.anchor).map_err(|e| {
+            format!(
+                "the trust anchor of the registry '{}' ({}): {e}; the operator provisions it \
+                 (packages.md, section 5)",
+                registry.name,
+                registry.anchor.display()
+            )
+        })?;
+        let keys = self.fetch_raw(
+            &registry.url.join("trust/keys")?,
+            trust::MAX_KEYS_FILE,
+            "keys",
+        )?;
+        let revocations = self.fetch_raw(
+            &registry.url.join("trust/revocations")?,
+            trust::MAX_REVOCATIONS_FILE,
+            "revocations",
+        )?;
+        let bundle = Bundle {
+            anchor,
+            keys,
+            revocations,
+            revocations_floor: self.state.get(&format!("revocations {canonical}")),
+        }
+        .encode();
+        self.bundles.insert(canonical, bundle.clone());
+        Ok(bundle)
+    }
+
+    fn index(&mut self, id: &str, registry: &Registry, package: &str) -> Res<Index> {
+        if let Some(v) = self.indexes.get(id) {
+            return Ok(v.index.clone());
+        }
+        let bundle = self.bundle(registry)?;
         let url = registry.url.join(&format!("index/{package}.json"))?;
-        let (_temp, data) = self.download(&url, "index", INDEX_LIMIT, package)?;
+        let signature = self.fetch_raw(
+            &registry.url.join(&format!("index/{package}.json.sig"))?,
+            SIGNATURE_LIMIT,
+            "index-signature",
+        )?;
+        let locked = self.old.as_ref().and_then(|l| l.entry(id)).cloned();
+        let floor = self
+            .state
+            .get(&format!("index {id}"))
+            .max(locked.as_ref().and_then(|e| e.index_sequence).unwrap_or(0));
+        let input = trust::frame(&[&bundle, &signature, floor.to_string().as_bytes()]);
+        let (_temp, data) = self.download(&url, "index", INDEX_LIMIT, package, input)?;
         let text = String::from_utf8(data)
             .map_err(|_| "the download worker returned malformed data".to_string())?;
-        let (first, rest) = text.split_once('\n').unwrap_or((&text, ""));
-        let digest = first
-            .strip_prefix("digest ")
-            .ok_or("the download worker returned malformed data")?
-            .to_string();
-        let index = Index::decode(rest)?;
-        self.indexes.insert(id.to_string(), (index.clone(), digest));
+        let mut lines = text.splitn(4, '\n');
+        let malformed = || Fail::from("the download worker returned malformed data");
+        let mut field = |name: &str| -> Res<String> {
+            lines
+                .next()
+                .and_then(|l| l.strip_prefix(name))
+                .map(str::to_string)
+                .ok_or_else(malformed)
+        };
+        let digest = field("digest ")?;
+        let _signer = field("signer ")?;
+        let revocations: u64 = field("revocations ")?.parse().map_err(|_| malformed())?;
+        let index = Index::decode(lines.next().unwrap_or(""))?;
+        // A published version is never removed or changed (T-8): the locked one must still be
+        // there with the same archive.
+        if let Some(entry) = &locked {
+            let same = index.versions.iter().any(|v| {
+                v.version.to_string() == entry.version
+                    && entry.archive.as_deref().and_then(lock::digest_hex)
+                        == Some(v.sha384.as_str())
+            });
+            if !same {
+                return Err(format!(
+                    "the registry index of {package} no longer lists the locked version {} with \
+                     the archive unio.lock records: a published version was removed or replaced, \
+                     which a registry never does (T-8); refused",
+                    entry.version
+                )
+                .into());
+            }
+        }
+        self.seen.raise(
+            format!("revocations {}", registry.url.canonical()),
+            revocations,
+        );
+        self.seen.raise(format!("index {id}"), index.sequence);
+        self.indexes.insert(
+            id.to_string(),
+            Verified {
+                index: index.clone(),
+                digest,
+            },
+        );
         Ok(index)
     }
 
@@ -912,7 +1137,10 @@ impl Session {
                     subtree: true,
                 }];
                 let args = vec!["dir".into(), s(source), s(&dir), limits];
-                (self.unpack(args, read, Vec::new(), Some(&dir))?, None)
+                (
+                    self.unpack(args, read, Vec::new(), Some(&dir), Vec::new())?,
+                    None,
+                )
             }
             Fetch::File { path, sha } => {
                 if !path.is_file() {
@@ -921,15 +1149,21 @@ impl Session {
                     );
                 }
                 let file = unio_runtime::sandbox::resolve(path);
-                let args = archive_args(&file, sha, &dir, &limits, None, None);
-                (self.unpack(args, Vec::new(), vec![file], Some(&dir))?, None)
+                let args = archive_args(&file, sha, &dir, &limits, None);
+                let report = self.unpack(args, Vec::new(), vec![file], Some(&dir), Vec::new())?;
+                (report, None)
             }
             Fetch::Url { url, sha } => {
-                let (area, _) =
-                    self.download(url, "get", self.config.limits.archive_bytes, "archive")?;
+                let (area, _) = self.download(
+                    url,
+                    "get",
+                    self.config.limits.archive_bytes,
+                    "archive",
+                    Vec::new(),
+                )?;
                 let file = area.path().join("archive");
-                let args = archive_args(&file, sha, &dir, &limits, None, None);
-                let report = self.unpack(args, Vec::new(), vec![file], Some(&dir))?;
+                let args = archive_args(&file, sha, &dir, &limits, None);
+                let report = self.unpack(args, Vec::new(), vec![file], Some(&dir), Vec::new())?;
                 (report, Some(format!("{}{}", url.origin(), url.path)))
             }
             Fetch::Registry { .. } => {
@@ -944,6 +1178,7 @@ impl Session {
                 fetch: fetch_url,
                 signature: None,
                 index: None,
+                index_sequence: None,
             },
         );
         Ok(report)
@@ -958,8 +1193,8 @@ impl Session {
         let Some(Fetch::Registry { registry, package }) = self.fetch.get(id).cloned() else {
             return Err(format!("{id} is not a registry package").into());
         };
-        // From the lock: its URLs and hash. Otherwise from the index.
-        let (archive_url, sha, signature_url, index_digest, deps) = match locked {
+        // From the lock: its URLs and hash. Otherwise from the verified index.
+        let (archive_url, sha, signature_url, index_digest, index_sequence, deps) = match locked {
             Some(entry) => {
                 let fetch = entry
                     .fetch
@@ -970,73 +1205,65 @@ impl Session {
                     .as_deref()
                     .and_then(lock::digest_hex)
                     .ok_or_else(|| format!("{id} has no archive hash in the lock"))?;
-                let signature = entry.signature.as_deref().map(Url::parse).transpose()?;
+                let signature = entry.signature.as_deref().ok_or_else(|| {
+                    format!(
+                        "{id} has no signature URL in the lock (a lock of an unverified \
+                         package); run `unio update` to lock it with its signature"
+                    )
+                })?;
                 (
                     Url::parse(fetch)?,
                     sha.to_string(),
-                    signature,
+                    Url::parse(signature)?,
                     entry.index.clone(),
+                    entry.index_sequence,
                     None,
                 )
             }
             None => {
                 let index = self.index(id, &registry, &package)?;
-                let digest = self.indexes.get(id).map(|(_, d)| d.clone());
+                let digest = self.indexes.get(id).map(|v| v.digest.clone());
                 let v = index
                     .versions
                     .iter()
                     .find(|v| v.version.to_string() == version)
                     .ok_or_else(|| format!("{id} has no version {version} in its index"))?;
-                let signature = v
-                    .signature
-                    .as_deref()
-                    .map(|s| registry.url.join(s))
-                    .transpose()?;
+                let sequence = Some(index.sequence);
                 (
                     registry.url.join(&v.archive)?,
                     v.sha384.clone(),
-                    signature,
+                    registry.url.join(&v.signature)?,
                     digest,
+                    sequence,
                     Some(v.dependencies.clone()),
                 )
             }
         };
+        let bundle = self.bundle(&registry)?;
         let (area, _) = self.download(
             &archive_url,
             "get",
             self.config.limits.archive_bytes,
             "archive",
+            Vec::new(),
         )?;
         let file = area.path().join("archive");
-        let mut read_files = vec![file.clone()];
-        let mut _signature_area = None;
-        let signature_file = match &signature_url {
-            Some(url) => {
-                let (sig_area, _) = self.download(url, "get", SIGNATURE_LIMIT, "signature")?;
-                let f = sig_area.path().join("signature");
-                _signature_area = Some(sig_area);
-                read_files.push(f.clone());
-                Some(f)
-            }
-            None => None,
-        };
+        let signature = self.fetch_raw(&signature_url, SIGNATURE_LIMIT, "signature")?;
         let staging = self.new_staging()?;
         let dir = staging.0.clone().unwrap();
         let limits = limits_text(&self.config.limits);
-        let registry_text = format!(
-            "{} {}",
-            registry.url.canonical(),
-            u8::from(registry.allow_unsigned)
-        );
+        let canonical = registry.url.canonical();
         let args = archive_args(
             &file,
             &sha,
             &dir,
             &limits,
-            signature_file.as_deref(),
-            Some((&registry_text, &package, version)),
+            Some((&canonical, &package, version)),
         );
-        let report = self.unpack(args, Vec::new(), read_files, Some(&dir))?;
+        let input = trust::frame(&[&bundle, &signature]);
+        let report = self.unpack(args, Vec::new(), vec![file], Some(&dir), input)?;
+        self.seen
+            .raise(format!("revocations {canonical}"), report.revocations);
         let short = package.rsplit('/').next().unwrap_or(&package);
         if report.name != short || report.version != version {
             return Err(format!(
@@ -1077,8 +1304,9 @@ impl Session {
                 report: report.clone(),
                 staging,
                 fetch: Some(format!("{}{}", archive_url.origin(), archive_url.path)),
-                signature: signature_url.map(|u| format!("{}{}", u.origin(), u.path)),
+                signature: Some(format!("{}{}", signature_url.origin(), signature_url.path)),
                 index: index_digest,
+                index_sequence,
             },
         );
         Ok(report)
@@ -1190,6 +1418,8 @@ impl Session {
                         fetch: staged.fetch.clone(),
                         signature: staged.signature.clone(),
                         index: staged.index.clone(),
+                        index_sequence: staged.index_sequence,
+                        signer: (!r.signer.is_empty()).then(|| r.signer.clone()),
                         unsafe_modules: r.unsafe_modules(),
                         permissions: r.permissions.clone(),
                         dependencies: candidate
@@ -1241,7 +1471,7 @@ impl Session {
                     dir.to_string_lossy().into_owned(),
                     limits_text(&self.config.limits),
                 ];
-                self.unpack(args, read, Vec::new(), None)?
+                self.unpack(args, read, Vec::new(), None, Vec::new())?
             } else {
                 if !self.fetch.contains_key(&entry.id) {
                     let (fetch, origin) = self.fetch_of_entry(entry)?;
@@ -1417,6 +1647,14 @@ impl Session {
         Ok(())
     }
 
+    /// Records the sequences this command saw as the new floors of this machine.
+    fn save_state(&self) -> Res<()> {
+        if self.seen != self.state {
+            self.seen.save(&self.cache)?;
+        }
+        Ok(())
+    }
+
     fn write_lock(&self, lock: &Lock) -> Res<()> {
         write_atomically(&self.root.join(lock::FILE), &lock.write())?;
         Ok(())
@@ -1428,33 +1666,19 @@ fn archive_args(
     sha: &str,
     staging: &Path,
     limits: &str,
-    signature: Option<&Path>,
     registry: Option<(&str, &str, &str)>,
 ) -> Vec<String> {
     let s = |p: &Path| p.to_string_lossy().into_owned();
-    let (registry, allow, package, version) = match registry {
-        Some((text, package, version)) => {
-            let (url, allow) = text.split_once(' ').unwrap_or((text, "0"));
-            (
-                url.to_string(),
-                allow.to_string(),
-                package.to_string(),
-                version.to_string(),
-            )
-        }
-        None => ("-".into(), "0".into(), "-".into(), "-".into()),
-    };
+    let (registry, package, version) = registry.unwrap_or(("-", "-", "-"));
     vec![
         "archive".into(),
         s(file),
         sha.to_string(),
         s(staging),
         limits.to_string(),
-        signature.map_or("-".to_string(), s),
-        registry,
-        package,
-        version,
-        allow,
+        package.to_string(),
+        version.to_string(),
+        registry.to_string(),
     ]
 }
 
@@ -1609,6 +1833,7 @@ fn settle(
         write_atomically(&s.root.join("unio.toml"), &text)?;
     }
     s.write_lock(&lock)?;
+    s.save_state()?;
     for id in &changed {
         if let Some(e) = lock.entry(id) {
             eprintln!("unio: locked {} {} ({id})", e.name, e.version);
@@ -1777,6 +2002,7 @@ fn install(o: Options) -> Res<()> {
     let to_review = s.obtain(&lock, true, &[])?;
     s.review(&lock, &to_review)?;
     s.commit(&lock)?;
+    s.save_state()?;
     eprintln!(
         "unio: {} locked package(s) installed in {}",
         lock.packages.len(),
