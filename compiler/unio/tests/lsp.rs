@@ -847,3 +847,63 @@ fn a_policy_below_the_minimum_stops_the_server() {
     assert_eq!(output.status.code(), Some(103));
     assert!(String::from_utf8_lossy(&output.stderr).contains("below the minimum"));
 }
+
+/// T-6, E0088: a mistake of the manifest is a diagnostic of the editor as of `unio check`: in a
+/// source document of the package at its start, naming the line of the manifest as related
+/// information, and in the manifest itself at that line; the fix clears it.
+#[test]
+fn a_mistake_of_the_manifest_is_a_diagnostic_of_the_package() {
+    let p = Project::new("manifest");
+    let manifest = p.write(
+        "pkg/unio.toml",
+        "[package]\nname = \"demo\"\n\n[permissions]\nfiles.read = true\n",
+    );
+    let main = p.write(
+        "pkg/main.unio",
+        "public function main():\n    print(\"hi\")\n",
+    );
+    let mut c = p.server(None, &[]);
+    c.initialize(&p.path("pkg"));
+    let uri = path_to_uri(&main);
+    let manifest_uri = path_to_uri(&manifest);
+    c.open(&uri, &fs::read_to_string(&main).unwrap());
+    let diagnostics = c.diagnostics(&uri, Duration::from_secs(60));
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let d = &diagnostics[0];
+    assert_eq!(d.get("code").and_then(Json::as_str), Some("E0088"), "{d}");
+    assert_eq!(line_of(d.get("range").unwrap()), 0, "{d}");
+    let message = d.get("message").and_then(Json::as_str).unwrap();
+    assert!(
+        message.starts_with("unio.toml:5:") && message.contains("files.read"),
+        "{message}"
+    );
+    let related = &d
+        .get("relatedInformation")
+        .and_then(Json::as_array)
+        .unwrap()[0];
+    assert_eq!(
+        related.at(&["location", "uri"]).and_then(Json::as_str),
+        Some(manifest_uri.as_str()),
+        "{related}"
+    );
+    assert_eq!(line_of(related.at(&["location", "range"]).unwrap()), 4);
+
+    // The manifest opened as a document has the diagnostic at its line; fixing the unsaved
+    // buffer clears it in both.
+    let text = fs::read_to_string(&manifest).unwrap();
+    c.open(&manifest_uri, &text);
+    let diagnostics = c.diagnostics(&manifest_uri, Duration::from_secs(60));
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(line_of(diagnostics[0].get("range").unwrap()), 4);
+    c.change(
+        &manifest_uri,
+        2,
+        &text.replace("files.read = true", "files.read = [\"$CWD/**\"]"),
+    );
+    let diagnostics = c.diagnostics(&manifest_uri, Duration::from_secs(60));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    c.change(&uri, 2, "public function main():\n    print(\"hello\")\n");
+    let diagnostics = c.diagnostics(&uri, Duration::from_secs(60));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    c.finish();
+}

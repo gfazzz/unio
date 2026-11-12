@@ -217,7 +217,7 @@ fn a_dependency_import_is_missing_identity() {
     std::fs::create_dir_all(dir.join("deps/money")).unwrap();
     std::fs::write(
         dir.join("unio.toml"),
-        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\n\n[dependencies]\nmoney = \"1.2\"\n",
+        "[package]\nname = \"shop\"\nversion = \"0.1.0\"\n\n[dependencies]\nmoney = { registry = \"main\", package = \"acme/money\", version = \"^1.2\" }\n",
     )
     .unwrap();
     std::fs::write(

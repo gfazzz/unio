@@ -306,13 +306,15 @@ constraints, methods through `extend` blocks, interfaces and defaults, functions
 struct and variant construction, operators through interfaces, `or` on `Option`, `?.`, indexing,
 `in`, interpolation, lambdas typed from the expected function type, patterns, and `is`.
 
-Codes reported: E0040, E0041, E0044 to E0050, E0051 to E0067, E0069, E0071, E0072, E0086. The
+Codes reported: E0040, E0041, E0044 to E0050, E0051 to E0067, E0069, E0071, E0072, E0086, E0088. The
 codes of RFC 0001 have their own cases: a key, a bound, a bounded method or `<` on a type built
 from IEEE `Float` is E0045 (semantics 2.9, 3.3, 4.2); a `std.json` conversion of a type with a
 private field, also through a generic function that passes its parameter on, is E0046 (3.8); a
 `Range` used as a `List` is E0047 with the fix `.to_list()` (4.9); an import under `deps.` is
 E0048 (1.9); an `external function` outside an `unsafe module` of the standard library is E0086
-(8.5). Where a
+(8.5); a mistake in the manifest `unio.toml` of a reported package is E0088 at its line of
+the manifest, checked by `src/package/manifest.rs` (`check`) and reported as a file of its own
+by `unio check` and the language server (8.6). Where a
 type cannot be determined, the checker uses an unknown type that is compatible with every type,
 so that one mistake is reported once. The arguments of generic interfaces are compared in
 implementation checks, constraints and assignability (`Iterator[Int]` is not `Iterator[Text]`).

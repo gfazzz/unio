@@ -1,0 +1,8 @@
+# expect-error: 8 E0088
+# category: resources
+[package]
+name = "control"
+version = "0.1.0"
+
+[permissions]
+files.read = true

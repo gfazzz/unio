@@ -28,3 +28,4 @@ RFC (request for comments) — способ изменить синтаксис,
 | [0005](0005-effects-of-function-values.md) | Эффекты функциональных значений переносятся вызовами | accepted (семантика реализована в `unio check` и `unio symbol`; тесты реализации добавляются) |
 | [0006](0006-compile-limits-apart-from-program-limits.md) | Пределы компиляции отдельно от пределов программы | accepted (реализовано в инструментах; проверки в macOS и Windows ждут CI) |
 | [0007](0007-reference-counting-for-0-1.md) | Подсчёт ссылок вместо трассирующего GC в 0.1 | accepted (2026-11-12; реализовано; шаг CI ждёт первого запуска) |
+| [0008](0008-checking-the-manifest.md) | `unio check` проверяет манифест (E0088) | accepted (2026-11-12; реализовано) |

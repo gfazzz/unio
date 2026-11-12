@@ -124,10 +124,7 @@ impl Manifest {
                 continue;
             };
             let Some((alias, field)) = rest.split_once('.') else {
-                return Err(format!(
-                    "the dependency '{rest}' must be a table, for example \
-                     {rest} = {{ path = \"../{rest}\" }}"
-                ));
+                return Err(DependencyMistake::NotTable.text(rest));
             };
             fields
                 .entry(alias.to_string())
@@ -135,7 +132,9 @@ impl Manifest {
                 .insert(field.to_string(), value.clone());
         }
         for (alias, fields) in fields {
-            manifest.dependencies.push(dependency(&alias, &fields)?);
+            manifest
+                .dependencies
+                .push(dependency(&alias, &fields).map_err(|m| m.text(&alias))?);
         }
         Ok(manifest)
     }
@@ -145,19 +144,96 @@ impl Manifest {
     }
 }
 
-fn dependency(alias: &str, fields: &BTreeMap<String, TomlValue>) -> Result<Dependency, String> {
-    if !valid_alias(alias) {
-        return Err(format!(
-            "the alias '{alias}' of a dependency must be lowercase letters, digits and '_', \
-             starting with a letter or '_', and not std or deps: it is a segment of the module \
-             path deps.{alias}.<module>"
-        ));
+/// A mistake in one entry of `[dependencies]` (T-6, T-14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencyMistake {
+    /// `alias = "1.0"`: an entry that is not a table.
+    NotTable,
+    Alias,
+    NotText(String),
+    UnknownField(String),
+    /// The version requirement, with the problem.
+    Version(String),
+    EmptyPath,
+    NoPackage,
+    RegistryPackage(String),
+    NoVersion,
+    NoSha,
+    BadSha,
+    /// No source, or more than one.
+    OneSource,
+}
+
+impl DependencyMistake {
+    /// The English text of `unio add` and the other package commands.
+    pub fn text(&self, alias: &str) -> String {
+        use DependencyMistake as M;
+        match self {
+            M::NotTable => format!(
+                "the dependency '{alias}' must be a table, for example \
+                 {alias} = {{ path = \"../{alias}\" }}"
+            ),
+            M::Alias => format!(
+                "the alias '{alias}' of a dependency must be lowercase letters, digits and '_', \
+                 starting with a letter or '_', and not std or deps: it is a segment of the module \
+                 path deps.{alias}.<module>"
+            ),
+            M::NotText(field) => format!("dependencies.{alias}.{field} must be a text"),
+            M::UnknownField(field) => format!(
+                "unknown key dependencies.{alias}.{field}; use path, registry and package, or \
+                 archive and sha384, with version"
+            ),
+            M::Version(e) => format!("dependencies.{alias}.version: {e}"),
+            M::EmptyPath => format!("dependencies.{alias}.path is empty"),
+            M::NoPackage => {
+                format!("dependencies.{alias} names a registry but no package = \"owner/name\"")
+            }
+            M::RegistryPackage(package) => {
+                format!("dependencies.{alias}.package '{package}' must be owner/name")
+            }
+            M::NoVersion => {
+                format!("dependencies.{alias} from a registry needs a version requirement")
+            }
+            M::NoSha => {
+                format!("dependencies.{alias}.archive needs sha384, the hash of the archive")
+            }
+            M::BadSha => {
+                format!("dependencies.{alias}.sha384 must be 96 lowercase hexadecimal digits")
+            }
+            M::OneSource => format!(
+                "dependencies.{alias} needs exactly one source: path, registry with package, or \
+                 archive with sha384"
+            ),
+        }
     }
-    let get = |field: &str| -> Result<Option<String>, String> {
+
+    /// The field of the entry the mistake is about, if it is one field.
+    fn field(&self) -> Option<&str> {
+        use DependencyMistake as M;
+        match self {
+            M::NotText(field) | M::UnknownField(field) => Some(field),
+            M::Version(_) => Some("version"),
+            M::EmptyPath => Some("path"),
+            M::RegistryPackage(_) => Some("package"),
+            M::BadSha => Some("sha384"),
+            _ => None,
+        }
+    }
+}
+
+fn dependency(
+    alias: &str,
+    fields: &BTreeMap<String, TomlValue>,
+) -> Result<Dependency, DependencyMistake> {
+    use DependencyMistake as M;
+    if !valid_alias(alias) {
+        return Err(M::Alias);
+    }
+    let get = |field: &str| -> Result<Option<String>, DependencyMistake> {
         match fields.get(field) {
             None => Ok(None),
             Some(TomlValue::Text(t)) => Ok(Some(t.clone())),
-            Some(_) => Err(format!("dependencies.{alias}.{field} must be a text")),
+            Some(_) => Err(M::NotText(field.to_string())),
         }
     };
     for field in fields.keys() {
@@ -166,14 +242,11 @@ fn dependency(alias: &str, fields: &BTreeMap<String, TomlValue>) -> Result<Depen
         ]
         .contains(&field.as_str())
         {
-            return Err(format!(
-                "unknown key dependencies.{alias}.{field}; use path, registry and package, or \
-                 archive and sha384, with version"
-            ));
+            return Err(M::UnknownField(field.clone()));
         }
     }
     let req = match get("version")? {
-        Some(v) => Some(Req::parse(&v).map_err(|e| format!("dependencies.{alias}.version: {e}"))?),
+        Some(v) => Some(Req::parse(&v).map_err(M::Version)?),
         None => None,
     };
     let (path, registry, package, archive, sha) = (
@@ -186,49 +259,255 @@ fn dependency(alias: &str, fields: &BTreeMap<String, TomlValue>) -> Result<Depen
     let source = match (path, registry.is_some() || package.is_some(), archive) {
         (Some(path), false, None) if sha.is_none() => {
             if path.is_empty() {
-                return Err(format!("dependencies.{alias}.path is empty"));
+                return Err(M::EmptyPath);
             }
             Source::Path(path)
         }
         (None, true, None) if sha.is_none() => {
-            let package = package.ok_or_else(|| {
-                format!("dependencies.{alias} names a registry but no package = \"owner/name\"")
-            })?;
+            let package = package.ok_or(M::NoPackage)?;
             if !valid_registry_package(&package) {
-                return Err(format!(
-                    "dependencies.{alias}.package '{package}' must be owner/name"
-                ));
+                return Err(M::RegistryPackage(package));
             }
             if req.is_none() {
-                return Err(format!(
-                    "dependencies.{alias} from a registry needs a version requirement"
-                ));
+                return Err(M::NoVersion);
             }
             Source::Registry { registry, package }
         }
         (None, false, Some(location)) => {
-            let sha384 = sha.ok_or_else(|| {
-                format!("dependencies.{alias}.archive needs sha384, the hash of the archive")
-            })?;
+            let sha384 = sha.ok_or(M::NoSha)?;
             if !valid_sha384(&sha384) {
-                return Err(format!(
-                    "dependencies.{alias}.sha384 must be 96 lowercase hexadecimal digits"
-                ));
+                return Err(M::BadSha);
             }
             Source::Archive { location, sha384 }
         }
-        _ => {
-            return Err(format!(
-                "dependencies.{alias} needs exactly one source: path, registry with package, or \
-                 archive with sha384"
-            ))
-        }
+        _ => return Err(M::OneSource),
     };
     Ok(Dependency {
         alias: alias.to_string(),
         source,
         req,
     })
+}
+
+// ---------------------------------------------------------------- the check of `unio check`
+
+/// What a list of the manifest holds, for the message of a value that is not a list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListOf {
+    Paths,
+    Variables,
+    Programs,
+    Modules,
+}
+
+/// Why an entry of `files.read` or `files.write` is not a scope (T-6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopeProblem {
+    Empty,
+    /// `*` other than in the suffix `/**`.
+    Star,
+    /// A `$NAME` other than `$HOME`, `$CWD` and `$TEMP`.
+    Placeholder(String),
+}
+
+/// A mistake of a manifest that `unio check` reports as E0088 (T-6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mistake {
+    /// The file is not in the subset of TOML that manifests use; the problem as the reader
+    /// states it.
+    Syntax(String),
+    UnknownTable(String),
+    /// A key of `[package]` or outside any table that a manifest does not have.
+    UnknownKey(String),
+    /// `package.name` or `package.version` that is not a text.
+    NotText(String),
+    Name(String),
+    /// `package.version`, with the problem.
+    Version(String),
+    NotList(String, ListOf),
+    Scope {
+        key: String,
+        entry: String,
+        problem: ScopeProblem,
+    },
+    /// An empty name in `env` or `process`.
+    EmptyName(String),
+    /// A name in `env` that cannot name a variable.
+    Variable(String),
+    Network,
+    UnknownPermission(String),
+    Dependency(String, DependencyMistake),
+}
+
+/// The mistakes of a manifest with the line, from 1, of each: every one is reported once, in
+/// the order of the lines. A manifest that does not parse has only that mistake.
+pub fn check(source: &str) -> Vec<(usize, Mistake)> {
+    let (table, lines) = match toml::parse_with_lines(source) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let (line, problem) = e
+                .strip_prefix("line ")
+                .and_then(|rest| rest.split_once(": "))
+                .and_then(|(n, p)| Some((n.parse().ok()?, p.to_string())))
+                .unwrap_or((1, e.clone()));
+            return vec![(line, Mistake::Syntax(problem))];
+        }
+    };
+    // The line of a key, or of the nearest table or inline table that holds it.
+    let line_of = |key: &str| -> usize {
+        let mut key = key;
+        loop {
+            if let Some(line) = lines.get(key) {
+                return *line;
+            }
+            match key.rsplit_once('.') {
+                Some((head, _)) => key = head,
+                None => return 1,
+            }
+        }
+    };
+    const TABLES: [&str; 3] = ["package", "dependencies", "permissions"];
+    let mut found: Vec<(usize, Mistake)> = Vec::new();
+    // Every name outside the three tables once, at its first line: a table, or a key written
+    // outside any table.
+    let mut unknown: BTreeMap<&str, usize> = BTreeMap::new();
+    for (name, line) in &lines {
+        let top = name.split('.').next().unwrap_or("");
+        if !TABLES.contains(&top) {
+            let first = unknown.entry(top).or_insert(*line);
+            *first = (*first).min(*line);
+        }
+    }
+    for (top, line) in unknown {
+        found.push((
+            line,
+            if table.contains_key(top) {
+                Mistake::UnknownKey(top.to_string())
+            } else {
+                Mistake::UnknownTable(top.to_string())
+            },
+        ));
+    }
+    let mut dependencies: BTreeMap<String, BTreeMap<String, TomlValue>> = BTreeMap::new();
+    for (key, value) in &table {
+        let line = line_of(key);
+        let Some((top, rest)) = key.split_once('.') else {
+            continue; // reported above
+        };
+        match top {
+            "package" => match rest {
+                "name" => match value {
+                    TomlValue::Text(name) if valid_name(name) => {}
+                    TomlValue::Text(name) => found.push((line, Mistake::Name(name.clone()))),
+                    _ => found.push((line, Mistake::NotText(key.clone()))),
+                },
+                "version" => match value {
+                    TomlValue::Text(v) => {
+                        if let Err(e) = Version::parse(v) {
+                            found.push((line, Mistake::Version(e)));
+                        }
+                    }
+                    _ => found.push((line, Mistake::NotText(key.clone()))),
+                },
+                "unsafe_modules" => {
+                    if !matches!(value, TomlValue::Texts(_)) {
+                        found.push((line, Mistake::NotList(key.clone(), ListOf::Modules)));
+                    }
+                }
+                _ => found.push((line, Mistake::UnknownKey(key.clone()))),
+            },
+            "permissions" => {
+                if let Some(mistake) = permission(key, rest, value) {
+                    found.push((line, mistake));
+                }
+            }
+            "dependencies" => match rest.split_once('.') {
+                Some((alias, field)) => {
+                    dependencies
+                        .entry(alias.to_string())
+                        .or_default()
+                        .insert(field.to_string(), value.clone());
+                }
+                None => found.push((
+                    line,
+                    Mistake::Dependency(rest.to_string(), DependencyMistake::NotTable),
+                )),
+            },
+            // A key of an unknown table is reported with its table.
+            _ => {}
+        }
+    }
+    for (alias, fields) in &dependencies {
+        if let Err(mistake) = dependency(alias, fields) {
+            let at = match mistake.field() {
+                Some(field) => format!("dependencies.{alias}.{field}"),
+                None => format!("dependencies.{alias}"),
+            };
+            found.push((line_of(&at), Mistake::Dependency(alias.clone(), mistake)));
+        }
+    }
+    found.sort_by_key(|(line, _)| *line);
+    found
+}
+
+/// The mistake of one key of `[permissions]`, if it has one.
+fn permission(key: &str, name: &str, value: &TomlValue) -> Option<Mistake> {
+    let list = |of: ListOf| match value {
+        TomlValue::Texts(items) => Ok(items),
+        _ => Err(Mistake::NotList(key.to_string(), of)),
+    };
+    let result = match name {
+        "files.read" | "files.write" => list(ListOf::Paths).and_then(|items| {
+            for entry in items {
+                if let Some(problem) = scope_problem(entry) {
+                    return Err(Mistake::Scope {
+                        key: key.to_string(),
+                        entry: entry.clone(),
+                        problem,
+                    });
+                }
+            }
+            Ok(items)
+        }),
+        "env" => list(ListOf::Variables).and_then(|items| {
+            for entry in items {
+                if entry.is_empty() {
+                    return Err(Mistake::EmptyName(key.to_string()));
+                }
+                if entry.contains(['=', '\0']) {
+                    return Err(Mistake::Variable(entry.clone()));
+                }
+            }
+            Ok(items)
+        }),
+        "process" => list(ListOf::Programs).and_then(|items| {
+            if items.iter().any(String::is_empty) {
+                return Err(Mistake::EmptyName(key.to_string()));
+            }
+            Ok(items)
+        }),
+        "network" if *value == TomlValue::Bool(false) => return None,
+        "network" => return Some(Mistake::Network),
+        _ => return Some(Mistake::UnknownPermission(key.to_string())),
+    };
+    result.err()
+}
+
+/// The problem of an entry of `files.read` or `files.write`, as the sandbox finds it when it
+/// expands the entry (`unio_runtime::sandbox::Scope::expand`).
+pub fn scope_problem(entry: &str) -> Option<ScopeProblem> {
+    let body = entry.strip_suffix("/**").unwrap_or(entry);
+    if body.contains('*') {
+        return Some(ScopeProblem::Star);
+    }
+    if let Some(after) = body.strip_prefix('$') {
+        let name = after.split_once('/').map_or(after, |(name, _)| name);
+        if !["HOME", "CWD", "TEMP"].contains(&name) {
+            return Some(ScopeProblem::Placeholder(name.to_string()));
+        }
+        return None;
+    }
+    body.is_empty().then_some(ScopeProblem::Empty)
 }
 
 #[cfg(test)]
@@ -258,6 +537,34 @@ mod tests {
             &m.dependency("json").unwrap().source,
             Source::Registry { registry: Some(r), package } if r == "main" && package == "acme/json"
         ));
+    }
+
+    /// `unio check` finds a problem in exactly the entries the sandbox refuses to expand.
+    #[test]
+    fn scope_problems_agree_with_the_sandbox() {
+        use unio_runtime::sandbox::{Places, Scope};
+        let places = Places::current(&std::env::temp_dir());
+        for entry in [
+            "$HOME/data/**",
+            "$CWD",
+            "$TEMP/x",
+            "data/in.txt",
+            "/etc/hosts",
+            "**",
+            "/**",
+            "$HOEM/x",
+            "$/x",
+            "$HOME/*.txt",
+            "a/**/b",
+            "",
+            "x/***",
+        ] {
+            assert_eq!(
+                scope_problem(entry).is_some(),
+                Scope::expand(entry, &places).is_err(),
+                "{entry:?}"
+            );
+        }
     }
 
     #[test]

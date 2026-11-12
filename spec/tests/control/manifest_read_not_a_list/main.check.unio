@@ -1,0 +1,6 @@
+# Hidden behavioural check of manifest_read_not_a_list: test blocks that the reference fix passes.
+
+test "lines are counted":
+    assert count_lines("") == 0
+    assert count_lines("one") == 1
+    assert count_lines("one\ntwo\nthree") == 3

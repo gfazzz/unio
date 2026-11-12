@@ -11,7 +11,7 @@
 | [../spec/README.md](../spec/README.md) | EBNF grammar, its reference checker, and the specification test corpus |
 | [stdlib.md](stdlib.md) | Standard library: overview of its Unio sources in `stdlib/` |
 | [style.md](style.md) | The one style of Unio sources that `unio fmt` writes: layout, blank lines, spaces, line breaking, branches, comments |
-| [semantics.md](semantics.md) | Static semantics of 0.1: names, types, calls, operators, errors, mutability, resources, layers and effects, with diagnostics E0051–E0085 |
+| [semantics.md](semantics.md) | Static semantics of 0.1: names, types, calls, operators, errors, mutability, resources, layers and effects, with diagnostics E0051–E0088 |
 | [packages.md](packages.md) | Packages: the manifest, `unio.lock`, `unio add`, `remove`, `update`, `install`, the cache, signed registries as static files with `unio publish` and keys, the archive format |
 | [runtime.md](runtime.md) | Dynamic semantics and the runtime: evaluation order, values and memory, errors and faults, resources, programs and tests, the 83 external functions, the interpreter of S5 |
 | [../examples](../examples) | Reference utilities checked against the grammar |

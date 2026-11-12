@@ -110,7 +110,8 @@ def programs():
             for dirpath, _, files in os.walk(path):
                 for f in files:
                     full = os.path.join(dirpath, f)
-                    if f.endswith(".unio") and not is_helper(f) and headers(full):
+                    if (f.endswith(".unio") or f == "unio.toml") and not is_helper(f) \
+                            and headers(full):
                         faulty = os.path.relpath(full, path)
             if faulty is None:
                 fail(f"{name}: no faulty file with headers")
@@ -120,6 +121,10 @@ def programs():
     for p in found:
         line, code, category, core = headers(program_file(p, p["faulty"]))
         p.update(line=line, code=code, category=category, core=core)
+        # A faulty manifest (E0088) is checked through main.unio beside it, which the hidden
+        # check joins.
+        p["module"] = (os.path.join(os.path.dirname(p["faulty"]), "main.unio")
+                       if os.path.basename(p["faulty"]) == "unio.toml" else p["faulty"])
     return found
 
 
@@ -223,8 +228,8 @@ def cmd_prepare(args):
     if not os.path.isfile(UNIO):
         fail(f"no compiler at {UNIO}; build it with cargo build --release")
     found = programs()
-    if len(found) != 200:
-        fail(f"the control set has {len(found)} programs, not 200")
+    if len(found) < 200:
+        fail(f"the control set has {len(found)} programs, fewer than 200")
     moved = hidden_files()
     if not moved:
         fail("no reference fixes or hidden checks in spec/tests/control")
@@ -244,8 +249,8 @@ def cmd_prepare(args):
         "programs": {},
     }
     for p in found:
-        directory = os.path.dirname(program_file(p, p["faulty"]))
-        result, diagnostics = check_json(directory, [os.path.basename(p["faulty"])], p["core"])
+        directory = os.path.dirname(program_file(p, p["module"]))
+        result, diagnostics = check_json(directory, [os.path.basename(p["module"])], p["core"])
         text = json.dumps(diagnostics, indent=2, ensure_ascii=False) if diagnostics is not None \
             else result.stdout + result.stderr
         p["diagnostics"] = text
@@ -336,17 +341,17 @@ def evaluate(p, state, files):
             text = json.dumps(diagnostics, indent=2, ensure_ascii=False)
             return False, "unio check --diagnostics=json reports:\n" + text, \
                 f"{len(errors)} error(s), first {errors[0]['code']}"
-        stem = os.path.splitext(p["faulty"])[0]
+        stem = os.path.splitext(p["module"])[0]
         check = read(os.path.join(hidden, (p["name"] + "/" if p["package"] else "") +
                                   (stem + ".check.unio" if p["package"] else p["name"] + ".check.unio")))
-        module = os.path.join(base, p["faulty"])
+        module = os.path.join(base, p["module"])
         if check.startswith("# Form check"):
             m = re.search(r"^# changed lines: (\d+)-(\d+)$", check, re.M)
             first, last = changed_lines(read(program_file(p, p["faulty"])), read(module))
             if first < int(m.group(1)) or last > int(m.group(2)):
                 return False, ("unio check is clean, but the answer changes more than the faulty "
                                "construct"), f"form check: lines {first}-{last} changed"
-            fmt = run([UNIO, "fmt", "--check", p["faulty"]], base)
+            fmt = run([UNIO, "fmt", "--check", p["module"]], base)
             if fmt.returncode != 0:
                 return False, ("unio check is clean, but the program is not in the one style "
                                "(unio fmt --check fails)"), "form check: not formatted"

@@ -103,6 +103,7 @@ fn load_with(
 ) -> program::Program {
     let mut program = program::Program::load(files);
     program.tests = tests;
+    program.check_manifests();
     let syntax_ok = program.modules.iter().all(|m| !m.analysis.has_errors());
     if syntax_ok {
         check::check_program(&mut program);
@@ -134,14 +135,15 @@ pub fn load_for_run(
     profile: effects::Profile,
 ) -> Result<program::Program, Vec<Analysis>> {
     let program = load_checked(files, profile);
-    let failed = program.modules.iter().enumerate().any(|(i, m)| {
-        m.report
-            && (m.analysis.has_errors()
-                || program
-                    .diagnostics
-                    .iter()
-                    .any(|(module, d)| *module == i && d.severity == Severity::Error))
-    });
+    let failed = !program.manifests.is_empty()
+        || program.modules.iter().enumerate().any(|(i, m)| {
+            m.report
+                && (m.analysis.has_errors()
+                    || program
+                        .diagnostics
+                        .iter()
+                        .any(|(module, d)| *module == i && d.severity == Severity::Error))
+        });
     if failed {
         Err(analyses(program))
     } else {
@@ -158,6 +160,7 @@ pub fn check_files_with(files: &[std::path::PathBuf], profile: effects::Profile)
 /// The analyses of the given files, with the semantic diagnostics merged in.
 pub fn analyses(mut program: program::Program) -> Vec<Analysis> {
     let semantic = std::mem::take(&mut program.diagnostics);
+    let manifests = std::mem::take(&mut program.manifests);
     let mut modules = std::mem::take(&mut program.modules);
     for (module, diagnostic) in semantic {
         let list = &mut modules[module].analysis.diagnostics;
@@ -176,6 +179,7 @@ pub fn analyses(mut program: program::Program) -> Vec<Analysis> {
                 .sort_by_key(|d| (d.span.start.line, d.span.start.column));
             m.analysis
         })
+        .chain(manifests)
         .collect()
 }
 

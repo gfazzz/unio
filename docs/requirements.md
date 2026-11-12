@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.18 (draft). Changes from 0.17: RFC 0007, accepted by the project lead on 2026-11-12, keeps reference counting for 0.1. C-13 states reference counting with its guarantees (precise, immediate, non-moving, no tracing since values form no cycles, freeing proportional to what is freed with stack use independent of depth) instead of a precise, tracing, non-moving GC; L-19, S-11, and S-12 name the memory management of the runtime instead of the GC; the GC-pause row of 7.1 becomes the pause of freeing a structure at once, at most 1 ms per MB, measured by `bench/free/`.
+Specification version: 0.19 (draft). Changes from 0.18: RFC 0008, accepted by the project lead on 2026-11-12, makes `unio check` check the manifest as a whole and report each mistake as E0088 at its line (T-6).
+
+Changes from 0.17: RFC 0007, accepted by the project lead on 2026-11-12, keeps reference counting for 0.1. C-13 states reference counting with its guarantees (precise, immediate, non-moving, no tracing since values form no cycles, freeing proportional to what is freed with stack use independent of depth) instead of a precise, tracing, non-moving GC; L-19, S-11, and S-12 name the memory management of the runtime instead of the GC; the GC-pause row of 7.1 becomes the pause of freeing a structure at once, at most 1 ms per MB, measured by `bench/free/`.
 
 Changes from 0.16: RFC 0006 separates the limits of the workers of the tools from those of the program. SB-3 and SB-3a add the `[compile]` table of the policy (`compile.memory_bytes`, `compile.wall_seconds`, `compile.cpu_seconds`); SB-11 takes the limits of every worker from it alike, never from `[limits]`, and refuses with code 103 a limit that cannot be honoured instead of raising it.
 
@@ -289,7 +291,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 6.4 Packages
 
-- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions, list of `unsafe module`. Permissions are scoped: `files.read` and `files.write` are lists of paths with the placeholders `$HOME`, `$CWD`, `$TEMP` and the suffix `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. The list of `unsafe module` names exactly the modules of the package that carry the marker. In a package the marker only lists the module for review: it grants no right to `external function` (S-7, E0086), no permission beyond `[permissions]`, and changes no check and no rule of the sandbox (RFC 0004). Example:
+- T-6. Manifest `unio.toml`: name, semantic version, dependencies, permissions, list of `unsafe module`. `unio check` checks the manifest as a whole by these rules and reports each mistake as E0088 at its line (RFC 0008). Permissions are scoped: `files.read` and `files.write` are lists of paths with the placeholders `$HOME`, `$CWD`, `$TEMP` and the suffix `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. The list of `unsafe module` names exactly the modules of the package that carry the marker. In a package the marker only lists the module for review: it grants no right to `external function` (S-7, E0086), no permission beyond `[permissions]`, and changes no check and no rule of the sandbox (RFC 0004). Example:
 - T-6a. Relative paths in the permissions of a manifest or a policy are relative to the directory of that file; links and `..` are resolved before comparison; a program name without a path matches only that name.
 
 ```toml

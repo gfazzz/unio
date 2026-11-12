@@ -248,6 +248,9 @@ pub struct Program {
     stdlib_root: Option<PathBuf>,
     /// The lock of each root package, as the loader reads it (T-14).
     locks: HashMap<PathBuf, Result<Option<crate::package::Resolved>, String>>,
+    /// The manifests of the reported packages that have mistakes (E0088, T-6), each as the
+    /// analysis of a file of its own.
+    pub manifests: Vec<Analysis>,
 }
 
 /// The directory of the trusted standard library, chosen by its origin only (RFC 0004): the
@@ -303,6 +306,47 @@ fn find_stdlib(_start: &Path) -> Option<PathBuf> {
 }
 
 const LAYERS: [&str; 3] = ["core", "alloc", "std"];
+
+/// Whether the mistakes of the package's `unio.toml` (E0088) already cover the dependency
+/// with the alias: a manifest that does not parse, or a mistake in that entry. Its imports
+/// then give no E0048 of their own (semantics 2.8).
+fn manifest_covers_dependency(package: &Path, alias: &str) -> bool {
+    use crate::package::manifest::Mistake;
+    let Ok(text) = crate::vfs::read_to_string(&package.join("unio.toml")) else {
+        return false;
+    };
+    crate::package::manifest::check(&text)
+        .iter()
+        .any(|(_, mistake)| match mistake {
+            Mistake::Syntax(_) => true,
+            Mistake::Dependency(a, _) => a == alias,
+            _ => false,
+        })
+}
+
+/// The E0088 diagnostics of the text of a manifest (T-6), each over the text of its line.
+pub fn manifest_diagnostics(source: &str) -> Vec<Diagnostic> {
+    let mut starts = vec![0];
+    starts.extend(source.match_indices('\n').map(|(i, _)| i + 1));
+    crate::package::manifest::check(source)
+        .into_iter()
+        .map(|(line, mistake)| {
+            let begin = starts.get(line - 1).copied().unwrap_or(source.len());
+            let end = source[begin..]
+                .find('\n')
+                .map_or(source.len(), |i| begin + i);
+            let text = source[begin..end].trim_end_matches('\r');
+            let indent = text.len() - text.trim_start().len();
+            let pos = |offset: usize| crate::diag::Pos {
+                offset: begin + offset,
+                line,
+                column: text[..offset].chars().count() + 1,
+            };
+            let span = Span::new(pos(indent), pos(text.len().max(indent)));
+            Diagnostic::error("E0088", span, catalog::manifest_mistake(&mistake))
+        })
+        .collect()
+}
 
 /// Whether `[dependencies]` of the package's `unio.toml` lists the alias (T-6, T-14).
 fn declares_dependency(package: &Path, alias: &str) -> bool {
@@ -444,6 +488,7 @@ impl Program {
             by_path: HashMap::new(),
             stdlib_root: None,
             locks: HashMap::new(),
+            manifests: Vec::new(),
         }
     }
 
@@ -517,6 +562,7 @@ impl Program {
             by_path: HashMap::new(),
             stdlib_root,
             locks: HashMap::new(),
+            manifests: Vec::new(),
         };
         if let Some(root) = program.stdlib_root.clone() {
             for layer in LAYERS {
@@ -747,6 +793,47 @@ impl Program {
                     }
                 }
             }
+        }
+    }
+
+    /// Checks the manifests of the packages of the reported modules (E0088, T-6): the packages
+    /// of the given files and of the modules they import from them, not the standard library
+    /// or a dependency, whose manifest was checked when it was installed.
+    pub fn check_manifests(&mut self) {
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for m in &self.modules {
+            if !m.report || m.stdlib || m.dependency.is_some() || seen.contains(&m.package) {
+                continue;
+            }
+            seen.push(m.package.clone());
+            let path = m.package.join("unio.toml");
+            let Ok(source) = crate::vfs::read_to_string(&path) else {
+                continue;
+            };
+            let diagnostics = manifest_diagnostics(&source);
+            if diagnostics.is_empty() {
+                continue;
+            }
+            // Named as the file of the module was given: `unio.toml` beside `main.unio`.
+            let shown = m
+                .path
+                .parent()
+                .and_then(|dir| dir.strip_prefix(&m.package).ok())
+                .and_then(|below| {
+                    let given = Path::new(&m.analysis.path).parent()?;
+                    given.ancestors().nth(below.components().count())
+                })
+                .map_or(path.clone(), |dir| dir.join("unio.toml"));
+            self.manifests.push(Analysis {
+                path: shown.to_string_lossy().into_owned(),
+                source,
+                diagnostics,
+                comments: Vec::new(),
+                file: ast::File {
+                    unsafe_module: false,
+                    items: Vec::new(),
+                },
+            });
         }
     }
 
@@ -1037,6 +1124,12 @@ impl Program {
                             continue;
                         }
                     };
+                    if path.len() > 1
+                        && path[0] == "deps"
+                        && manifest_covers_dependency(&self.modules[module].package, &path[1])
+                    {
+                        continue;
+                    }
                     if path.len() > 1 && path[0] == "deps" {
                         let message = catalog::dependency_missing(&path[1], &problem);
                         self.error(module, Diagnostic::error("E0048", span, message));

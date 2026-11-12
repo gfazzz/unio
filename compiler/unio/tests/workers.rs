@@ -645,8 +645,21 @@ fn the_manifest_does_not_set_the_compile_limits() {
     )
     .unwrap();
     let output = p.unio(&["check", "main.unio"], &[("UNIO_WORKER_PROBE", "sleep=2")]);
-    assert_eq!(output.status.code(), Some(0), "{}", all(&output));
+    // The worker is not stopped at one second: the tables are no limits of the tools. They are
+    // no tables of a manifest either, so `unio check` reports each as E0088 (T-6).
+    assert_eq!(output.status.code(), Some(1), "{}", all(&output));
     assert!(probe_result(&output, "sleep=2").starts_with("allowed"));
+    let stdout = text(&output.stdout);
+    assert_eq!(
+        stdout.matches("error[E0088]").count(),
+        2,
+        "{}",
+        all(&output)
+    );
+    assert!(
+        stdout.contains("[compile]") && stdout.contains("[limits]"),
+        "{stdout}"
+    );
 }
 
 /// (f) Pathological sources: deep nesting is refused by the parser's bound (E0013) at once; a

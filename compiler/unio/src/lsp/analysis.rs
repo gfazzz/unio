@@ -15,7 +15,7 @@ use super::facts::Facts;
 use super::json::Json;
 use super::{offset_of, path_to_uri, range, Kind, Request};
 use crate::ast::{self, ExprKind, PatternKind, StatementKind};
-use crate::diag::{Severity, Span};
+use crate::diag::{Diagnostic, Severity, Span};
 use crate::program::{Binding, DefKind, FnId, ModId, Program, Symbol};
 use crate::types::{DefId, Ty};
 use crate::Lang;
@@ -279,12 +279,25 @@ impl Context<'_> {
     }
 
     fn diagnostics(&self) -> Json {
+        let lang = self.request.lang;
+        let mut items = Vec::new();
+        // The manifest of the package (E0088, T-6): in its own document at its lines, and in
+        // a source document at its start, with the place in the manifest as related
+        // information, since an editor may show only the documents of the language.
+        let manifest = package_root(&self.doc).join("unio.toml");
+        let manifest_text = crate::vfs::read_to_string(&manifest).unwrap_or_default();
+        let manifest_found = crate::program::manifest_diagnostics(&manifest_text);
+        if self.doc.file_name().is_some_and(|n| n == "unio.toml") {
+            for d in &manifest_found {
+                let at = range(&manifest_text, d.span.start.offset, d.span.end.offset);
+                items.push(lsp_diagnostic(d, at, lang, None));
+            }
+            return Json::object(vec![("diagnostics", Json::Array(items))]);
+        }
         let program = crate::load_checked(
             std::slice::from_ref(&self.doc),
             crate::effects::Profile::Application,
         );
-        let lang = self.request.lang;
-        let mut items = Vec::new();
         if let Some(m) = module_of(&program, &self.doc) {
             let module = &program.modules[m];
             let mut all = module.analysis.diagnostics.clone();
@@ -295,41 +308,69 @@ impl Context<'_> {
             }
             all.sort_by_key(|d| (d.span.start.offset, d.span.end.offset));
             let source = &module.analysis.source;
-            for d in all {
-                let severity = match d.severity {
-                    Severity::Error => 1,
-                    Severity::Warning => 2,
-                    Severity::Hint => 4,
-                };
-                let mut message = d.message.get(lang).to_string();
-                if let Some(label) = &d.label {
-                    message.push_str(&format!(" ({})", label.get(lang)));
+            if let Some(uri) = self.paths.uri(&manifest) {
+                for d in &manifest_found {
+                    let at = range(&manifest_text, d.span.start.offset, d.span.end.offset);
+                    let related = Json::object(vec![
+                        (
+                            "location",
+                            Json::object(vec![("uri", Json::str(uri.clone())), ("range", at)]),
+                        ),
+                        (
+                            "message",
+                            Json::str(format!("unio.toml:{}", d.span.start.line)),
+                        ),
+                    ]);
+                    items.push(lsp_diagnostic(d, range(source, 0, 0), lang, Some(related)));
                 }
-                items.push(Json::object(vec![
-                    (
-                        "range",
-                        range(source, d.span.start.offset, d.span.end.offset),
-                    ),
-                    ("severity", Json::int(severity)),
-                    ("code", Json::str(d.code)),
-                    (
-                        "codeDescription",
-                        Json::object(vec![("href", Json::str(explanation_uri(d.code)))]),
-                    ),
-                    ("source", Json::str("unio")),
-                    ("message", Json::str(message)),
-                    (
-                        "data",
-                        Json::object(vec![(
-                            "explanation",
-                            Json::str(crate::diag::explanation(d.code).get(lang)),
-                        )]),
-                    ),
-                ]));
+            }
+            for d in all {
+                let at = range(source, d.span.start.offset, d.span.end.offset);
+                items.push(lsp_diagnostic(&d, at, lang, None));
             }
         }
         Json::object(vec![("diagnostics", Json::Array(items))])
     }
+}
+
+/// A diagnostic of the protocol: the range, the code with the link to its explanation, and the
+/// message; with `related`, a manifest diagnostic shown in a source document, whose message
+/// starts with its place.
+fn lsp_diagnostic(d: &Diagnostic, at: Json, lang: Lang, related: Option<Json>) -> Json {
+    let severity = match d.severity {
+        Severity::Error => 1,
+        Severity::Warning => 2,
+        Severity::Hint => 4,
+    };
+    let mut message = d.message.get(lang).to_string();
+    if let Some(label) = &d.label {
+        message.push_str(&format!(" ({})", label.get(lang)));
+    }
+    if related.is_some() {
+        message = format!("unio.toml:{}: {message}", d.span.start.line);
+    }
+    let mut fields = vec![
+        ("range", at),
+        ("severity", Json::int(severity)),
+        ("code", Json::str(d.code)),
+        (
+            "codeDescription",
+            Json::object(vec![("href", Json::str(explanation_uri(d.code)))]),
+        ),
+        ("source", Json::str("unio")),
+        ("message", Json::str(message)),
+        (
+            "data",
+            Json::object(vec![(
+                "explanation",
+                Json::str(crate::diag::explanation(d.code).get(lang)),
+            )]),
+        ),
+    ];
+    if let Some(related) = related {
+        fields.push(("relatedInformation", Json::Array(vec![related])));
+    }
+    Json::object(fields)
 }
 
 /// The link of a code to its explanation in the catalog (C-9): the editor shows it as the text

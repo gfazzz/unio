@@ -61,7 +61,7 @@ pub const CODES: &[&str] = &[
     "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
     "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074", "E0075", "E0076",
     "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085", "E0045",
-    "E0046", "E0047", "E0048", "E0086", "E0087",
+    "E0046", "E0047", "E0048", "E0086", "E0087", "E0088",
 ];
 
 /// Codes of the name and type checks (sprint S3); their examples need the whole check.
@@ -70,7 +70,7 @@ pub const SEMANTIC_CODES: &[&str] = &[
     "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
     "E0066", "E0067", "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074",
     "E0075", "E0076", "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084",
-    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087",
+    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087", "E0088",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -444,7 +444,7 @@ pub fn rest_not_last() -> Msg {
 pub fn sample_messages() -> Vec<(&'static str, Msg)> {
     let found = Msg::new("name 'x'", "имя 'x'");
     let what = Msg::new("':'", "':'");
-    vec![
+    let mut samples = vec![
         ("E0001", tab_in_indentation()),
         ("E0001", replace_tab()),
         ("E0002", indentation_not_multiple()),
@@ -612,7 +612,64 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ),
         ("E0086", external_outside_stdlib("poke", false)),
         ("E0086", external_outside_stdlib("poke", true)),
-    ]
+    ];
+    for mistake in sample_manifest_mistakes() {
+        samples.push(("E0088", manifest_mistake(&mistake)));
+    }
+    samples
+}
+
+/// One mistake of every kind for E0088, with the longest texts the catalog test should see.
+fn sample_manifest_mistakes() -> Vec<crate::package::manifest::Mistake> {
+    use crate::package::manifest::{DependencyMistake as D, ListOf, Mistake as M, ScopeProblem};
+    let mut all = vec![
+        M::Syntax("the list is not closed".into()),
+        M::UnknownTable("permision".into()),
+        M::UnknownKey("package.nmae".into()),
+        M::NotText("package.name".into()),
+        M::Name("Bad Name".into()),
+        M::Version("'one' is not a version number".into()),
+        M::EmptyName("permissions.process".into()),
+        M::Variable("HOME=/root".into()),
+        M::Network,
+        M::UnknownPermission("permissions.net".into()),
+    ];
+    for of in [
+        ListOf::Paths,
+        ListOf::Variables,
+        ListOf::Programs,
+        ListOf::Modules,
+    ] {
+        all.push(M::NotList("permissions.files.write".into(), of));
+    }
+    for problem in [
+        ScopeProblem::Empty,
+        ScopeProblem::Star,
+        ScopeProblem::Placeholder("HOEM".into()),
+    ] {
+        all.push(M::Scope {
+            key: "permissions.files.write".into(),
+            entry: "$HOEM/data/*.json".into(),
+            problem,
+        });
+    }
+    for mistake in [
+        D::NotTable,
+        D::Alias,
+        D::NotText("registry".into()),
+        D::UnknownField("colour".into()),
+        D::Version("'one' is not a version number".into()),
+        D::EmptyPath,
+        D::NoPackage,
+        D::RegistryPackage("json".into()),
+        D::NoVersion,
+        D::NoSha,
+        D::BadSha,
+        D::OneSource,
+    ] {
+        all.push(M::Dependency("vendored".into(), mistake));
+    }
+    all
 }
 
 // ---------------------------------------------------------------- what E0012 expects
@@ -995,6 +1052,12 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "`external function` привязывает реализацию, написанную не на Unio. В выпуске 0.1 её объявляет только доверенная стандартная библиотека, в своих файлах `unsafe module` (Б-7, RFC 0004); библиотеке доверяют потому, что её поставляет инструментарий или его оператор, а не из-за имени или каталога. Пометка `unsafe module` в пакете не даёт права на внешние функции и не расширяет полномочия. Напишите функцию на Unio или вызовите функцию стандартной библиотеки, которая её даёт.",
             "unsafe module\n\nexternal function poke(address as Int) returns Int\n",
             "function poke(address as Int) returns Int:\n    return address\n",
+        ),
+        "E0088" => (
+            "The manifest `unio.toml` of the package is checked as a whole (T-6), by `unio check` as by `unio run` and `unio test`. `[package]` has `name` (lowercase letters, digits, `-` and `_`, starting with a letter), `version` (a semantic version) and `unsafe_modules` (a list of module names). In `[permissions]`, `files.read` and `files.write` are lists of paths, which may start with `$HOME`, `$CWD` or `$TEMP` and end with `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. Each entry of `[dependencies]` is a table with exactly one source: `path`, `registry` with `package`, or `archive` with `sha384`. The error is at the line of the mistake; correct the value there.",
+            "Манифест `unio.toml` пакета проверяется целиком (И-6), командой `unio check` так же, как `unio run` и `unio test`. В `[package]` есть `name` (строчные буквы, цифры, `-` и `_`, начиная с буквы), `version` (семантическая версия) и `unsafe_modules` (список имён модулей). В `[permissions]` `files.read` и `files.write` — списки путей, которые могут начинаться с `$HOME`, `$CWD` или `$TEMP` и заканчиваться на `/**` для поддерева; `env` — список имён переменных; `process` — список программ; `network` в 0.1 равно `false`. Каждая запись `[dependencies]` — таблица ровно с одним источником: `path`, `registry` с `package` или `archive` с `sha384`. Ошибка указана в строке ошибки; исправьте значение там.",
+            "[package]\nname = \"report\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = true\n",
+            "[package]\nname = \"report\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = [\"$CWD/**\"]\n",
         ),
         _ => return None,
     })
@@ -1651,6 +1714,133 @@ pub fn dependency_missing(alias: &str, problem: &DependencyProblem) -> Msg {
 
 /// E0086: an external function outside an unsafe module of the trusted standard library
 /// (S-7, RFC 0004).
+/// E0088: a mistake of the manifest (T-6).
+pub fn manifest_mistake(mistake: &crate::package::manifest::Mistake) -> Msg {
+    use crate::package::manifest::{DependencyMistake as D, ListOf, Mistake as M, ScopeProblem};
+    match mistake {
+        M::Syntax(problem) => Msg::new(
+            format!("unio.toml cannot be read: {problem}"),
+            format!("unio.toml не читается: {problem}"),
+        ),
+        M::UnknownTable(name) => Msg::new(
+            format!("unio.toml has no table [{name}]; use [package], [dependencies] and [permissions]"),
+            format!("в unio.toml нет таблицы [{name}]; используйте [package], [dependencies] и [permissions]"),
+        ),
+        M::UnknownKey(key) => Msg::new(
+            format!("unknown key {key} in unio.toml; [package] has name, version and unsafe_modules"),
+            format!("неизвестный ключ {key} в unio.toml; в [package] есть name, version и unsafe_modules"),
+        ),
+        M::NotText(key) => Msg::new(
+            format!("{key} must be a text in double quotes"),
+            format!("{key} должно быть текстом в двойных кавычках"),
+        ),
+        M::Name(name) => Msg::new(
+            format!("the package name '{name}' must be lowercase letters, digits, '-' and '_', starting with a letter"),
+            format!("имя пакета '{name}' должно состоять из строчных букв, цифр, '-' и '_' и начинаться с буквы"),
+        ),
+        M::Version(problem) => Msg::new(
+            format!("package.version is not a semantic version: {problem}"),
+            format!("package.version не является семантической версией: {problem}"),
+        ),
+        M::NotList(key, of) => {
+            let (en, ru, example) = match of {
+                ListOf::Paths => ("paths", "путей", "[\"$CWD/**\"]"),
+                ListOf::Variables => ("variable names", "имён переменных", "[\"HOME\"]"),
+                ListOf::Programs => ("programs", "программ", "[\"git\"]"),
+                ListOf::Modules => ("module names", "имён модулей", "[\"raw\"]"),
+            };
+            Msg::new(
+                format!("{key} must be a list of {en}, for example {example}"),
+                format!("{key} должно быть списком {ru}, например {example}"),
+            )
+        }
+        M::Scope {
+            key,
+            entry,
+            problem,
+        } => match problem {
+            ScopeProblem::Empty => Msg::new(
+                format!("{key} has an empty path; write a path or remove the entry"),
+                format!("в {key} пустой путь; напишите путь или уберите запись"),
+            ),
+            ScopeProblem::Star => Msg::new(
+                format!("'{entry}' in {key}: only the suffix /** may contain '*'"),
+                format!("'{entry}' в {key}: '*' допускается только в суффиксе /**"),
+            ),
+            ScopeProblem::Placeholder(name) => Msg::new(
+                format!("'{entry}' in {key}: unknown placeholder ${name}; use $HOME, $CWD or $TEMP"),
+                format!("'{entry}' в {key}: неизвестная подстановка ${name}; используйте $HOME, $CWD или $TEMP"),
+            ),
+        },
+        M::EmptyName(key) => Msg::new(
+            format!("{key} has an empty name; write a name or remove the entry"),
+            format!("в {key} пустое имя; напишите имя или уберите запись"),
+        ),
+        M::Variable(entry) => Msg::new(
+            format!("'{entry}' in permissions.env is not a variable name; write the name without '='"),
+            format!("'{entry}' в permissions.env не является именем переменной; напишите имя без '='"),
+        ),
+        M::Network => Msg::new(
+            "permissions.network must be false in Unio 0.1",
+            "permissions.network в Unio 0.1 должно быть false",
+        ),
+        M::UnknownPermission(key) => Msg::new(
+            format!("unknown permission {key}; use files.read, files.write, env, process or network"),
+            format!("неизвестное полномочие {key}; используйте files.read, files.write, env, process или network"),
+        ),
+        M::Dependency(alias, mistake) => match mistake {
+            D::NotTable => Msg::new(
+                format!("the dependency '{alias}' must be a table, for example {alias} = {{ path = \"../{alias}\" }}"),
+                format!("зависимость '{alias}' должна быть таблицей, например {alias} = {{ path = \"../{alias}\" }}"),
+            ),
+            D::Alias => Msg::new(
+                format!("the alias '{alias}' must be lowercase letters, digits and '_', starting with a letter or '_', and not std or deps"),
+                format!("псевдоним '{alias}' должен состоять из строчных букв, цифр и '_', начинаться с буквы или '_' и не быть std или deps"),
+            ),
+            D::NotText(field) => Msg::new(
+                format!("dependencies.{alias}.{field} must be a text in double quotes"),
+                format!("dependencies.{alias}.{field} должно быть текстом в двойных кавычках"),
+            ),
+            D::UnknownField(field) => Msg::new(
+                format!("unknown key dependencies.{alias}.{field}; use path, registry and package, or archive and sha384, with version"),
+                format!("неизвестный ключ dependencies.{alias}.{field}; используйте path, registry и package или archive и sha384, с version"),
+            ),
+            D::Version(problem) => Msg::new(
+                format!("dependencies.{alias}.version is not a version requirement: {problem}"),
+                format!("dependencies.{alias}.version не является требованием к версии: {problem}"),
+            ),
+            D::EmptyPath => Msg::new(
+                format!("dependencies.{alias}.path is empty; write the directory of the package"),
+                format!("dependencies.{alias}.path пусто; напишите каталог пакета"),
+            ),
+            D::NoPackage => Msg::new(
+                format!("dependencies.{alias} names a registry but no package; add package = \"owner/name\""),
+                format!("dependencies.{alias} называет реестр, но не пакет; добавьте package = \"owner/name\""),
+            ),
+            D::RegistryPackage(package) => Msg::new(
+                format!("dependencies.{alias}.package '{package}' must be owner/name"),
+                format!("dependencies.{alias}.package '{package}' должно иметь вид owner/name"),
+            ),
+            D::NoVersion => Msg::new(
+                format!("dependencies.{alias} from a registry needs a version requirement; add version = \"^1.0\""),
+                format!("dependencies.{alias} из реестра требует требования к версии; добавьте version = \"^1.0\""),
+            ),
+            D::NoSha => Msg::new(
+                format!("dependencies.{alias}.archive needs sha384, the hash of the archive"),
+                format!("dependencies.{alias}.archive требует sha384, хеш архива"),
+            ),
+            D::BadSha => Msg::new(
+                format!("dependencies.{alias}.sha384 must be 96 lowercase hexadecimal digits"),
+                format!("dependencies.{alias}.sha384 должно состоять из 96 строчных шестнадцатеричных цифр"),
+            ),
+            D::OneSource => Msg::new(
+                format!("dependencies.{alias} needs exactly one source: path, registry with package, or archive with sha384"),
+                format!("dependencies.{alias} требует ровно одного источника: path, registry с package или archive с sha384"),
+            ),
+        },
+    }
+}
+
 pub fn external_outside_stdlib(name: &str, stdlib: bool) -> Msg {
     if stdlib {
         Msg::new(

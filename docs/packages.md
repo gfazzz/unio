@@ -29,6 +29,8 @@ The key of a dependency is its alias, the name in `import deps.<alias>.<module>`
 
 `version` is a requirement: `^1.2.3` (the default for a bare version), `~1.2`, `=1.2.3`, `>=1.0, <2.0`, `*`. A prerelease is chosen only when a requirement names a prerelease of the same version. The table form `[dependencies.util]` with `path = "../util"` below it means the same as the inline form.
 
+`unio check` checks the whole manifest of each package it reports, as `unio run` and `unio test` read it: a value of the wrong form (`files.read = true` instead of a list of paths, an unknown placeholder or table, a dependency that is not a table or has no single source, an invalid name or version) is E0088 at its line of `unio.toml`, and the language server shows it too ([semantics.md](semantics.md) 8.6).
+
 ## 2. Identity, resolution, and the lock
 
 The identity of a package is its origin (T-14): `registry+<registry URL>#<owner>/<name>`, `path+<directory relative to the root package>`, or `archive+<file relative to the root package, or URL>`. Two origins with the same name are two packages: their modules and types are different, even when their files are the same. Release 0.1 allows one version per identity.

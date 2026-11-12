@@ -17,8 +17,18 @@ pub enum TomlValue {
 /// Keys are written in full, for example `permissions.files.read`.
 pub type Table = BTreeMap<String, TomlValue>;
 
+/// The line, from 1, of every full key and of every table header, for diagnostics that point
+/// into the file: the members of an inline table have the line of the table.
+pub type Lines = BTreeMap<String, usize>;
+
 pub fn parse(source: &str) -> Result<Table, String> {
+    parse_with_lines(source).map(|(table, _)| table)
+}
+
+/// Like [`parse`], with the line of every key and table header.
+pub fn parse_with_lines(source: &str) -> Result<(Table, Lines), String> {
     let mut table = Table::new();
+    let mut found = Lines::new();
     let mut prefix = String::new();
     let mut lines = source.lines().enumerate().peekable();
     while let Some((index, raw)) = lines.next() {
@@ -33,6 +43,7 @@ pub fn parse(source: &str) -> Result<Table, String> {
             }
             let name = line[1..line.len() - 1].trim();
             check_key(name, number)?;
+            found.entry(name.to_string()).or_insert(number);
             prefix = format!("{name}.");
             continue;
         }
@@ -51,14 +62,27 @@ pub fn parse(source: &str) -> Result<Table, String> {
             .ok_or_else(|| format!("line {number}: expected key = value"))?;
         let key = key.trim();
         check_key(key, number)?;
-        insert(&mut table, format!("{prefix}{key}"), value.trim(), number)?;
+        insert(
+            &mut table,
+            &mut found,
+            format!("{prefix}{key}"),
+            value.trim(),
+            number,
+        )?;
     }
-    Ok(table)
+    Ok((table, found))
 }
 
 /// Inserts a value under its full key; the members of an inline table under the key of the
 /// table and their own.
-fn insert(table: &mut Table, full: String, value: &str, number: usize) -> Result<(), String> {
+fn insert(
+    table: &mut Table,
+    lines: &mut Lines,
+    full: String,
+    value: &str,
+    number: usize,
+) -> Result<(), String> {
+    lines.entry(full.clone()).or_insert(number);
     if let Some(inner) = value.strip_prefix('{') {
         let inner = inner
             .strip_suffix('}')
@@ -75,7 +99,7 @@ fn insert(table: &mut Table, full: String, value: &str, number: usize) -> Result
             })?;
             let key = key.trim();
             check_key(key, number)?;
-            insert(table, format!("{full}.{key}"), value.trim(), number)?;
+            insert(table, lines, format!("{full}.{key}"), value.trim(), number)?;
         }
         if empty {
             return Err(format!("line {number}: the inline table {full} is empty"));
@@ -283,6 +307,20 @@ mod tests {
         assert!(parse("a = { }\n").is_err());
         assert!(parse("a = { b = 1, b = 2 }\n").is_err());
         assert!(parse("a = { b }\n").is_err());
+    }
+
+    #[test]
+    fn keys_and_headers_have_their_lines() {
+        let (_, lines) = parse_with_lines(
+            "# c\n[package]\nname = \"a\"\n\n[permissions]\nfiles.read = [\n  \"x=y\",\n]\nenv = []\n[dependencies]\nu = { path = \"p\" }\n",
+        )
+        .unwrap();
+        assert_eq!(lines["package"], 2);
+        assert_eq!(lines["package.name"], 3);
+        assert_eq!(lines["permissions.files.read"], 6);
+        assert_eq!(lines["permissions.env"], 9);
+        assert_eq!(lines["dependencies.u"], 11);
+        assert_eq!(lines["dependencies.u.path"], 11);
     }
 
     #[test]

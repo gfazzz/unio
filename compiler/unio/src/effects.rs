@@ -1296,9 +1296,13 @@ pub enum Profile {
     Core,
 }
 
-/// The effects a manifest permits, or None when it has no `[permissions]` table.
+/// The effects a manifest permits, or None when it has no `[permissions]` table or has a
+/// mistake, which is E0088 and gives no E0085 besides (semantics 2.8).
 pub fn manifest_permissions(package: &Path) -> Option<HashSet<&'static str>> {
     let text = crate::vfs::read_to_string(&package.join("unio.toml")).ok()?;
+    if !crate::package::manifest::check(&text).is_empty() {
+        return None;
+    }
     let mut section = String::new();
     let mut found = false;
     let mut permitted = HashSet::new();

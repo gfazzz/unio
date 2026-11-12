@@ -8,7 +8,9 @@
 //! then optionally `# profile: core` (the program is checked with `--profile=core`, as a package
 //! of the `core` profile is) and `# compiler-bug: TEXT` (the expected diagnostic is the first,
 //! but the compiler reports more; the test fails once the bug is gone, so that the marker is
-//! removed). In a directory the faulty file is the one with these headers.
+//! removed). In a directory the faulty file is the one with these headers; it may be the
+//! manifest `unio.toml` (its headers are comments of TOML) when the error is a mistake of the
+//! manifest (E0088), and the module that is checked and tested is then `main.unio`.
 //!
 //! The reference fix of a file program is `NAME.fixed.unio`; in a directory every
 //! `FILE.fixed.EXT` takes the place of `FILE.EXT` (a fix may change the manifest). The hidden
@@ -42,6 +44,9 @@ struct Program {
     path: PathBuf,
     /// The file with the headers.
     faulty: PathBuf,
+    /// The module that is checked and joined by the hidden check: the faulty file, or
+    /// `main.unio` beside a faulty manifest.
+    module: PathBuf,
     line: usize,
     code: String,
     category: String,
@@ -135,7 +140,9 @@ fn programs() -> Vec<Program> {
                 .into_iter()
                 .filter(|f| {
                     let n = file_name(f);
-                    n.ends_with(".unio") && !is_helper(&n) && headers(f).is_some()
+                    (n.ends_with(".unio") || n == "unio.toml")
+                        && !is_helper(&n)
+                        && headers(f).is_some()
                 })
                 .collect();
             assert_eq!(
@@ -155,10 +162,16 @@ fn programs() -> Vec<Program> {
                 faulty.display()
             )
         });
+        let module = if file_name(&faulty) == "unio.toml" {
+            faulty.with_file_name("main.unio")
+        } else {
+            faulty.clone()
+        };
         found.push(Program {
             name: name.trim_end_matches(".unio").to_string(),
             path,
             faulty,
+            module,
             line,
             code,
             category,
@@ -172,10 +185,10 @@ fn programs() -> Vec<Program> {
 /// The hidden check of a program.
 fn check_file(program: &Program) -> PathBuf {
     if program.path.is_dir() {
-        let stem = file_name(&program.faulty)
+        let stem = file_name(&program.module)
             .trim_end_matches(".unio")
             .to_string();
-        program.faulty.with_file_name(format!("{stem}.check.unio"))
+        program.module.with_file_name(format!("{stem}.check.unio"))
     } else {
         control_dir().join(format!("{}.check.unio", program.name))
     }
@@ -456,7 +469,12 @@ fn errors(dir: &Path, files: &[PathBuf], core: bool, first: &Path) -> Result<Vec
 #[test]
 fn the_control_set_has_200_programs_in_four_categories() {
     let programs = programs();
-    assert_eq!(programs.len(), 200, "the control set has 200 programs");
+    // The 200 programs of the model trial of check B, and the programs of codes added after it
+    // (E0088, found by that trial).
+    assert!(
+        programs.len() >= 200,
+        "the control set has at least 200 programs"
+    );
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for p in &programs {
         assert!(
@@ -504,10 +522,10 @@ fn the_control_set_has_200_programs_in_four_categories() {
 fn every_control_program_yields_its_expected_diagnostic() {
     let programs = programs();
     let failures = each(&programs, |p| {
-        let dir = p.faulty.parent().unwrap();
+        let dir = p.module.parent().unwrap();
         let found = errors(
             dir,
-            &[PathBuf::from(file_name(&p.faulty))],
+            &[PathBuf::from(file_name(&p.module))],
             p.core,
             &p.faulty,
         )?;
@@ -585,7 +603,7 @@ fn fixed_copy(p: &Program) -> (PathBuf, PathBuf, Vec<PathBuf>) {
         if target_name.ends_with(".unio") {
             sources.push(target.clone());
         }
-        if file.with_file_name(&target_name) == p.faulty {
+        if file.with_file_name(&target_name) == p.module {
             module = Some(target);
         }
     }
