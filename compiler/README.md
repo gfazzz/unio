@@ -136,18 +136,20 @@ before `main` or the first test:
 
 | System | Mechanisms | Not covered |
 |---|---|---|
-| Linux | `no_new_privs`; Landlock (ABI 1 to 7: files, TCP from ABI 4, signals and abstract sockets from ABI 6); seccomp-bpf: no sockets at all, no `ptrace`, `process_vm_*`, `mount`, `unshare`, `setns`, namespace flags of `clone`, `io_uring`, `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `open_by_handle_at`, `kexec`, modules, `TIOCSTI`; `RLIMIT_CORE` 0, `RLIMIT_FSIZE` | Landlock grants a scope of one written file on its directory, because the atomic commit creates a temporary file next to the target; scope roots that do not exist at the start grant nothing; with a `process` permission, children may read and execute the system directories (`/usr`, `/lib*`, `/bin`, `/etc/ld.so.*` and the like); `stat` is not restricted by Landlock |
-| macOS | a Seatbelt profile (`sandbox_init`, deny by default) and the same resource limits | Seatbelt applies to the whole process once, so `unio test` grants the union of its files' permissions plus reading their sources and the standard library; the runtime still keeps each file to its own |
-| Windows | none yet: AppContainer and Job Objects are not implemented | `unio run` and `unio test` stop with 103 unless the operator allows the weaker sandbox, which keeps only the runtime layer and the limits |
+| Linux | `no_new_privs`; Landlock (ABI 1 to 7: files, TCP from ABI 4, signals and abstract sockets from ABI 6); seccomp-bpf: no sockets at all, no `ptrace`, `process_vm_*`, `mount`, `unshare`, `setns`, namespace flags of `clone`, `io_uring`, `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `open_by_handle_at`, `kexec`, modules, `TIOCSTI`; `RLIMIT_CORE` 0, `RLIMIT_FSIZE` | Landlock grants a scope of one written file on its directory, because the atomic commit creates a temporary file next to the target; scope roots that do not exist at the start grant nothing; with a `process` permission, children may start with `execve` only the listed programs, the interpreters of listed scripts and the dynamic loader, and read the library directories (`/lib*`, `/usr/lib*`, `/usr/local/lib`), the libraries the listed programs need, `/etc/ld.so.cache` and `/etc/localtime`; through the loader a child can run any ELF program it can read, and a listed interpreter runs any script it can read (docs/runtime.md 9.5); `stat` is not restricted by Landlock |
+| macOS | a Seatbelt profile (`sandbox_init`, deny by default) and the same resource limits | Seatbelt applies to the whole process once, so `unio test` grants the union of its files' permissions plus reading their sources and the standard library; the runtime still keeps each file to its own; children may start only the listed programs and the interpreters of listed scripts, and a listed interpreter runs any script it can read |
+| Windows | none yet: AppContainer and the restrictions of a Job Object are not implemented (a Job Object only holds the process tree of a child and the limits of a tool worker) | `unio run` and `unio test` stop with 103 unless the operator allows the weaker sandbox, which keeps only the runtime layer and the limits |
 
 A missing mechanism (no Landlock or seccomp in the kernel, Landlock below ABI 3, Windows) stops
 the start with 103; with `--allow-weaker-sandbox` or `allow_weaker = true` the program runs and
 the missing restrictions are printed (SB-5). The program itself cannot lift any of this.
 
 A child of `process.run` gets only the variables granted under `env` and `PATH` (on Windows also
-`SystemRoot`); it runs in a process group of its own on Unix and in a Job Object with
-kill-on-close on Windows, and what is left of that tree is stopped when the child ends, times
-out, or overflows its output. The deadline covers reading the outputs; each output holds at most
+`SystemRoot`); it runs in a process group of its own on Unix, which no descendant can leave on
+Linux, and on Windows in a Job Object with kill-on-close that it joins while still suspended,
+and what is left of that tree is stopped when the child ends, times out, or overflows its
+output; on macOS descendants that left the group are found through their parents and the
+marker of the profile (checked in CI only). The deadline covers reading the outputs; each output holds at most
 16 MiB (`OutputTooLarge`) and counts against the heap limit (docs/runtime.md 9.5). Reads whose
 size the program decides (`read_bytes(max_bytes)`, whole files, `Text.repeat`) check the heap
 limit before they allocate, so a refused allocation ends with 102 instead of an abort
@@ -498,12 +500,15 @@ The tests were written before the code (concept, section 1.2):
   types; results and errors are not compared); a parameter that a function keeps has every
   argument passed for it anywhere; a lambda returned from a function does not keep the arguments
   of that call. These estimates can reject a call no run makes: under `--profile=core` it is
-  E0087, in a package with a manifest it can be E0085 (semantics 8.4); the checks of
-  parameter and field defaults record their effects but report no type errors yet; usages of
-  types are listed per referencing declaration.
-- Known limits of `process.run` (docs/runtime.md 9.5): a process that leaves the process group
-  (`setsid`) or, on Windows, starts before the child joins its job is not stopped; on Unix an
-  interrupt from the terminal does not reach a child in its own group. Heap exhaustion that the
+  E0087, in a package with a manifest it can be E0085 (semantics 8.4); usages of types are
+  listed per referencing declaration. Defaults of parameters and fields are checked like any
+  expression (names and types, E0056 or E0061).
+- Known limits of `process.run` (docs/runtime.md 9.5): on Linux a program that needs `setsid`
+  or `setpgid` in a child fails there, and without seccomp (the weaker sandbox) a process that
+  leaves the group outlives the call; on macOS a descendant that left the group after its parent
+  ended is found only by the marker of the profile, so not without a sandbox, and the macOS and
+  Windows trees are checked in CI only; on Unix an interrupt from the terminal does not reach a
+  child in its own group (the workers of the tools are stopped with their trees). Heap exhaustion that the
   system reports late (overcommit and its out-of-memory killer) ends the process without 102;
   outside the path of a fault, which the reserve serves, a small allocation the system refuses
   inside the Rust standard library aborts.
@@ -515,9 +520,12 @@ The tests were written before the code (concept, section 1.2):
 - Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows a worker has only a
   Job Object (memory, one process) and its files and network are not restricted, so the tools
   refuse there with 103 unless the operator allows the weaker sandbox; `stat` is not
-  restricted anywhere; the tool still reads the manifest and the policy itself for the sandboxes
+  restricted anywhere; the compile steps of `run` and `test` take the memory limit of the policy
+  only down to a floor of 256 MiB, because `limits.heap_bytes` is also the heap of the program; the tool still reads the manifest and the policy itself for the sandboxes
   of `run` and `test`; the language server (SB-13), the package operations (SB-12) and the
   archives of SB-15 do not exist yet.
 - The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object for
-  programs), native code for macOS, Windows and AArch64 and the rest of S6 (docs/runtime.md
-  8.6), and the other commands of requirement 6.1.
+  programs), the rest of S6 (cross-compilation, `--target`, docs/runtime.md 8.6), and the other
+  commands of requirement 6.1. Packages, signatures, the language server, the R-10 control set
+  and the cryptography policy are requirements only; none is implemented
+  ([docs/status.md](../docs/status.md)).

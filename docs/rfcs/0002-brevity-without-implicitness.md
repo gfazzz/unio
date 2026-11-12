@@ -1,6 +1,6 @@
 # RFC 0002: Brevity without implicitness
 
-- Status: accepted (specification, grammar, corpus, editor highlighting; compiler support pending)
+- Status: accepted (specification, grammar, corpus, editor highlighting, and the compiler: lambda parameter types from context with E0049, one-line branches in the parser and the formatter, `expr is pattern` with E0050; [status.md](../status.md), rows L-8a, L-33, T-1a)
 - Author: Unio project, with Claude
 - Date: 2026-11-06
 - Affects: concept / requirements / grammar / tools

@@ -1,6 +1,6 @@
 # RFC 0001: Precise language and library contracts
 
-- Status: accepted (specification, grammar and library sources; compiler support pending)
+- Status: accepted (specification, grammar and library sources; implemented in the compiler: E0040 to E0048 are reported by `unio check` and the library contracts run in `unio test`; E0048 covers only a missing dependency, since packages do not exist (T-14); what remains partial is listed in [status.md](../status.md), rows L-28 to L-32, S-13, S-15, S-17, C-11a, C-11b)
 - Author: Unio project, with Codex
 - Date: 2026-11-03
 - Affects: concept / requirements / grammar / standard library / tools

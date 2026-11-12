@@ -10,9 +10,11 @@ You will get an acknowledgement within 7 days and a decision on severity and a f
 
 ## Scope
 
-In scope now: the compiler and the runtime in `compiler/` (`unio check`, `fmt`, `run`, `test`, `build`, and the executables it makes), the sandbox as implemented (requirements SB-1 to SB-9 on Linux and macOS; its documented limits are in [docs/runtime.md](docs/runtime.md) section 9 and [docs/status.md](docs/status.md)), the standard library and its `unsafe module` files, the project tools in `tools/`, the checkers in `spec/` and `.github/scripts/`, the CI workflows, the editor extension in `editors/`, and anything in the repository that could run code on a contributor's or maintainer's machine or on a CI runner.
+In scope now: the compiler and the runtime in `compiler/` (`unio check`, `fmt`, `run`, `test`, `build`, and the executables it makes), the sandbox as implemented (requirements SB-1 to SB-9 on Linux and macOS; its documented limits are in [docs/runtime.md](docs/runtime.md) section 9 and [docs/status.md](docs/status.md)), the isolated workers of the tools and the hostile-project suite as implemented (SB-10, SB-11, SB-14, SB-15; on Linux and macOS), the standard library and its `unsafe module` files, the project tools in `tools/`, the checkers in `spec/` and `.github/scripts/`, the CI workflows, the editor extension in `editors/`, and anything in the repository that could run code on a contributor's or maintainer's machine or on a CI runner.
 
-Not implemented yet, and in scope once they exist: the Windows sandbox, the isolated tool workers and hostile-project suite (SB-10 to SB-15), the package manager and registry, signing, and release artifacts.
+A documented limit is not a vulnerability by itself, while a way past it is. For example, a child of a program may start only the programs its manifest lists, the interpreters of listed scripts and, on Linux, the dynamic loader, but a listed interpreter runs any script it can read and on Linux the loader runs any program it can read ([docs/runtime.md](docs/runtime.md) 9.5).
+
+Not implemented yet, and in scope once they exist: the Windows sandbox (AppContainer; on Windows programs and tools run only under the weaker sandbox the operator allows), the workers of the package operations and of the language server (SB-12, SB-13), the package manager and registry, signing and the rest of the [cryptography policy](docs/cryptography.md), the language server, and release artifacts. These are requirements only; nothing of them exists in the code.
 
 ## What happens after a report
 

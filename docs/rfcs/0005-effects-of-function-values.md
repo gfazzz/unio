@@ -1,6 +1,6 @@
 # RFC 0005: Effects of function values are carried by calls
 
-- Status: accepted (decided by the project lead; the semantics is in docs/semantics.md 8.4 and implemented in `unio check` and `unio symbol`; the tests that confirm the implementation on passing, returning, storing and calling function values, including recursive chains, are being added, see Verification)
+- Status: accepted (decided by the project lead; the semantics is in docs/semantics.md 8.4 and implemented in `unio check` and `unio symbol`; the tests that confirm the implementation on passing, returning, storing and calling function values, including recursive chains, are in `compiler/unio/tests/effects.rs` since commit `6c3c804`, see Verification)
 - Author: Unio project, with Claude
 - Date: 2026-11-08
 - Affects: requirements / semantics / compiler
@@ -125,7 +125,7 @@ Not needed. Programs that were E0085 or E0084 only because they made a value the
 
 ## Verification
 
-Acceptance fixes the semantics of this RFC. The correctness of the implementation is confirmed separately, by tests on passing, returning, storing and calling function values, including recursive chains of calls; these tests are being added. Until they land, the items below are the checks that exist.
+Acceptance fixes the semantics of this RFC. The correctness of the implementation is confirmed separately, by tests on passing, returning, storing and calling function values, including recursive chains of calls; these tests were added in commit `6c3c804` (`compiler/unio/tests/effects.rs`: passing through layers, named arguments and defaults, returning, storing in locals, fields, collections, options, constants and captures, calls through interfaces and in `for`, `using`, `try` and `on`, recursive and mutually recursive chains, the core profile, and a real run). The items below are the checks that exist.
 
 - `compiler/unio/tests/symbol.rs`: a stored function value has no effect; `apply` carries the effects of its argument to the caller, with the E0085 chain `app.reading -> app.apply (argument f) -> std.files.read_text`; `List.map`, `List.sorted_by` and `List.try_map` carry the callback's effects to the caller and show `argument effects`; a call through a struct field has the stored values, and under the core profile is E0087 when one of them allocates; the body of a returned lambda counts where it is called, a capturing lambda still allocates where it is made; a constant holding a lambda and a parameter default count where they are called.
 - The catalog has E0087 with an example and its fix (`compiler/unio/tests/catalog.rs`).

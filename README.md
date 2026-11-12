@@ -32,6 +32,8 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 
 **The first release is a small, reliable core for automation and CLI tools.** Server capabilities, AI computation, and the quantum extension follow. Performance, readability, and security are confirmed by measurement and verification; universal C-level speed, the absence of any vulnerability, and automatic quantum speedup are not promised.
 
+**Current state.** A compiler in Rust exists in [compiler/](compiler/README.md): `unio check`, `fmt`, `outline`, `symbol`, `explain`, `run`, and `test` with an interpreter and an operating-system sandbox on Linux and macOS, and `unio build`, which makes native executables for Linux x86-64 and AArch64, macOS AArch64, and Windows x86-64 (Windows runs programs and tools only under the weaker sandbox the operator allows, since AppContainer is not implemented). The 0.1 runtime manages memory by reference counting, not by the GC described above, until the decision on C-13. Packages and dependency management, signatures and the rest of the cryptography policy, the language server, and the R-10 control set are requirements only: none of them is implemented. Release 0.1 is not published; [the status table](docs/status.md) lists every requirement with what exists and what checks it.
+
 ## Documentation
 
 - [Refined concept](docs/concept.md)

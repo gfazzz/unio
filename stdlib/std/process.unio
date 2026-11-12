@@ -25,9 +25,11 @@ public struct Output:
 ## UTF-8 text. A program that does not finish in time is stopped and the call fails with kind
 ## TimedOut; output that is not UTF-8 fails with kind InvalidOutput. A non-zero status is not an
 ## error: the caller decides what it means. The child runs in the sandbox of the caller: on Linux
-## and macOS it may execute only the programs the manifest lists under process (with the
-## interpreters of listed scripts) and read only the read scopes and the system libraries those
-## programs need (docs/runtime.md 9.5).
+## and macOS the system starts for it only the programs the manifest lists under process, the
+## interpreters of listed scripts and, on Linux, their dynamic loader, and it reads only the read
+## scopes and the system libraries those programs need. What it can run is wider than the list: a
+## listed interpreter runs any script it can read, and on Linux the loader runs any program it can
+## read (docs/runtime.md 9.5).
 ##
 ## The child sees only the environment variables the manifest grants under env, and PATH (on
 ## Windows also SystemRoot). It runs in a process tree of its own: a process group on Unix, which
