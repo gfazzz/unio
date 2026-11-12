@@ -7,12 +7,18 @@ on:
 permissions:
   contents: read
 
+# Plan section 12, release condition 3: every job runs on a named image, not on a -latest label
+# that moves to another system, and the jobs that build or link select the C compiler, linker,
+# and SDK pinned in .github/scripts/expected_toolchain.py (compiler/README.md, "Pinned linkers
+# and SDKs"); the jobs `release`, `install`, and `native-linux-arm` check the record of
+# `unio build --print-toolchain` against the pins.
+
 jobs:
   spec:
     name: grammar and documentation
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -20,9 +26,14 @@ jobs:
     env:
       # Windows has no sandbox of the operating system yet, so the programs would not start
       # there (SB-5); CI, as the operator, allows the weaker sandbox on Windows only.
-      SANDBOX: ${{ matrix.os == 'windows-latest' && '--allow-weaker-sandbox' || '' }}
+      SANDBOX: ${{ matrix.os == 'windows-2025-vs2026' && '--allow-weaker-sandbox' || '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/expected_toolchain.py select
       # The checks are the Unio tools of tools/, run by the interpreter of sprint S5
       # (docs/runtime.md 8.3). The Python checkers stay as the reference: the job
       # python-parity compares them, and bench/ uses them in performance comparisons.
@@ -44,19 +55,24 @@ jobs:
       # Plan section 12, release condition 4: the notices list the crates of Cargo.lock that
       # the shipped unio and libunio.a contain. The list is the same on every system.
       - name: Third-party notices are up to date
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: python3 .github/scripts/third_party_notices.py --check
 
   python-parity:
     # The Python checkers are kept as the reference for parity and benchmarks (AGENTS.md,
     # plan section 12): the Unio tools must give their results on every change.
     name: Unio tools agree with the Python checkers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/expected_toolchain.py select
       - name: Compare every check
         working-directory: compiler
         run: cargo test --release -p unio --test tools -- --ignored
@@ -66,12 +82,17 @@ jobs:
     # executables of `unio build` (sprint S6) meet the floor on all four benchmarks; JSON is
     # still below it in the interpreter, so that step reports without failing the run.
     name: benchmarks against Python
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/expected_toolchain.py select
       - name: Build the interpreter
         working-directory: compiler
         run: cargo build --release --locked -p unio
@@ -107,7 +128,7 @@ jobs:
 
   editors:
     name: editor highlighting
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: editors/vscode
@@ -149,10 +170,17 @@ jobs:
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         shell: bash
         run: sh ../.github/scripts/pinned_toolchain.sh
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" ../.github/scripts/expected_toolchain.py select
       - name: Code generation for every target
         run: cargo test --release -p unio --lib 'native::'
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
         run: cargo test --release -p unio --test native
+      - name: The linker and SDK are the pinned ones
+        run: python3 ../.github/scripts/expected_toolchain.py check target/release/unio
 
   compiler:
     name: compiler front end
@@ -160,13 +188,13 @@ jobs:
       # A failure on one system does not cancel the others: each reports its own result.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     env:
       # Windows has no sandbox of the operating system for the workers of the tools yet, so
       # check and fmt refuse there with 103 (SB-10); CI, as the operator, allows the weaker
       # sandbox on Windows only. The refusal itself is tested in tests/workers.rs.
-      SANDBOX: ${{ matrix.os == 'windows-latest' && '--allow-weaker-sandbox' || '' }}
+      SANDBOX: ${{ matrix.os == 'windows-2025-vs2026' && '--allow-weaker-sandbox' || '' }}
     defaults:
       run:
         working-directory: compiler
@@ -175,6 +203,11 @@ jobs:
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         shell: bash
         run: sh ../.github/scripts/pinned_toolchain.sh
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" ../.github/scripts/expected_toolchain.py select
       - name: Formatting
         run: cargo fmt --check
       - name: Lints
@@ -187,12 +220,12 @@ jobs:
       # that allows the weaker sandbox, as the other tests do (tests/common.rs).
       - name: Control set yields the expected diagnostics (R-10)
         run: cargo test --release -p unio --test control
-      # Linux x86-64, macOS on AArch64 (macos-latest), Windows x86-64 with the MSVC linker of
-      # the runner's Visual Studio (docs/runtime.md 8.4); Linux AArch64 in native-linux-arm.
+      # Linux x86-64, macOS on AArch64 (macos-26), Windows x86-64 with the pinned MSVC toolset
+      # and Windows SDK (docs/runtime.md 8.4); Linux AArch64 in native-linux-arm.
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
         run: cargo test --release -p unio --test native
       - name: Seatbelt denials, when the tests or the native link step fail on macOS
-        if: failure() && matrix.os == 'macos-latest'
+        if: failure() && runner.os == 'macOS'
         run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -80
       - name: Unio sources are in the one style (docs/style.md)
         shell: bash
@@ -213,7 +246,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -222,8 +255,20 @@ jobs:
       - uses: actions/checkout@v4
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         run: sh .github/scripts/pinned_toolchain.sh
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/expected_toolchain.py select
       - name: Release build in the installed layout
         run: sh .github/scripts/release_build.sh "$RUNNER_TEMP/unio-install"
+      # Plan section 12, release condition 3: the identity of the linker and the SDK that the
+      # release records in every executable is the pinned one; on a mismatch the step says how
+      # to update the pin deliberately.
+      - name: The linker and SDK are the pinned ones
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/expected_toolchain.py check "$RUNNER_TEMP/unio-install/bin/unio"
       # R-6, R-6a: the SBOM (CycloneDX, from Cargo.lock) and the signed manifest of the release.
       # The release key is the operator's, kept offline and never given to CI
       # (docs/cryptography.md, section 4); CI signs with a key made for this run only and
@@ -260,6 +305,13 @@ jobs:
           name: unio-${{ runner.os }}
           path: ${{ runner.temp }}/unio-install
           if-no-files-found: error
+      # The pins for the job `install`, which has no checkout.
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: toolchain-pins
+          path: .github/scripts/expected_toolchain.py
+          if-no-files-found: error
 
   install:
     # Plan section 12, release condition 1: the installed unio, with no checkout of the
@@ -271,7 +323,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -281,6 +333,16 @@ jobs:
         with:
           name: unio-${{ runner.os }}
           path: ${{ runner.temp }}/prefix
+      # The pins alone, not a checkout: the same linker and SDK as in the job `release`.
+      - uses: actions/download-artifact@v4
+        with:
+          name: toolchain-pins
+          path: ${{ runner.temp }}/pins
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" "$RUNNER_TEMP/pins/expected_toolchain.py" select
       - name: Installed unio works without the source tree
         working-directory: ${{ runner.temp }}
         run: |
@@ -324,6 +386,10 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then exe=hello.exe; fi
           unio build --release hello.unio -o "$exe"
           test "$(./$exe x | tr -d '\r')" = "hello 6 1"
+      - name: The linker and SDK are the pinned ones
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" "$RUNNER_TEMP/pins/expected_toolchain.py" check "$RUNNER_TEMP/prefix/bin/unio"
 
   reproducible:
     # Plan section 12, release condition 2: a second runner builds the release again from the
@@ -332,7 +398,7 @@ jobs:
     # job `release` on Linux x86-64 (C-4, R-6).
     name: independent reproducible build
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -346,6 +412,11 @@ jobs:
           path: ${{ runner.temp }}/first
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         run: sh elsewhere/checkout/.github/scripts/pinned_toolchain.sh
+      - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
+        shell: bash
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" elsewhere/checkout/.github/scripts/expected_toolchain.py select
       - name: The release built again in another directory, with another CARGO_HOME
         run: |
           mkdir -p "$RUNNER_TEMP/cargo-home"

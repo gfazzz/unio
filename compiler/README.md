@@ -88,7 +88,11 @@ its own; `Cargo.lock` records its checksum, and an update is a deliberate change
   ("x64 Native Tools Command Prompt" of the chosen Visual Studio, or after `vcvarsall.bat x64`)
   to use exactly that installation and its Windows SDK, as named by `VCINSTALLDIR`,
   `VSCMD_ARG_TGT_ARCH`, `LIB` and `PATH`; without one, the newest installed Visual Studio with
-  the C++ workload is used, as `vswhere` reports it.
+  the C++ workload is used, as `vswhere` reports it. Outside a developer command prompt,
+  `VCToolsVersion` (an MSVC toolset, as in `14.44.35207`) and `WindowsSdkDir` with
+  `WindowsSDKVersion` (as in `10.0.26100.0\`) restrict that search to one toolset and one
+  Windows SDK; CI pins them this way (see "Pinned linkers and SDKs" below), because in Git Bash
+  a developer prompt's `PATH` can put `/usr/bin/link.exe` of coreutils before that of MSVC.
 - Reproducibility: pinning the search library does not pin what it finds. A build is
   reproducible on the same `link.exe` and the same Windows SDK, so every build records their
   versions in the program image of the executable, next to the identity of `unio` (C-4, R-6):
@@ -106,6 +110,47 @@ its own; `Cargo.lock` records its checksum, and an update is a deliberate change
   "Signatures"), the only dependency besides Cranelift. It is called by the `unio` tool only (`compiler/unio/src/main.rs`), not by the
   library whose static form is the runtime, so it is not part of what `unio build` puts into
   programs.
+
+### Pinned linkers and SDKs
+
+Plan section 12, release condition 3. Rust is pinned by `rust-toolchain.toml` and the crates by
+`Cargo.lock`; the C compiler, the linker, and the SDK that link `unio`, `libunio.a`, and every
+executable of `unio build` come from the machine, so CI pins them as well:
+
+- Every job of `.github/workflows/ci.yml` runs on a named runner image, never on a `-latest`
+  label, which moves to another system without a change in the repository: `ubuntu-24.04`,
+  `ubuntu-24.04-arm`, `macos-26`, and `windows-2025-vs2026` (Windows Server 2025 with Visual
+  Studio 2026). These were the images of the `-latest` labels on 2026-11-12, except that
+  `windows-latest` is spelled with the Visual Studio of its image.
+- `.github/scripts/expected_toolchain.py select`, a step of every job that builds or links,
+  selects the toolchain inside that image by exact name and version and passes it to the
+  later steps (`GITHUB_ENV`): on Linux `CC=gcc-13` (GCC 13.3.0 of Ubuntu 24.04 with binutils
+  2.42), also as the linker of rustc; on macOS Xcode 26.6 with the macOS 26.5 SDK
+  (`sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer`, and
+  `DEVELOPER_DIR`); on Windows the MSVC toolset 14.44 (of Visual Studio 2022 17.14, installed
+  on the image as a fixed component beside the newer toolsets of Visual Studio 2026, so that an
+  update of Visual Studio does not move it) and the Windows SDK 10.0.26100.0, through
+  `VCToolsVersion`, `WindowsSdkDir`, and `WindowsSDKVersion`. The step fails when a pinned part
+  is not on the image, or when the Universal CRT that `find-msvc-tools` would take comes from
+  another SDK.
+- `.github/scripts/expected_toolchain.py check UNIO`, the step "The linker and SDK are the
+  pinned ones" of the jobs `release`, `install`, and `native-linux-arm`, compares the record of
+  `unio build --print-toolchain` with the expected one written in the script, and the parts the
+  record does not name: the Debian versions of `gcc-13`, `binutils`, and `libc6-dev` on Linux,
+  `xcodebuild -version` on macOS, and the selected toolset on Windows. It prints the image
+  (`ImageOS`, `ImageVersion`) and fails on any difference. An expected record may hold `*` for a
+  part not yet read from CI (the build number of Apple clang, the build of the MSVC toolset);
+  the step then passes with a warning that prints the record to write in its place, and the
+  condition is met only when no record holds `*`.
+
+`python3 .github/scripts/expected_toolchain.py show` prints the pins. Hosted runner images are
+updated every week, and a security update of a compiler package changes its version string:
+the check then fails and names both records. Updating a pin is a deliberate change of one
+commit: choose the image or the toolchain, change `PINS` in the script (and the runner labels
+when the image changes), run CI, copy the actual records printed by the check into `PINS`,
+and say in the commit why the toolchain changed, since every executable built after it
+records another identity. An image or a component that leaves the hosted runners is replaced
+the same way, never by going back to a `-latest` label.
 
 ### Signatures
 
