@@ -345,8 +345,10 @@ const O_NOFOLLOW_ANY: i32 = 0x2000_0000;
 #[cfg(target_vendor = "apple")]
 fn open_with(anchored: &Anchored, flags: i32) -> io::Result<OwnedFd> {
     let path = c_text(checked_path(anchored)?.as_os_str().as_bytes())?;
+    // O_NOFOLLOW_ANY alone: it refuses a link as the last name too (ELOOP), and the kernel
+    // rejects it together with O_NOFOLLOW (EINVAL on macOS 26, CI run 43302933957).
     // SAFETY: path ends with 0.
-    owned(unsafe { open(path.as_ptr(), flags | O_NOFOLLOW | O_NOFOLLOW_ANY) })
+    owned(unsafe { open(path.as_ptr(), flags | O_NOFOLLOW_ANY) })
 }
 
 /// The whole checked path, once the system is known to refuse a link in any component of it.
