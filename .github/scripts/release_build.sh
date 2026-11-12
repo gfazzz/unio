@@ -18,6 +18,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$1"
 prefix=$(cd "$1" && pwd)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
+# The runner of macOS keeps rustup elsewhere and has no ~/.cargo before the first build.
+mkdir -p "$cargo_home"
 cargo_home=$(cd "$cargo_home" && pwd)
 if command -v cygpath >/dev/null 2>&1; then
     # Git Bash on Windows: rustc sees the paths in the form of Windows.

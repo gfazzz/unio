@@ -1152,11 +1152,14 @@ mod tests {
 
     /// Builds a chain of `depth` levels of each kind of value that holds values and frees it on
     /// a thread with a small stack: freeing by recursion overflowed a 8 MiB stack at about
-    /// 100,000 levels of lists and aborted the process (RFC 0007).
+    /// 100,000 levels of lists and aborted the process (RFC 0007). The stack is 2 MiB, far
+    /// below the 48 MB a recursive free of 1,000,000 levels needs, and enough for the 128
+    /// levels freed by recursion in a debug build on Windows, whose frames are the largest
+    /// (256 KiB overflowed there in CI).
     #[test]
     fn deep_structures_are_freed_without_recursion() {
         let freed = std::thread::Builder::new()
-            .stack_size(256 * 1024)
+            .stack_size(2 * 1024 * 1024)
             .spawn(|| {
                 let before = crate::heap::live_bytes();
                 let depth = 1_000_000;
