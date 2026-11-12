@@ -149,7 +149,7 @@ A child of `process.run` gets only the variables granted under `env` and `PATH` 
 Linux, and on Windows in a Job Object with kill-on-close that it joins while still suspended,
 and what is left of that tree is stopped when the child ends, times out, or overflows its
 output; on macOS descendants that left the group are found through their parents and the
-marker of the profile (checked in CI only). The deadline covers reading the outputs; each output holds at most
+marker of the profile (passed in CI on `macos-latest`, run `43164795419` on `b18ce5e`). The deadline covers reading the outputs; each output holds at most
 16 MiB (`OutputTooLarge`) and counts against the heap limit (docs/runtime.md 9.5). Reads whose
 size the program decides (`read_bytes(max_bytes)`, whole files, `Text.repeat`) check the heap
 limit before they allocate, so a refused allocation ends with 102 instead of an abort
@@ -506,8 +506,9 @@ The tests were written before the code (concept, section 1.2):
 - Known limits of `process.run` (docs/runtime.md 9.5): on Linux a program that needs `setsid`
   or `setpgid` in a child fails there, and without seccomp (the weaker sandbox) a process that
   leaves the group outlives the call; on macOS a descendant that left the group after its parent
-  ended is found only by the marker of the profile, so not without a sandbox, and the macOS and
-  Windows trees are checked in CI only; on Unix an interrupt from the terminal does not reach a
+  ended is found only by the marker of the profile, so not without a sandbox; the macOS and
+  Windows trees are checked on those systems in CI only (they passed on `macos-latest` and
+  `windows-latest`, run `43164795419` on `b18ce5e`), and the Windows fail-closed path has no test; on Unix an interrupt from the terminal does not reach a
   child in its own group (the workers of the tools are stopped with their trees). Heap exhaustion that the
   system reports late (overcommit and its out-of-memory killer) ends the process without 102;
   outside the path of a fault, which the reserve serves, a small allocation the system refuses
