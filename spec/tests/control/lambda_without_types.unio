@@ -1,0 +1,6 @@
+# expect-error: 3 E0049
+# category: types
+let SHOUT = function (text): text.to_upper() + "!"
+
+function announce(messages as List[Text]) returns List[Text]:
+    return messages.map(SHOUT)

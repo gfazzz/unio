@@ -1,0 +1,4 @@
+# Hidden behavioural check of read_lines_inline_handler_falls_through: test blocks that the reference fix passes.
+
+test "a missing file gives -1":
+    assert count_lines(Path("no-such-file-for-the-control-set.txt")) == -1

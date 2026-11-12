@@ -1,0 +1,4 @@
+# Hidden behavioural check of statement_at_top_level: test blocks that the reference fix passes.
+
+test "a greeting":
+    assert greet("world") == "Hello, world"

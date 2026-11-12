@@ -1,0 +1,10 @@
+function push_unique(var items as List[Text], item as Text) returns Bool:
+    if items.contains(item): return false
+    items.append(item)
+    return true
+
+function dedupe(words as List[Text]) returns List[Text]:
+    var unique as List[Text] = []
+    for word in words:
+        let added = push_unique(unique, word)
+    return unique

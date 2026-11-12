@@ -1,0 +1,11 @@
+# expect-error: 6 E0069
+# category: types
+struct Temperature:
+    celsius as Float
+
+extend Temperature with Display:
+    function to_string(self) returns Text:
+        return "{self.celsius} °C"
+
+function readings(values as List[Temperature]) returns List[Text]:
+    return ["{value}" for value in values]

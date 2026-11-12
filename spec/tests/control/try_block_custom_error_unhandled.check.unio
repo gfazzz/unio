@@ -1,0 +1,4 @@
+# Hidden behavioural check of try_block_custom_error_unhandled: test blocks that the reference fix passes.
+
+test "a missing file is unreadable":
+    assert headline(Path("no-such-headline-file.txt")).starts_with("unreadable: ")

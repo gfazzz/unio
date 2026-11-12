@@ -22,8 +22,25 @@ sandbox calls Landlock, seccomp, resource limits and Seatbelt through `extern` d
 `MoveFileExW`, so `libc` and `windows-sys` are not dependencies (R-6).
 
 The library crate `unio` is also built as a static library, `target/<profile>/libunio.a` (on
-Windows `unio.lib`): the runtime that `unio build` links into every executable, found next to
-the `unio` binary or through `UNIO_RUNTIME_LIB`. An executable is made for the machine the
+Windows `unio.lib`): the runtime that `unio build` links into every executable, found through
+`UNIO_RUNTIME_LIB`, next to the `unio` binary (as `cargo build` leaves it), or in `lib/unio/`
+beside the `bin/` directory of an installed `unio`. The static library holds the whole crate, the
+front end and Cranelift included (about 80 MB in a release build against 12 MB for `unio`), and
+the linker takes from it only what an executable calls, so it is installed next to the compiler
+rather than embedded in it; embedding would also need a second build, because the binary and the
+static library are made by the same `cargo build`. The installed layout, made by
+`sh .github/scripts/release_build.sh PREFIX` with the pinned toolchain and the lock file:
+
+```text
+PREFIX/bin/unio                  the compiler, with the standard library embedded in it
+PREFIX/lib/unio/libunio.a        the runtime of `unio build` (unio.lib on Windows)
+PREFIX/share/doc/unio/           LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-NOTICES
+```
+
+The script remaps the paths of the checkout and of `CARGO_HOME`, which reach the binary only
+through the panic locations of the crates, to `/unio` and `/cargo`
+(`RUSTFLAGS=--remap-path-prefix=...`), so that builds in two directories or by two users give the
+same bytes (C-4, R-6; the CI job `reproducible` compares two runners). An executable is made for the machine the
 compiler runs on, since it links that machine's runtime. Linking needs the system linker: the C
 compiler on Linux (`cc`, or `CC`); on macOS the Xcode command line tools (`clang` and the SDK,
 found by `xcrun`, or `CC`); on Windows the Visual Studio Build Tools with the C++ workload
@@ -95,6 +112,7 @@ its own; `Cargo.lock` records its checksum, and an update is a deliberate change
 | `unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]` | Checks the program like `unio check` and, without errors, runs `public function main()` of FILE with ARGS as `std.args.list()`, in the sandbox described below. The sandbox options come before FILE, or between FILE and `--`. Exit code: the result of `main` (0 without one), 101 after a fault with its trace on standard error, 102 on exhaustion (heap, stack, wall or CPU time of the policy), 103 when the policy or the manifest cannot be read or parsed or the sandbox cannot be applied, 1 if the program does not compile |
 | `unio build [--release] FILE [-o OUT]`, `unio build --print-toolchain` | Checks the program like `unio run` and, without errors, compiles it to one executable OUT (by default the name of FILE without `.unio`, with `.exe` on Windows) for the machine the compiler runs on: Linux on x86-64 or AArch64, macOS on AArch64, Windows on x86-64; elsewhere it stops with a message naming these. `--release` optimises the generated code. The executable runs `main` with its arguments as `std.args.list()`, in the sandbox of the manifest of FILE's package narrowed by `UNIO_POLICY`, and ends with the codes of `unio run`, or with 104 when its program image is of another format, was made by another compiler than its runtime, or is damaged. `$CWD`, `$HOME` and `$TEMP` in the manifest are those of the run; a relative entry of `files.read` or `files.write` stops the build, since an installed executable has no directory of its manifest. A construct not compiled natively yet stops the build with its place (docs/runtime.md 8.4). The image of the executable records the identity of the linker and the SDK (their names and versions); `--print-toolchain` prints it without building. A missing linker stops the build with a message that says what to install. Exit code 0 when built, 1 otherwise, 2 on wrong usage |
 | `unio test [--json] [FILTER] FILE...` | Runs every `test` block of the files, each in a fresh state (runtime 6.2), or those whose name contains FILTER. A test passes, fails with the fault that ended it, or fails because it does not compile (T-5a): a diagnostic inside a test block fails only that test, one outside fails the whole file. Text: `ok`/`FAIL`, name and time per test, then the totals; `--json` gives an array with file, name, status, time, output and message (T-4). Each file's tests run in the sandbox of its package, with the same options and codes as `unio run`. The effects analysis counts exactly the tests that run: those of the given files that FILTER selects, not those of imported modules or of the standard library unless their files are given; `unio check` and `unio run` count no test (RFC 0005, runtime 6.2). Exit code 0 when every test passed, 1 otherwise |
+| `unio lsp [--policy FILE] [--allow-weaker-sandbox] [--lang=en\|ru]` | The language server over LSP on standard input and output (T-10): diagnostics of the open documents with their codes and a link to the explanation (`unio-explain:/CODE`, answered by the request `unio/explain`), go to definition, hover with the type of a name or an expression and, for a function, its signature, documentation, errors, effects, and layer as `unio symbol` reports them, type hints for bindings written without a type, completion (names in scope, members by type, module members, keywords), formatting as `unio fmt`, and rename of every reference in the package (refused for the standard library, another package, a module, or a keyword). Every analysis runs in a worker of the tools with the `[compile]` limits; unsaved buffers reach it on its standard input (SB-13, docs/runtime.md 9.7). The editors start it: [editors/README.md](../editors/README.md) |
 
 The language of messages comes from `--lang`, then from the environment variable `UNIO_LANG`,
 and is English otherwise (C-10). Codes and the JSON format do not depend on it.
@@ -218,8 +236,13 @@ nearly always a consequence of it.
 ## Name and type checks (sprint S3)
 
 `src/program.rs` loads a program: the given files, the modules they import, and the standard
-library. The standard library is found through `UNIO_STDLIB`, an ancestor directory that holds
-`stdlib/core/prelude.unio`, or the repository of the compiler. A package is the directory with
+library. The standard library is chosen by its origin only (RFC 0004, `trusted_stdlib`): the
+directory `UNIO_STDLIB` set by the operator; else the `stdlib/` of the checkout when the compiler
+runs from its `compiler/target/` (so that `unio test stdlib/...` and edits of the library work
+without a rebuild); else the copy embedded in the compiler by `build.rs`, which an installed
+`unio` uses and whose modules have paths below `<unio>/stdlib`, read from the compiler's memory
+and never from a disk (`src/vfs.rs`). The compiler records no path of its build. A `stdlib`
+directory of a package is never used. A package is the directory with
 `unio.toml`, otherwise the directory of the file; `import a.b` loads `a/b.unio` from the package
 root and `import std.x` loads `stdlib/<layer>/x.unio`. The `prelude.unio` and `builtin/` files of
 the three layers form the prelude of the `application` profile. It then collects declarations,
@@ -530,6 +553,11 @@ The tests were written before the code (concept, section 1.2):
   that is missing, because there is no resolver, lock file or package identity yet (T-14). E0046
   is static; at run time decoding a struct with a private field also fails with `DecodeError`,
   while encoding has no such second guard.
+- Known limits of the language server (T-10): rename does not follow the implementations of an
+  interface method, and a definition in the standard library embedded in the compiler has no
+  file to open; a module is renamed with its file, not by the server. Completion and hover in a
+  document with syntax errors blank the lines of the errors first, so names on those lines are
+  not known; rename needs every module of the package to parse.
 - Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows a worker has only a
   Job Object (memory, one process) and its files and network are not restricted, so the tools
   refuse there with 103 unless the operator allows the weaker sandbox; `stat` is not

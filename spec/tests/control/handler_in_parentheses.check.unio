@@ -1,0 +1,5 @@
+# Hidden behavioural check of handler_in_parentheses: test blocks that the reference fix passes.
+
+test "a badge shows the first letter, or a question mark":
+    assert badge("ann") == "[a]"
+    assert badge("") == "[?]"

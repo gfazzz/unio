@@ -1,0 +1,5 @@
+# Hidden behavioural check of named_parameter_order: test blocks that the reference fix passes.
+
+test "the port appears only when it is not 80":
+    assert connect_url("example.org") == "http://example.org/"
+    assert connect_url("example.org", "/api", port = 8080) == "http://example.org:8080/api"

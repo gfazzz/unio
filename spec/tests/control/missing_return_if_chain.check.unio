@@ -1,0 +1,8 @@
+# Hidden behavioural check of missing_return_if_chain: test blocks that the reference fix passes.
+
+test "status classes":
+    assert http_class(503) == "server error"
+    assert http_class(404) == "client error"
+    assert http_class(301) == "redirect"
+    assert http_class(204) == "success"
+    assert http_class(100) == "informational"

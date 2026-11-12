@@ -1,0 +1,6 @@
+struct Config:
+    name as Text
+    timeout_seconds as Option[Int]
+
+function effective_timeout(config as Config) returns Int:
+    return config.timeout_seconds or 30

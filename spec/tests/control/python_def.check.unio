@@ -1,0 +1,5 @@
+# Hidden behavioural check of python_def: test blocks that the reference fix passes.
+
+test "squares are summed":
+    assert sum_of_squares([1, 2, 3]) == 14
+    assert sum_of_squares([]) == 0

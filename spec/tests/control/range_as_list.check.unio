@@ -1,0 +1,6 @@
+# Hidden behavioural check of range_as_list: test blocks that the reference fix passes.
+
+test "pages are numbered from one":
+    assert page_numbers(25, 10) == [1, 2, 3]
+    assert page_numbers(0, 10) == []
+    assert page_numbers(10, 10) == [1]

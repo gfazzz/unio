@@ -1,0 +1,4 @@
+# Hidden behavioural check of main_handler_without_exit: test blocks that the reference fix passes.
+
+test "without arguments the usage is printed and the code is 2":
+    assert main() == 2

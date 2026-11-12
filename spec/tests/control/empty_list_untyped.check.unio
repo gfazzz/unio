@@ -1,0 +1,5 @@
+# Hidden behavioural check of empty_list_untyped: test blocks that the reference fix passes.
+
+test "only even values remain":
+    assert even_numbers([1, 2, 3, 4]) == [2, 4]
+    assert even_numbers([]) == []

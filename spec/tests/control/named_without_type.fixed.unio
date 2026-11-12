@@ -1,0 +1,2 @@
+function connect_label(host as Text, named port as Int = 443) returns Text:
+    return "{host}:{port}"

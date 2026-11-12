@@ -1,6 +1,8 @@
 # Requirements specification: Unio release 0.1 "Core"
 
-Specification version: 0.17 (draft). Changes from 0.16: RFC 0006 separates the limits of the workers of the tools from those of the program. SB-3 and SB-3a add the `[compile]` table of the policy (`compile.memory_bytes`, `compile.wall_seconds`, `compile.cpu_seconds`); SB-11 takes the limits of every worker from it alike, never from `[limits]`, and refuses with code 103 a limit that cannot be honoured instead of raising it.
+Specification version: 0.18 (draft). Changes from 0.17: RFC 0007, accepted by the project lead on 2026-11-12, keeps reference counting for 0.1. C-13 states reference counting with its guarantees (precise, immediate, non-moving, no tracing since values form no cycles, freeing proportional to what is freed with stack use independent of depth) instead of a precise, tracing, non-moving GC; L-19, S-11, and S-12 name the memory management of the runtime instead of the GC; the GC-pause row of 7.1 becomes the pause of freeing a structure at once, at most 1 ms per MB, measured by `bench/free/`.
+
+Changes from 0.16: RFC 0006 separates the limits of the workers of the tools from those of the program. SB-3 and SB-3a add the `[compile]` table of the policy (`compile.memory_bytes`, `compile.wall_seconds`, `compile.cpu_seconds`); SB-11 takes the limits of every worker from it alike, never from `[limits]`, and refuses with code 103 a limit that cannot be honoured instead of raising it.
 
 Changes from 0.15: RFC 0004 separates the `unsafe module` marker from the `external function`, which binds an implementation not written in Unio. S-7 allows external functions in 0.1 only in the trusted standard library, trusted by its origin rather than by a name or a directory; T-6 and T-9 state that the marker of a package lists the module for review and grants neither external functions nor permissions. Diagnostic E0086 has this meaning; E0070 stays reserved.
 
@@ -63,7 +65,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 - Language: the constructs of `docs/concept.md`, sections 2–5.
 - Compiler with type and error checking; native builds for Linux x86-64, Linux arm64, macOS arm64, Windows x86-64.
-- Runtime: GC, resources, faults, termination model, `main` startup.
+- Runtime: memory management (reference counting, RFC 0007), resources, faults, termination model, `main` startup.
 - Library and runtime layers `core`, `alloc`, `std` and the check of a package against the `core` layer (S-11, S-12, C-21).
 - Sandbox: enforcement of manifest permissions and of an external policy by operating-system mechanisms (section 4.6).
 - Standard library for CLI (section 5).
@@ -130,7 +132,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 3.5 Memory and resources
 
-- L-19. Managed values live under the GC. A program cannot obtain the address of a value.
+- L-19. Managed values are managed by the runtime (C-13). A program cannot obtain the address of a value.
 - L-20. The `Resource` interface with the method `release`. A resource value is created in `using` or as a field of another resource; storing a resource in an ordinary struct that outlives the block is a compile error. The name bound by `using` is a place: `var self` methods of the resource can be called and its `var` fields changed through it, but the name cannot be reassigned.
 - L-21. Release in `using` happens on normal exit, on error, and on fault, in reverse order of creation. On emergency and abnormal termination (section 4.5) release is not performed; guarantees for files in those cases come only from atomic writes (S-9).
 
@@ -187,7 +189,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 
 ### 4.4 Runtime
 
-- C-13. The GC is precise, tracing, non-moving. Pauses and throughput are measured in the performance suite.
+- C-13. Managed values are freed by reference counting: precisely (a value is freed when no name, value, or frame holds it any more), when its last reference goes away, without being moved, and without tracing, because values cannot form cycles (L-11a). Freeing a structure takes time proportional to the structure freed, never to the memory that stays live, and its use of the native stack does not depend on the depth of the structure. The pause of freeing, throughput, and peak memory are measured in the performance suite (section 7.1). (RFC 0007.)
 - C-14. The stack trace on a fault contains function names, files, and lines without external debug formats.
 - C-15. Exit codes: 0 success; otherwise the value of `main`, which lies in 0–100; 101 fault; 102 memory exhausted (heap or stack); 103 the sandbox or the policy could not be applied (section 4.6). Codes 104–127 are reserved for the runtime. A `main` value outside 0–100 is a fault.
 
@@ -198,7 +200,7 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - C-18. Emergency termination (code 102): the heap is exhausted beyond the reserve, the heap limit of the policy is exceeded, or the stack overflows. The runtime writes a preallocated diagnostic to stderr and exits without running user code. Descriptors are closed by the operating system; data buffered inside the program is lost.
 - C-19. Abnormal termination: a kill signal, power loss, a crash of external code, an operating-system failure. The runtime gives no guarantees; only the guarantees of the operating system and of atomic writes (S-9) remain. For files, guarantees 2 and 3 of S-9 still apply on the file systems of S-9a.
 - C-20. The documentation lists for each kind of termination which guarantees hold for resources, standard output, and files. Writes through an open file handle without `open_atomic` are not called safe: after emergency or abnormal termination their content may be cut off at any point.
-- C-21. `unio check --profile=core` verifies that a package needs nothing but the `core` layer: no allocation, no GC, no operating system. Each violation is reported with the chain of calls from a function of the package to the first function of a higher layer.
+- C-21. `unio check --profile=core` verifies that a package needs nothing but the `core` layer: no allocation, no heap of the runtime, no operating system. Each violation is reported with the chain of calls from a function of the package to the first function of a higher layer.
 
 ### 4.6 Sandbox
 
@@ -240,8 +242,8 @@ Release 0.1 is intended for writing command-line utilities and automation script
 - S-9c. `commit` is a sequence of steps, and each step records its result in the state of the file before the next one starts: `Writing` (descriptor open), `Closed` (data synced, descriptor released), `Replaced` (the target holds the new content), `Durable` (the directory is synced). `close` releases the descriptor even when it reports an error, so the state becomes `Closed` before `close` is called. A failed `commit` can be called again and continues from the recorded state. If the directory sync fails after the rename, `commit` fails with kind `DurabilityUnconfirmed`: the target is already replaced and guarantees 1 and 2 hold, but survival after power loss is not confirmed; `is_replaced()` reports this. `release` acts only on what the file still owns: in `Writing` it closes the descriptor once and removes the temporary file, in `Closed` it only removes the temporary file, after the replacement it does nothing.
 - S-9b. Verification: on Linux, block writes are recorded during atomic writes (dm-log-writes) and every prefix of them is replayed and checked; on all four platforms, processes are killed at random points and virtual machines are powered off during writes. The runtime has a fault-injection hook in test builds that fails a chosen system call; the suite fails each step of `commit` in turn (data sync, close, rename, directory sync) on every platform and checks the state, the error kind, the content of the target, the presence of the temporary file, and, through the descriptor table, that no descriptor is closed twice. The same protocol is checked without the operating system by the `test` blocks of `stdlib/std/files.unio`, which replace the system steps with failing ones.
 - S-10. The standard library is written in Unio in `stdlib/`. Everything the language can express is implemented in it; only operating-system and runtime primitives are `external function` declarations in `unsafe module` files. These sources are the normative API; the reference programs use only it, verified by `spec/check_api.py`.
-- S-11. The standard library is divided into layers: `core` needs neither an allocator, nor a GC, nor an operating system; `alloc` needs an allocator, in 0.1 the GC heap; `std` needs the operating system. A module may use only its own layer and the layers before it. The layer is given by the directory (`stdlib/core/`, `stdlib/alloc/`, `stdlib/std/`) and is not part of the module name. Checked by `spec/check_api.py` in stage 0 and by the compiler from stage 2.
-- S-12. The runtime is divided the same way: the `core` runtime (program entry, fault reporting through a hook, checked arithmetic) makes no calls to the operating system; the allocator and the GC form the `alloc` runtime; files, processes, standard output, and the sandbox form the `std` runtime. The `core` runtime reaches the others only through hooks that the `application` profile provides.
+- S-11. The standard library is divided into layers: `core` needs neither an allocator, nor the heap of the runtime, nor an operating system; `alloc` needs an allocator, in 0.1 the heap of the runtime (C-13); `std` needs the operating system. A module may use only its own layer and the layers before it. The layer is given by the directory (`stdlib/core/`, `stdlib/alloc/`, `stdlib/std/`) and is not part of the module name. Checked by `spec/check_api.py` in stage 0 and by the compiler from stage 2.
+- S-12. The runtime is divided the same way: the `core` runtime (program entry, fault reporting through a hook, checked arithmetic) makes no calls to the operating system; the allocator and the heap of the runtime with its reference counting (C-13) form the `alloc` runtime; files, processes, standard output, and the sandbox form the `std` runtime. The `core` runtime reaches the others only through hooks that the `application` profile provides.
 
 - S-13. Collection order/cost and once-per-element sorting keys: [language-contracts.md](language-contracts.md), sections 3–4.
 - S-14. Concrete callback errors and effect derivation: [language-contracts.md](language-contracts.md), sections 3–4.
@@ -327,7 +329,7 @@ Measured with the reference utilities (section 9) on Linux x86-64; results are p
 | Text and JSON processing | no more than 0.5x slower than CPython 3.13; target 3x faster |
 | Native executables (`unio build --release`) on the benchmarks of `bench/` (RFC 0003) | each at most 2x the time of the same algorithm in Go; target parity. Gated for 0.1: wc and loop; for 0.2: all |
 | Peak resident memory of the same native executables (RFC 0003) | at most 2x Go's peak plus 8 MB; target parity; gated like the row above |
-| GC pause at a 100 MB heap | at most 10 ms (95th percentile) |
+| Pause of freeing a structure at once (reference counting, C-13; RFC 0007) | at most 1 ms per MB of peak memory, median of `bench/free/` wide at about 100 MB, in `unio run` and natively; no pause depends on memory that stays live |
 
 Universal C-level speed is not promised and is not measured as a requirement.
 

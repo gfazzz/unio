@@ -1,0 +1,5 @@
+function sum_of_squares(values as List[Int]) returns Int:
+    var total = 0
+    for value in values:
+        total = total + value * value
+    return total

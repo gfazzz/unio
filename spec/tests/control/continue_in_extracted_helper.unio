@@ -1,0 +1,11 @@
+# expect-error: 4 E0083
+# category: errors
+function line_score(line as Text) returns Int:
+    if line.starts_with("#"): continue
+    return line.trim().length()
+
+function total_score(lines as List[Text]) returns Int:
+    var total = 0
+    for line in lines:
+        total = total + line_score(line)
+    return total

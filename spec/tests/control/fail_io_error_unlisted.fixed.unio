@@ -1,0 +1,5 @@
+import std.files
+
+function require_directory(path as Path) fails with IoError:
+    if not files.is_directory(path):
+        fail IoError(path = path, kind = files.IoErrorKind.NotFound, reason = "not a directory")

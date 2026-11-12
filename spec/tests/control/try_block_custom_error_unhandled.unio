@@ -1,0 +1,17 @@
+# expect-error: 16 E0074
+# category: errors
+import std.files
+
+error EmptyFile:
+    path as Path
+
+function first_line(path as Path) returns Text fails with IoError, EmptyFile:
+    let text = try files.read_text(path)
+    let lines = text.lines()
+    if lines.is_empty(): fail EmptyFile(path = path)
+    return lines[0]
+
+function headline(path as Path) returns Text:
+    try:
+        return try first_line(path)
+    on IoError as e: return "unreadable: {e.reason}"

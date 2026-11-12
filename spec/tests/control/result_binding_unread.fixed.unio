@@ -1,0 +1,14 @@
+error ParseFailure:
+    line as Int
+
+function parse_amount(text as Text, line as Int) returns Result[Int, ParseFailure]:
+    match text.trim().to_int():
+        case some(value): return ok(value)
+        case none: return error(ParseFailure(line = line))
+
+function total(lines as List[Text]) returns Int:
+    var sum = 0
+    for number, line in lines.enumerate(start = 1):
+        let parsed = parse_amount(line, number)
+        if parsed is ok(value): sum = sum + value
+    return sum

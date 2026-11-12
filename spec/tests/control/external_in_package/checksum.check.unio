@@ -1,0 +1,5 @@
+# Hidden behavioural check of external_in_package: test blocks that the reference fix passes.
+
+test "the Adler-32 of a known text":
+    assert adler32("Wikipedia") == 300286872
+    assert adler32("") == 1

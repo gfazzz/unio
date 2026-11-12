@@ -1,0 +1,11 @@
+# expect-error: 11 E0074
+# category: errors
+import std.files
+
+error ConfigMissing:
+    path as Path
+
+function load(path as Path) returns Text fails with IoError:
+    try:
+        return try files.read_text(path)
+    on IoError as e: fail ConfigMissing(path = e.path)

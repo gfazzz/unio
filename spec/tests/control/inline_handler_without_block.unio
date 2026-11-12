@@ -1,0 +1,13 @@
+# expect-error: 12 E0024
+# category: style
+error Missing:
+    name as Text
+
+function require(settings as Map[Text, Text], name as Text) returns Text fails with Missing:
+    match settings.get(name):
+        case some(value): return value
+        case none: fail Missing(name = name)
+
+function database_url(settings as Map[Text, Text]) returns Text:
+    let url = try require(settings, "database") on Missing as e
+    return url

@@ -1,0 +1,14 @@
+# expect-error: 6 E0085
+# category: resources
+import std.files
+
+public function mean_of_file(path as Path) returns Int fails with IoError:
+    let text = try files.read_text(path)
+    return mean([value.to_int() or 0 for value in text.lines()])
+
+public function mean(values as List[Int]) returns Int:
+    if values.is_empty(): return 0
+    var sum = 0
+    for value in values:
+        sum = sum + value
+    return sum / values.length()

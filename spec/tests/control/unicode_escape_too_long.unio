@@ -1,0 +1,5 @@
+# expect-error: 4 E0006
+# category: style
+function check_mark(done as Bool) returns Text:
+    let mark = "\u{0002714}" if done else " "
+    return "[{mark}]"

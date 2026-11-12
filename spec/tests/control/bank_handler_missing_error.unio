@@ -1,0 +1,28 @@
+# expect-error: 25 E0074
+# category: errors
+error InsufficientFunds:
+    needed as Int
+    available as Int
+
+error AccountFrozen:
+    owner as Text
+
+struct Account:
+    owner as Text
+    var balance as Int
+    frozen as Bool
+
+extend Account:
+    function withdraw(var self, amount as Int) fails with InsufficientFunds, AccountFrozen:
+        if self.frozen: fail AccountFrozen(owner = self.owner)
+        if amount > self.balance: fail InsufficientFunds(needed = amount, available = self.balance)
+        self.balance = self.balance - amount
+
+function pay_all(var account as Account, bills as List[Int]) returns Int:
+    var paid = 0
+    for bill in bills:
+        try:
+            account.withdraw(bill)
+            paid = paid + 1
+        on InsufficientFunds as e: print_error("short by {e.needed - e.available}")
+    return paid

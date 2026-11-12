@@ -180,6 +180,13 @@ test("every keyword of spec/grammar.ebnf is highlighted", () => {
     assert.deepEqual(missing, [], `keywords without highlighting: ${missing.join(", ")}`);
 });
 
+// The invalid corpus and the programs of the R-10 control set contain their errors on purpose;
+// the reference fixes and hidden checks of the control set are valid and stay checked.
+const intentionallyInvalid = (path, name) =>
+    path.includes(join("spec", "tests", "invalid")) ||
+    (path.includes(join("spec", "tests", "control")) &&
+        !name.endsWith(".fixed.unio") && !name.endsWith(".check.unio"));
+
 test("every .unio file of the repository is tokenized without invalid scopes", () => {
     const files = [];
     const walk = (dir) => {
@@ -187,7 +194,7 @@ test("every .unio file of the repository is tokenized without invalid scopes", (
             if (name === "node_modules" || name === ".git" || name === "target") continue;
             const path = join(dir, name);
             if (statSync(path).isDirectory()) walk(path);
-            else if (name.endsWith(".unio") && !path.includes(join("spec", "tests", "invalid"))) files.push(path);
+            else if (name.endsWith(".unio") && !intentionallyInvalid(path, name)) files.push(path);
         }
     };
     walk(repository);

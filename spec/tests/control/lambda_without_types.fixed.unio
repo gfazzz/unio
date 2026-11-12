@@ -1,0 +1,4 @@
+let SHOUT = function (text as Text) returns Text: text.to_upper() + "!"
+
+function announce(messages as List[Text]) returns List[Text]:
+    return messages.map(SHOUT)

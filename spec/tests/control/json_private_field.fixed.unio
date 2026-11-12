@@ -1,0 +1,12 @@
+import std.json as json
+
+struct ServerConfig:
+    public host as Text
+    public port as Int
+
+function load_config(text as Text) returns ServerConfig fails with ParseError, DecodeError:
+    let value = try json.parse(text)
+    return try json.decode[ServerConfig](value)
+
+function address(config as ServerConfig) returns Text:
+    return "{config.host}:{config.port}"

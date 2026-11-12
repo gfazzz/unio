@@ -3,18 +3,23 @@
 //! by the runtime of the compiler that made its image. The hash depends on the contents of the
 //! files and their paths below the crate, never on where the checkout is, so it is the same on
 //! every machine (C-4).
+//!
+//! It also writes the standard library of the checkout into the compiler (`vfs.rs`), so that an
+//! installed `unio` carries the library it was built with and needs no source tree (plan
+//! section 12, release condition 1). The texts are written as literals, not included by path,
+//! so the compiler holds no path of the machine that built it.
 
 use std::path::{Path, PathBuf};
 
-fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn files(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+            files(&path, extension, out);
+        } else if path.extension().is_some_and(|e| e == extension) {
             out.push(path);
         }
     }
@@ -23,8 +28,10 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn main() {
     let crate_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let roots = [
-        ("unio", crate_dir.join("src")),
-        ("unio-runtime", crate_dir.join("../unio-runtime/src")),
+        ("unio", crate_dir.join("src"), "rs"),
+        ("unio-runtime", crate_dir.join("../unio-runtime/src"), "rs"),
+        // The embedded library is part of the compiler: its bodies go into program images.
+        ("stdlib", crate_dir.join("../../stdlib"), "unio"),
     ];
     // FNV-1a, 64 bits: no dependency, and the same on every platform.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -34,10 +41,11 @@ fn main() {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    for (name, root) in &roots {
+    let mut library = String::from("pub(super) static FILES: &[(&str, &str)] = &[\n");
+    for (name, root, extension) in &roots {
         println!("cargo:rerun-if-changed={}", root.display());
         let mut found = Vec::new();
-        files(root, &mut found);
+        files(root, extension, &mut found);
         let mut named: Vec<(String, PathBuf)> = found
             .into_iter()
             .map(|p| {
@@ -54,7 +62,15 @@ fn main() {
             let text: Vec<u8> = text.into_iter().filter(|b| *b != b'\r').collect();
             feed(&(text.len() as u64).to_le_bytes());
             feed(&text);
+            if *name == "stdlib" {
+                let below = &relative[name.len() + 1..];
+                let text = String::from_utf8(text).expect("the standard library is UTF-8");
+                library.push_str(&format!("    ({below:?}, {text:?}),\n"));
+            }
         }
     }
+    library.push_str("];\n");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("stdlib.rs");
+    std::fs::write(out, library).expect("the embedded standard library");
     println!("cargo:rustc-env=UNIO_SOURCE_HASH={hash:016x}");
 }

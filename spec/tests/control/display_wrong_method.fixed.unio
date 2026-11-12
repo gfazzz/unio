@@ -1,0 +1,9 @@
+struct Temperature:
+    celsius as Float
+
+extend Temperature with Display:
+    function to_text(self) returns Text:
+        return "{self.celsius} °C"
+
+function readings(values as List[Temperature]) returns List[Text]:
+    return ["{value}" for value in values]

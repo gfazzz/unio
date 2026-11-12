@@ -1,0 +1,14 @@
+error PortError:
+    text as Text
+
+function parse_port(text as Text) returns Int fails with PortError:
+    match text.to_int():
+        case some(port):
+            if port >= 1 and port <= 65535: return port
+            fail PortError(text = text)
+        case none: fail PortError(text = text)
+
+function port_or_default(text as Text) returns Int:
+    let port = try parse_port(text) on PortError as e:
+        return 8080
+    return port

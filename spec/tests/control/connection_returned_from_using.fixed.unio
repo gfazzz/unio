@@ -1,0 +1,22 @@
+struct Connection:
+    host as Text
+    var sent as List[Text]
+
+extend Connection with Resource:
+    function release(var self):
+        print("closing {self.host} after {self.sent.length()} messages")
+
+extend Connection:
+    function send(var self, message as Text) returns Int:
+        self.sent.append(message)
+        return message.length()
+
+function connect(host as Text) returns Connection:
+    return Connection(host = host, sent = [])
+
+function open_greeted(host as Text, name as Text) returns Connection:
+    return Connection(host = host, sent = ["hello {name}"])
+
+function greet_and_leave(host as Text, name as Text) returns Int:
+    using connection = open_greeted(host, name):
+        return connection.send("bye") + connection.sent.length()

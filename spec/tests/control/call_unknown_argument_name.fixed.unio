@@ -1,0 +1,11 @@
+function format_price(cents as Int, currency as Text = "EUR") returns Text:
+    let units = cents / 100
+    let rest = cents % 100
+    let padded = "{rest}" if rest >= 10 else "0{rest}"
+    return "{units}.{padded} {currency}"
+
+function invoice_total(lines as List[Int]) returns Text:
+    var total = 0
+    for line in lines:
+        total = total + line
+    return format_price(total, currency = "USD")

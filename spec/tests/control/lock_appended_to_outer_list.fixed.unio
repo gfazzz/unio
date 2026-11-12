@@ -1,0 +1,22 @@
+struct Lock:
+    name as Text
+    var held as Int
+
+extend Lock with Resource:
+    function release(var self):
+        print("unlocked {self.name}")
+
+extend Lock:
+    function guard(var self, work as Text) returns Text:
+        self.held = self.held + 1
+        return "{self.name}: {work}"
+
+function acquire(name as Text) returns Lock:
+    return Lock(name = name, held = 0)
+
+function guard_all(names as List[Text]) returns List[Text]:
+    var labels as List[Text] = []
+    for name in names:
+        using lock = acquire(name):
+            labels.append(lock.guard("sync"))
+    return labels

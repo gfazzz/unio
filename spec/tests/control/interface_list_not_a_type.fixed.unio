@@ -1,0 +1,4 @@
+function is_sorted[T with Order](items as List[T]) returns Bool:
+    for index in range(1, items.length()):
+        if items[index - 1] > items[index]: return false
+    return true

@@ -1,0 +1,4 @@
+from std.text import join
+
+function csv_row(cells as List[Text]) returns Text:
+    return join(cells, ",")

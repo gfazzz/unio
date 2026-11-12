@@ -1,0 +1,5 @@
+function reset_if_negative(var balance as Int) returns Bool:
+    if balance < 0:
+        balance = 0
+        return true
+    return false

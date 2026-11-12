@@ -63,3 +63,7 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 ## Credits
 
 Unio grew out of the idea [“A universal programming language for AI and humans”](https://eurecable.com/ideas/992) by fazzz, published on Eurecable on November 4, 2026: writing programs with AI runs into the limits of languages that evolved for people alone, so a language designed from scratch for AI should still be one that people can read and check.
+
+## Licence
+
+Unio is licensed under either of the [MIT licence](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option, as the crates of `compiler/` declare (`license = "MIT OR Apache-2.0"`). A contribution is licensed in the same way unless its author states otherwise. The third-party code that the `unio` binary and its runtime library contain is listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES), which `.github/scripts/third_party_notices.py` generates from `compiler/Cargo.lock`; CI fails when it is stale.

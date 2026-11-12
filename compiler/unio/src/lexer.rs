@@ -474,7 +474,15 @@ impl Lexer {
                                 span,
                                 catalog::mismatched(p, open),
                             ));
-                            depth.pop();
+                            // `[g(1, 2]`: the bracket closes its own opening bracket, and the
+                            // message names the one left open between them, so that the
+                            // opening bracket is not reported as unclosed too.
+                            match depth.iter().rposition(|(o, _)| *o == expected) {
+                                Some(i) => depth.truncate(i),
+                                None => {
+                                    depth.pop();
+                                }
+                            }
                         }
                         Some(_) => {
                             depth.pop();
@@ -486,6 +494,10 @@ impl Lexer {
             return Some(Token::new(Kind::Symbol(p), String::new(), span));
         }
         self.advance();
+        // A run of one invalid character, such as `&&`, is one mistake.
+        while self.peek(0) == Some(c) {
+            self.advance();
+        }
         let shown = if c.is_control() {
             format!("U+{:04X}", c as u32)
         } else {

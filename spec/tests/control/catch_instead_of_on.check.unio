@@ -1,0 +1,4 @@
+# Hidden behavioural check of catch_instead_of_on: test blocks that the reference fix passes.
+
+test "a missing file reads as empty":
+    assert read_or_empty(Path("no-such-file-for-read-or-empty.txt")) == ""

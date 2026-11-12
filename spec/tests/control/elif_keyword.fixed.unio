@@ -1,0 +1,4 @@
+function classify(celsius as Int) returns Text:
+    if celsius < 0: return "freezing"
+    else if celsius < 15: return "cold"
+    return "warm"

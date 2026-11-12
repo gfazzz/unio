@@ -1,0 +1,71 @@
+## Benchmark (g): the latency of freeing a large structure at once (plan section 12, condition 3).
+##
+## Usage: free wide COUNT | free deep LENGTH
+##
+## wide builds COUNT records, each with texts, a list of texts, and a map, keeps them in a list
+## and in a map by name, and then drops the whole structure at once by one assignment. deep builds
+## a chain of LENGTH nested links and drops it the same way. The program prints a line before and
+## after the drop; the runner (bench/run.py --free) times the drop between the two lines, since
+## the language has no clock, and reads the resident memory of the process at the first line.
+import std.args
+
+struct Record:
+    id as Int
+    name as Text
+    note as Text
+    tags as List[Text]
+    point as Map[Text, Int]
+
+enum Chain:
+    End
+    Link(value as Int, next as Chain)
+
+struct Heap:
+    records as List[Record]
+    by_name as Map[Text, Record]
+    chain as Chain
+
+function make_record(i as Int) returns Record:
+    var tags as List[Text] = []
+    for k in range(0, i % 5 + 1):
+        tags.append("tag-{k}-{i}")
+    var point as Map[Text, Int] = {}
+    point.put("x", i % 1000)
+    point.put("y", i % 777)
+    return Record(
+        id = i,
+        name = "record number {i}",
+        note = "a note of record {i} with some more text in it",
+        tags = tags,
+        point = point,
+    )
+
+function build_wide(count as Int) returns Heap:
+    var records as List[Record] = []
+    var by_name as Map[Text, Record] = {}
+    for i in range(0, count):
+        let record = make_record(i)
+        records.append(record)
+        if i % 4 == 0: by_name.put("key {i}", make_record(i + count))
+    return Heap(records = records, by_name = by_name, chain = Chain.End)
+
+function build_deep(length as Int) returns Heap:
+    var chain = Chain.End
+    for i in range(0, length):
+        chain = Chain.Link(value = i, next = chain)
+    return Heap(records = [], by_name = {}, chain = chain)
+
+public function main() returns Int:
+    let words = args.list()
+    let mode = words.get(0) or ""
+    let size = (words.get(1) or "").to_int() or 0
+    var heap = Heap(records = [], by_name = {}, chain = Chain.End)
+    if mode == "wide": heap = build_wide(size)
+    else if mode == "deep": heap = build_deep(size)
+    else:
+        print_error("usage: free wide COUNT | free deep LENGTH")
+        return 2
+    print("built {heap.records.length()} {heap.by_name.length()}")
+    heap = Heap(records = [], by_name = {}, chain = Chain.End)
+    print("freed")
+    return 0

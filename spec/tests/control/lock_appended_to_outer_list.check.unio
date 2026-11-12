@@ -1,0 +1,5 @@
+# Hidden behavioural check of lock_appended_to_outer_list: test blocks that the reference fix passes.
+
+test "every name is guarded once":
+    assert guard_all(["db", "cache"]) == ["db: sync", "cache: sync"]
+    assert guard_all([]) == []

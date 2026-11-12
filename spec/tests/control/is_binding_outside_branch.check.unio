@@ -1,0 +1,5 @@
+# Hidden behavioural check of is_binding_outside_branch: test blocks that the reference fix passes.
+
+test "a nickname is shown with the name":
+    assert display_name(User(name = "Ann Lee", nickname = some("annie"))) == "annie (Ann Lee)"
+    assert display_name(User(name = "Bob", nickname = none)) == "Bob"

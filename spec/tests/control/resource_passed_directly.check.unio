@@ -1,0 +1,4 @@
+# Hidden behavioural check of resource_passed_directly: test blocks that the reference fix passes.
+
+test "a job runs under its lock":
+    assert run_job("queue") == "queue: job"

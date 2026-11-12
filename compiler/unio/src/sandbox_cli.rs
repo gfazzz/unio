@@ -188,8 +188,9 @@ pub fn prepare_embedded(declared: Option<&Declared>) -> Result<Plan, i32> {
 /// The directory of the standard library, which `unio test` still reads after the first file
 /// (see `program.rs`).
 /// The library the checker reads, so that the sandbox grants exactly that directory.
+/// None for the library embedded in the compiler, which is read from memory, not from a disk.
 fn stdlib_dir(_start: &Path) -> Option<PathBuf> {
-    crate::program::trusted_stdlib()
+    crate::program::trusted_stdlib().filter(|dir| !crate::vfs::is_builtin(dir))
 }
 
 fn tree(root: PathBuf) -> Scope {

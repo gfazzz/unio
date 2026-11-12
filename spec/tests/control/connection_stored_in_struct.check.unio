@@ -1,0 +1,4 @@
+# Hidden behavioural check of connection_stored_in_struct: test blocks that the reference fix passes.
+
+test "a session remembers user and host":
+    assert login("ann", "example.org") == Session(user = "ann", host = "example.org")

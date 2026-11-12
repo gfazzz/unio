@@ -1,0 +1,5 @@
+function normalize_email(text as Text) returns Text:
+    return text.trim().to_lower()
+
+function same_user(a as Text, b as Text) returns Bool:
+    return normalize_email(a) == normalize_email(b)

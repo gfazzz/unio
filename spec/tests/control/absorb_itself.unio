@@ -1,0 +1,14 @@
+# expect-error: 13 E0042
+# category: resources
+struct Tally:
+    label as Text
+    var counts as List[Int]
+
+extend Tally:
+    function absorb(var self, var other as Tally):
+        self.counts.append_all(other.counts)
+        other.counts = []
+
+function merge_daily(var week as Tally, var day as Tally) returns Int:
+    week.absorb(week)
+    return week.counts.length()

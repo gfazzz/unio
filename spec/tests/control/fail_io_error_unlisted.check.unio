@@ -1,0 +1,7 @@
+# Hidden behavioural check of fail_io_error_unlisted: test blocks that the reference fix passes.
+
+test "a missing directory is reported as not found":
+    try:
+        try require_directory(Path("no-such-directory-for-the-control-set"))
+        assert_fail("expected an error")
+    on IoError as e: assert e.kind == files.IoErrorKind.NotFound

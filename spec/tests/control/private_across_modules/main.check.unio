@@ -1,0 +1,5 @@
+# Hidden behavioural check of private_across_modules: test blocks that the reference fix passes.
+
+test "a square box of side 3 has area 9":
+    assert geometry.Box.square(3).area() == 9
+    assert main() == 0

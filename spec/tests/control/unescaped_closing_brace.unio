@@ -1,0 +1,4 @@
+# expect-error: 4 E0011
+# category: style
+function css_rule(selector as Text, color as Text) returns Text:
+    return "{selector} \{ color: {color}; }"

@@ -1,0 +1,5 @@
+# Hidden behavioural check of too_few_arguments: test blocks that the reference fix passes.
+
+test "invoice numbers are padded with zeros":
+    assert invoice_number(42) == "INV-000042"
+    assert pad_left("abcdefg", 3, " ") == "abcdefg"

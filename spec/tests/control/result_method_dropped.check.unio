@@ -1,0 +1,6 @@
+# Hidden behavioural check of result_method_dropped: test blocks that the reference fix passes.
+
+test "jobs beyond the capacity are rejected":
+    var queue = Queue(items = [], capacity = 2)
+    assert enqueue_all(queue, ["a", "b", "c"]) == 1
+    assert queue.items == ["a", "b"]

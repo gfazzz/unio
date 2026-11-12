@@ -1,0 +1,4 @@
+# Hidden behavioural check of var_argument_from_let: test blocks that the reference fix passes.
+
+test "duplicates are dropped in order":
+    assert dedupe(["b", "a", "b", "c", "a"]) == ["b", "a", "c"]

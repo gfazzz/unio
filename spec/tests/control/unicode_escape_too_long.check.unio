@@ -1,0 +1,5 @@
+# Hidden behavioural check of unicode_escape_too_long: test blocks that the reference fix passes.
+
+test "done items get a check mark":
+    assert check_mark(true) == "[\u{2714}]"
+    assert check_mark(false) == "[ ]"

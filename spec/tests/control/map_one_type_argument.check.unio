@@ -1,0 +1,7 @@
+# Hidden behavioural check of map_one_type_argument: test blocks that the reference fix passes.
+
+test "names are grouped by their capital initial":
+    let index = index_by_initial(["ann", "Bob", "alex", ""])
+    assert index["A"] == ["ann", "alex"]
+    assert index["B"] == ["Bob"]
+    assert index.length() == 2

@@ -1,0 +1,7 @@
+# expect-error: 5 E0030
+# category: style
+function reset_if_negative(var balance as Int) returns Bool:
+    if balance < 0:
+        balance + 0 = 0
+        return true
+    return false

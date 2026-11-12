@@ -1,0 +1,9 @@
+public function total(values as List[Int]) returns Int:
+    var sum = 0
+    for value in values:
+        sum = sum + value
+    return sum
+
+public function mean(values as List[Int]) returns Int:
+    if values.is_empty(): return 0
+    return total(values) / values.length()

@@ -1,0 +1,6 @@
+function greet(name as Text) returns Text:
+    return "Hello, {name}"
+
+public function main() returns Int:
+    print(greet("world"))
+    return 0

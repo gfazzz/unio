@@ -1,0 +1,16 @@
+struct Coordinate:
+    lat as Float
+    lon as Float
+
+extend Coordinate with Display:
+    function to_text(self) returns Text:
+        return "({self.lat}, {self.lon})"
+
+function bullet_list[T with Display](items as List[T]) returns Text:
+    var text = ""
+    for item in items:
+        text = text + "* {item}\n"
+    return text
+
+function route(stops as List[Coordinate]) returns Text:
+    return bullet_list(stops)

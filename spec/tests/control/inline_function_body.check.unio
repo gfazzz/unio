@@ -1,0 +1,4 @@
+# Hidden behavioural check of inline_function_body: test blocks that the reference fix passes.
+
+test "values are doubled":
+    assert doubled([1, 5]) == [2, 10]

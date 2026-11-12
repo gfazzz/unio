@@ -1,0 +1,6 @@
+function retries_left(setting as Option[Int]) returns Int:
+    match setting:
+        case some(count):
+            if count < 0: return 0
+            return count
+        case none: return 3

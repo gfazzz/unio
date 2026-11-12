@@ -1,0 +1,4 @@
+# Hidden behavioural check of lock_inequality: test blocks that the reference fix passes.
+
+test "two locks are taken in order":
+    assert copy_between("a", "b") == ["a: read", "b: write"]

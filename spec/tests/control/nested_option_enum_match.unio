@@ -1,0 +1,10 @@
+# expect-error: 8 E0068
+# category: errors
+enum Priority:
+    Low
+    High
+
+function badge(priority as Option[Priority]) returns Text:
+    match priority:
+        case some(Priority.High): return "!!"
+        case none: return ""

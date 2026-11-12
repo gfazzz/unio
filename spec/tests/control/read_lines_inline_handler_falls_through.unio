@@ -1,0 +1,8 @@
+# expect-error: 6 E0075
+# category: errors
+import std.files
+
+function count_lines(path as Path) returns Int:
+    let text = try files.read_text(path) on IoError as e:
+        print_error("cannot read {e.path}: {e.reason}")
+    return text.lines().length()

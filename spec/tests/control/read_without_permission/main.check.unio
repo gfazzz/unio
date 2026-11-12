@@ -1,0 +1,5 @@
+# Hidden behavioural check of read_without_permission: test blocks that the reference fix passes.
+
+test "words are separated by white space":
+    assert count_words(" one two\nthree ") == 3
+    assert count_words("") == 0

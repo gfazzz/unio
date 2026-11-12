@@ -1,0 +1,5 @@
+# expect-error: 4 E0068
+# category: errors
+function greeting(name as Option[Text]) returns Text:
+    match name:
+        case some(text): return "Hello, {text}!"

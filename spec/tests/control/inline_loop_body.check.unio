@@ -1,0 +1,4 @@
+# Hidden behavioural check of inline_loop_body: test blocks that the reference fix passes.
+
+test "lengths add up":
+    assert total_length(["ab", "cde"]) == 5

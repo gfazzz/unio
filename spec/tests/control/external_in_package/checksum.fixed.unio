@@ -1,0 +1,8 @@
+## Adler-32 of the code points of a text.
+public function adler32(text as Text) returns Int:
+    var a = 1
+    var b = 0
+    for code in text.code_points():
+        a = (a + code) % 65521
+        b = (b + a) % 65521
+    return b * 65536 + a

@@ -1,0 +1,4 @@
+# Hidden behavioural check of report_line_text_plus_int: test blocks that the reference fix passes.
+
+test "a report line names the region and units":
+    assert report_line(Sale(region = "north", units = 12)) == "north: 12 units"

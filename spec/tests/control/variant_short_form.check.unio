@@ -1,0 +1,6 @@
+# Hidden behavioural check of variant_short_form: test blocks that the reference fix passes.
+
+test "commands are parsed case-insensitively":
+    assert parse_command("ADD") == some(Command.Add)
+    assert parse_command("list") == some(Command.List)
+    assert parse_command("help") == none

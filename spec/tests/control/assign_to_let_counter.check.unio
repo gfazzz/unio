@@ -1,0 +1,5 @@
+# Hidden behavioural check of assign_to_let_counter: test blocks that the reference fix passes.
+
+test "vowels are counted":
+    assert count_vowels("Programming Unio") == 6
+    assert count_vowels("xyz") == 0

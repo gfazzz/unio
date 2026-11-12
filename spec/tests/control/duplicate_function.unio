@@ -1,0 +1,7 @@
+# expect-error: 6 E0051
+# category: types
+function area(width as Int, height as Int) returns Int:
+    return width * height
+
+function area(side as Int) returns Int:
+    return side * side

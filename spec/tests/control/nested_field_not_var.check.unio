@@ -1,0 +1,7 @@
+# Hidden behavioural check of nested_field_not_var: test blocks that the reference fix passes.
+
+test "the port of the server changes":
+    let original = Deployment(name = "api", server = Server(host = "a", port = 80))
+    let moved = move_to_port(original, 8080)
+    assert moved.server.port == 8080
+    assert original.server.port == 80

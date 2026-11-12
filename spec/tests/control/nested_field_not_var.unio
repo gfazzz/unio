@@ -1,0 +1,14 @@
+# expect-error: 13 E0078
+# category: resources
+struct Server:
+    host as Text
+    var port as Int
+
+struct Deployment:
+    name as Text
+    server as Server
+
+function move_to_port(deployment as Deployment, port as Int) returns Deployment:
+    var moved = deployment
+    moved.server.port = port
+    return moved

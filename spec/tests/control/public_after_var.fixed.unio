@@ -1,0 +1,6 @@
+public struct Account:
+    public owner as Text
+    public var balance as Int
+
+public function deposit(var account as Account, amount as Int):
+    account.balance = account.balance + amount

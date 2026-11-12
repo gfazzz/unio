@@ -3,12 +3,13 @@
 
 Usage:
     python3 bench/run.py [--runs N] [--only NAME,...] [--json FILE] [--check-floor] [--unio PATH]
-                         [--native] [--check-go] [--check-startup]
+                         [--native] [--check-go] [--check-startup] [--check-free]
 
 With --native, each Unio program is also built with `unio build --release` and runs as a native
 executable ("Unio native"); the ratios and the floor then refer to the native executable.
 The benchmark "empty" measures the start of an empty program: the median of STARTUP_RUNS runs,
 and with --check-startup the native executable must start within 5 ms (requirement 7.1).
+The benchmark "free" measures the pause of freeing a large structure at once (RFC 0007).
 
 The rules of the comparison are in bench/README.md. Only the Python standard library is used.
 """
@@ -46,6 +47,19 @@ GO_MEMORY_ALLOWANCE = 8_000_000
 # so one run is noise: the median of many runs is compared, and the spread is recorded.
 STARTUP_LIMIT = 0.005
 STARTUP_RUNS = 101
+
+# Plan section 12, condition 3, and RFC 0007: the latency of freeing a large structure at once,
+# the counterpart of a GC pause under reference counting. "wide" is about 100 MB of typical
+# values (records with texts, a list of texts and a map, a map by name); "deep" is a chain of
+# nested values, freed without recursion since RFC 0007. The pause is the time between the two
+# lines the program prints around the drop; the median of the runs is reported. RFC 0007
+# replaced the 7.1 row "GC pause at a 100 MB heap at most 10 ms" (FREE_LIMIT, printed for
+# comparison) with a bound per MB: with --check-free the median wide pause must stay within
+# FREE_LIMIT_PER_MB per MB of peak memory.
+FREE_CASES = (("wide", 40_000), ("deep", 1_000_000))
+FREE_RUNS = 7
+FREE_LIMIT = 0.010
+FREE_LIMIT_PER_MB = 0.001
 
 VOCABULARY = (
     "the quick brown fox jumps over lazy dog and then runs into forest where "
@@ -327,7 +341,7 @@ def tool_rows(languages, runs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--runs", type=int, default=3, help="best of N runs (default 3)")
-    parser.add_argument("--only", default="wc,json,text,loop,empty,tools", help="benchmarks to run")
+    parser.add_argument("--only", default="wc,json,text,loop,empty,tools,free", help="benchmarks to run")
     parser.add_argument("--json", default=str(BENCH / "results.json"), help="where to write JSON")
     parser.add_argument("--check-floor", action="store_true",
                         help="exit 1 if Unio is slower than 0.5x Python on wc, json, text, loop")
@@ -336,6 +350,9 @@ def main():
     parser.add_argument("--check-startup", action="store_true",
                         help="exit 1 if the native executable of an empty program starts in more than 5 ms"
                              " (median of the runs of the benchmark empty; needs --native)")
+    parser.add_argument("--check-free", action="store_true",
+                        help="exit 1 if freeing the wide heap of the benchmark free takes more than"
+                             " 1 ms per MB of peak memory (median; RFC 0007)")
     parser.add_argument("--unio", default=None, help="path to the unio binary")
     parser.add_argument("--native", action="store_true",
                         help="also build the Unio programs with unio build --release and compare those")
@@ -408,6 +425,8 @@ def main():
         rows.append(startup_row(languages, startup_failures, failures))
     if "tools" in selected:
         rows.extend(tool_rows(languages, options.runs))
+    free_failures = []
+    free = free_rows(languages, free_failures, failures) if "free" in selected else []
 
     print_table(rows, reference(languages))
     if "empty" in selected:
@@ -454,6 +473,8 @@ def main():
         if not any(r["benchmark"] == name and r["case"] == "same algorithm" for r in rows):
             go_failures.append(f"{name}: gated by RFC 0003 but not run")
     print_memory(rows)
+    if free:
+        print_free(free)
 
     report = {
         "versions": languages.versions,
@@ -469,6 +490,10 @@ def main():
         "go_failures": go_failures,
         "startup_limit": STARTUP_LIMIT,
         "startup_failures": startup_failures,
+        "free": free,
+        "free_limit": FREE_LIMIT,
+        "free_limit_per_mb": FREE_LIMIT_PER_MB,
+        "free_failures": free_failures,
     }
     Path(options.json).write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"\nJSON written to {options.json}")
@@ -486,8 +511,12 @@ def main():
         startup_failures.append("--check-startup needs the benchmark empty")
     for failure in startup_failures:
         print(f"{'error' if options.check_startup else 'note'}: start-up (7.1): {failure}", file=sys.stderr)
+    if options.check_free and "free" not in selected:
+        free_failures.append("--check-free needs the benchmark free")
+    for failure in free_failures:
+        print(f"{'error' if options.check_free else 'note'}: freeing (RFC 0007): {failure}", file=sys.stderr)
     if (failures or (options.check_floor and floor_failures) or (options.check_go and go_failures)
-            or (options.check_startup and startup_failures)):
+            or (options.check_startup and startup_failures) or (options.check_free and free_failures)):
         return 1
     return 0
 
@@ -532,6 +561,78 @@ def startup_row(languages, startup_failures, failures):
             startup_failures.append(f"Unio native starts in {native * 1000:.2f} ms (median), above"
                                     f" {STARTUP_LIMIT * 1000:.0f} ms")
     return row
+
+
+def free_once(command, cwd):
+    """Runs the program of bench/free/; returns (pause in seconds, peak RSS in bytes or None),
+    or (None, message). The pause is the time between the line printed before the drop and the
+    line printed after it, read from a pipe as they arrive; the language has no clock."""
+    tool = launcher()
+    process = subprocess.Popen(([tool] if tool else []) + command, cwd=cwd,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    built = process.stdout.readline()
+    before = time.perf_counter()
+    freed = process.stdout.readline()
+    after = time.perf_counter()
+    _, stderr = process.communicate()
+    stderr = stderr.decode("utf-8", "replace")
+    if process.returncode != 0 or not built.startswith(b"built") or freed.strip() != b"freed":
+        return None, (stderr.strip().splitlines() or ["exit " + str(process.returncode)])[-1]
+    peak = None
+    last = stderr.rstrip("\n").rpartition("\n")[2]
+    if last.startswith("peak_rss "):
+        peak = int(last.split()[1])
+    return after - before, peak
+
+
+def free_rows(languages, free_failures, failures):
+    """(g): the pause of freeing a large structure at once, in the interpreter and natively."""
+    source = BENCH / "free" / "free.unio"
+    rows = []
+    for language in ("Unio", "Unio native"):
+        if language in languages.missing or (language == "Unio native" and not languages.native):
+            continue
+        try:
+            command = languages.command(language, source, None)
+        except subprocess.CalledProcessError as e:
+            failures.append(f"free/{language}: build failed: {e}")
+            continue
+        for case, size in FREE_CASES:
+            pauses, peaks = [], []
+            for _ in range(FREE_RUNS):
+                pause, peak = free_once(command + ([] if language == "Unio native" else ["--"])
+                                        + [case, str(size)], ROOT)
+                if pause is None:
+                    failures.append(f"free/{language}/{case}: {peak}")
+                    break
+                pauses.append(pause)
+                if peak is not None:
+                    peaks.append(peak)
+            if not pauses:
+                continue
+            row = {"language": language, "case": case, "size": size, "pauses": pauses,
+                   "median": statistics.median(pauses), "worst": max(pauses),
+                   "peak": min(peaks) if peaks else None}
+            rows.append(row)
+            print(f"  free {case:<4} {language:<11} median {row['median'] * 1000:8.2f} ms,"
+                  f" worst {row['worst'] * 1000:8.2f} ms of {FREE_RUNS} runs", file=sys.stderr)
+            if case == "wide" and row["peak"]:
+                limit = FREE_LIMIT_PER_MB * row["peak"] / 1e6
+                if row["median"] > limit:
+                    free_failures.append(f"{language} frees {row['peak'] / 1e6:.0f} MB in"
+                                         f" {row['median'] * 1000:.1f} ms, above {limit * 1000:.1f} ms")
+    return rows
+
+
+def print_free(rows):
+    """The pauses of freeing at once, against the GC-pause row of 7.1 and RFC 0007."""
+    print(f"\nFreeing a structure at once, median and worst of {FREE_RUNS} runs (7.1 GC pause: at most"
+          f" {FREE_LIMIT * 1000:.0f} ms at 100 MB; RFC 0007: at most {FREE_LIMIT_PER_MB * 1000:.0f} ms per MB):")
+    for row in rows:
+        peak = f"{row['peak'] / 1e6:7.1f} MB peak" if row["peak"] else "peak not measured"
+        per_mb = f", {row['median'] * 1e9 / row['peak']:.3f} ms/MB" if row["peak"] else ""
+        print(f"  {row['case']:<4} {row['size']:>9} {row['language']:<11} median {row['median'] * 1000:8.2f} ms,"
+              f" worst {row['worst'] * 1000:8.2f} ms, {peak}{per_mb}")
 
 
 def print_startup(row):

@@ -1,0 +1,7 @@
+# Hidden behavioural check of parse_port_option_mismatch: test blocks that the reference fix passes.
+
+test "ports in range are accepted":
+    assert parse_port(" 8080 ") == some(8080)
+    assert parse_port("0") == none
+    assert parse_port("70000") == none
+    assert parse_port("http") == none

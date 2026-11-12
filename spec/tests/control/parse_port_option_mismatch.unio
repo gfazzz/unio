@@ -1,0 +1,8 @@
+# expect-error: 7 E0061
+# category: types
+function parse_port(text as Text) returns Option[Int]:
+    match text.trim().to_int():
+        case some(number):
+            if number < 1 or number > 65535: return none
+            return number
+        case none: return none

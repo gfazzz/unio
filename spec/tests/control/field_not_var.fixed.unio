@@ -1,0 +1,10 @@
+struct Player:
+    name as Text
+    var score as Int
+
+function award(var players as List[Player], name as Text, points as Int) returns Bool:
+    for index, player in players.enumerate():
+        if player.name == name:
+            players[index].score = player.score + points
+            return true
+    return false

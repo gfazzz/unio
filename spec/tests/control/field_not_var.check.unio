@@ -1,0 +1,7 @@
+# Hidden behavioural check of field_not_var: test blocks that the reference fix passes.
+
+test "points go to the named player":
+    var players = [Player(name = "ann", score = 1), Player(name = "bob", score = 2)]
+    assert award(players, "bob", 5)
+    assert players[1].score == 7
+    assert not award(players, "zed", 1)

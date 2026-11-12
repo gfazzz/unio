@@ -1,0 +1,5 @@
+import std.process
+
+function git_is_clean() returns Bool fails with ProcessError:
+    let output = try process.run("git", ["status", "--porcelain"])
+    return output.status == 0 and output.stdout.trim().is_empty()

@@ -1,0 +1,4 @@
+# Hidden behavioural check of unterminated_text: test blocks that the reference fix passes.
+
+test "a banner frames its title":
+    assert banner("Hi") == "==\nHi\n=="

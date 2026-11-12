@@ -1,0 +1,7 @@
+# Hidden behavioural check of reader_without_using: test blocks that the reference fix passes.
+
+test "a missing file is an error":
+    try:
+        let size = try count_bytes(Path("no-such-file-for-count-bytes.bin"))
+        assert_fail("expected an error")
+    on IoError as e: assert not e.reason.is_empty()

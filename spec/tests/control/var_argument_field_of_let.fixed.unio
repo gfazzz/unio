@@ -1,0 +1,11 @@
+struct Playlist:
+    name as Text
+    var songs as List[Text]
+
+function add_song(var songs as List[Text], song as Text):
+    if not songs.contains(song): songs.append(song)
+
+function with_song(playlist as Playlist, song as Text) returns Playlist:
+    var copy = playlist
+    add_song(copy.songs, song)
+    return copy

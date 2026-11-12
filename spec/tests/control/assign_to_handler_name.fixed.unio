@@ -1,0 +1,12 @@
+error Invalid:
+    reason as Text
+
+function check_username(name as Text) returns Text fails with Invalid:
+    if name.length() < 3: fail Invalid(reason = "too short")
+    if name.contains(" "): fail Invalid(reason = "contains a space")
+    return name.to_lower()
+
+function username_message(name as Text) returns Text:
+    try:
+        return "welcome, {try check_username(name)}"
+    on Invalid as e: return "rejected: {e.reason}"

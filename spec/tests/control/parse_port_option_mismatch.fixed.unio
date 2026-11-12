@@ -1,0 +1,6 @@
+function parse_port(text as Text) returns Option[Int]:
+    match text.trim().to_int():
+        case some(number):
+            if number < 1 or number > 65535: return none
+            return some(number)
+        case none: return none

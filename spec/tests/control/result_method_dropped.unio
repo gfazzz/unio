@@ -1,0 +1,20 @@
+# expect-error: 19 E0043
+# category: errors
+error QueueFull:
+    capacity as Int
+
+struct Queue:
+    var items as List[Text]
+    capacity as Int
+
+extend Queue:
+    function push(var self, item as Text) returns Result[Int, QueueFull]:
+        if self.items.length() >= self.capacity: return error(QueueFull(capacity = self.capacity))
+        self.items.append(item)
+        return ok(self.items.length())
+
+function enqueue_all(var queue as Queue, jobs as List[Text]) returns Int:
+    var rejected = 0
+    for job in jobs:
+        queue.push(job)
+    return rejected

@@ -1,0 +1,5 @@
+# Hidden behavioural check of compound_assignment: test blocks that the reference fix passes.
+
+test "scores are added up":
+    assert total_score([3, 4, 5]) == 12
+    assert total_score([]) == 0

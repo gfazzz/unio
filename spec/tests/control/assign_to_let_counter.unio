@@ -1,0 +1,7 @@
+# expect-error: 6 E0077
+# category: resources
+function count_vowels(text as Text) returns Int:
+    let count = 0
+    for character in text.to_lower().chars():
+        if "aeiou".contains(character): count = count + 1
+    return count

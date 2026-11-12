@@ -1,0 +1,7 @@
+# expect-error: 6 E0056
+# category: types
+function initials(full_name as Text) returns Text:
+    var result = ""
+    for part in full_name.split_whitespace():
+        result = result + part.slice(0, 1).upper()
+    return result

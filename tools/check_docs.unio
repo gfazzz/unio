@@ -4,9 +4,9 @@
 ##     check_docs [ROOT]
 ##
 ## Checks every file with a checked extension below ROOT (the current directory by default):
-## UTF-8, a final line end, no trailing white space, no tabs (except corpus files that test
-## tabs), relative Markdown links that point to existing files, and a Russian localization for
-## every English document. Prints one line per problem.
+## UTF-8, a final line end, no trailing white space, no tabs (except the corpus and control files
+## that test tabs), relative Markdown links that point to existing files, and a Russian
+## localization for every English document. Prints one line per problem.
 ## Exit code: 0 if there are no problems, 1 otherwise, 2 if ROOT cannot be read.
 
 import std.args
@@ -17,7 +17,10 @@ let CHECKED_EXTENSIONS as List[Text] = ["md", "unio", "ebnf", "py", "yml", "json
 
 let SKIPPED_DIRECTORIES as List[Text] = [".git", "target", "node_modules", "__pycache__"]
 
-let TABS_ALLOWED as List[Text] = ["spec/tests/invalid/tab_indent.unio"]
+let TABS_ALLOWED as List[Text] = [
+    "spec/tests/invalid/tab_indent.unio",
+    "spec/tests/control/tab_indentation.unio",
+]
 
 ## English documents whose Russian localization does not follow the docs/ to docs/ru/ rule.
 let SPECIAL_LOCALIZATIONS as Map[Text, Text] = {

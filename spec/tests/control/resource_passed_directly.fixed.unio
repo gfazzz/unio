@@ -1,0 +1,22 @@
+struct Lock:
+    name as Text
+    var held as Int
+
+extend Lock with Resource:
+    function release(var self):
+        print("unlocked {self.name}")
+
+extend Lock:
+    function guard(var self, work as Text) returns Text:
+        self.held = self.held + 1
+        return "{self.name}: {work}"
+
+function acquire(name as Text) returns Lock:
+    return Lock(name = name, held = 0)
+
+function locked_work(lock as Lock, work as Text) returns Text:
+    return "{lock.name}: {work}"
+
+function run_job(name as Text) returns Text:
+    using lock = acquire(name):
+        return locked_work(lock, "job")

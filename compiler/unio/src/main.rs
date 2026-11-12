@@ -4,6 +4,9 @@
 //! SB-11 (`worker.rs`, docs/runtime.md 9.7); this process handles the arguments, starts the
 //! worker, and shows what it returns.
 
+// The language server: the protocol here, its analyses in `unio::lsp` (T-10, SB-13).
+#[path = "lsp/server.rs"]
+mod lsp_server;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -24,6 +27,7 @@ const USAGE: &str = "Usage:
     unio symbol [--json] MODULE.NAME
     unio parse --ast FILE
     unio explain CODE
+    unio lsp [--policy FILE] [--allow-weaker-sandbox] [--lang=en|ru]
 
 The language of messages is taken from --lang, then from UNIO_LANG, and is English otherwise.
 Every command that reads sources takes --policy FILE (or UNIO_POLICY), whose [compile] table
@@ -58,6 +62,9 @@ fn main() -> ExitCode {
     }
     if arguments.first().map(String::as_str) == Some("build") {
         return build(&arguments[1..]);
+    }
+    if arguments.first().map(String::as_str) == Some("lsp") {
+        return lsp_server::main(&arguments[1..]);
     }
     let (sandbox, arguments) = match sandbox_cli::take(&arguments) {
         Ok(taken) => taken,

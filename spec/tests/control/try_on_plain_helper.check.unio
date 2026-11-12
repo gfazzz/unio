@@ -1,0 +1,5 @@
+# Hidden behavioural check of try_on_plain_helper: test blocks that the reference fix passes.
+
+test "emails compare without case and spaces":
+    assert same_user(" Ann@Example.org", "ann@example.org ")
+    assert not same_user("ann@example.org", "bob@example.org")

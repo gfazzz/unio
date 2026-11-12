@@ -1,0 +1,12 @@
+# expect-error: 11 E0051
+# category: types
+struct Rectangle:
+    width as Int
+    height as Int
+
+extend Rectangle:
+    function area(self) returns Int:
+        return self.width * self.height
+
+    function area(self) returns Int:
+        return 2 * (self.width + self.height)

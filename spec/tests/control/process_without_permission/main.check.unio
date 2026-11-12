@@ -1,0 +1,5 @@
+# Hidden behavioural check of process_without_permission: test blocks that the reference fix passes.
+
+test "an empty branch name means a detached head":
+    assert branch_name("main\n") == "main"
+    assert branch_name("\n") == "detached"

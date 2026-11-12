@@ -1,0 +1,6 @@
+# Hidden behavioural check of interface_list_not_a_type: test blocks that the reference fix passes.
+
+test "sorted and unsorted lists":
+    assert is_sorted([1, 2, 2, 5])
+    assert not is_sorted(["b", "a"])
+    assert is_sorted([])

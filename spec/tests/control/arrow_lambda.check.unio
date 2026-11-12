@@ -1,0 +1,4 @@
+# Hidden behavioural check of arrow_lambda: test blocks that the reference fix passes.
+
+test "lengths of words":
+    assert lengths(["a", "abc"]) == [1, 3]

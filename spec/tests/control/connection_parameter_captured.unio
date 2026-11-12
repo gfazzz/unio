@@ -1,0 +1,24 @@
+# expect-error: 20 E0081
+# category: resources
+struct Connection:
+    host as Text
+    var sent as List[Text]
+
+extend Connection with Resource:
+    function release(var self):
+        print("closing {self.host} after {self.sent.length()} messages")
+
+extend Connection:
+    function send(var self, message as Text) returns Int:
+        self.sent.append(message)
+        return message.length()
+
+function connect(host as Text) returns Connection:
+    return Connection(host = host, sent = [])
+
+function send_twice(var connection as Connection, message as Text) returns Int:
+    return [message, message].fold(0, function (sum as Int, m as Text) returns Int: sum + connection.send(m))
+
+function chat(host as Text) returns Int:
+    using connection = connect(host):
+        return send_twice(connection, "hi")

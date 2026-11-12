@@ -1,0 +1,7 @@
+# Hidden behavioural check of tuple_match_missing_combination: test blocks that the reference fix passes.
+
+test "crossing only when cars stop and walkers go":
+    assert can_cross(Light.Red, Light.Green)
+    assert not can_cross(Light.Red, Light.Red)
+    assert not can_cross(Light.Green, Light.Green)
+    assert not can_cross(Light.Green, Light.Red)

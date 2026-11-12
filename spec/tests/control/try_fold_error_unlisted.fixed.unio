@@ -1,0 +1,10 @@
+error OverBudget:
+    spent as Int
+
+function add_expense(spent as Int, expense as Int) returns Int fails with OverBudget:
+    let total = spent + expense
+    if total > 1000: fail OverBudget(spent = total)
+    return total
+
+function total_expenses(expenses as List[Int]) returns Int fails with OverBudget:
+    return try expenses.try_fold(0, add_expense)

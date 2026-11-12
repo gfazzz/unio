@@ -1,0 +1,5 @@
+# Hidden behavioural check of option_match_missing_none: test blocks that the reference fix passes.
+
+test "a greeting with and without a name":
+    assert greeting(some("Ann")) == "Hello, Ann!"
+    assert greeting(none) == "Hello, stranger!"

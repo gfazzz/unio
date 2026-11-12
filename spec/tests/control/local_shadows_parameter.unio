@@ -1,0 +1,5 @@
+# expect-error: 4 E0055
+# category: types
+function apply_discount(price as Int, percent as Int) returns Int:
+    let price = price - price * percent / 100
+    return price

@@ -1,0 +1,5 @@
+function total_length(words as List[Text]) returns Int:
+    var total = 0
+    for word in words:
+        total = total + word.length()
+    return total

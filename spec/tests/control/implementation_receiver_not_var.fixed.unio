@@ -1,0 +1,17 @@
+interface Step:
+    function advance(var self) returns Bool
+
+struct Countdown:
+    var left as Int
+
+extend Countdown with Step:
+    function advance(var self) returns Bool:
+        if self.left == 0: return false
+        self.left = self.left - 1
+        return true
+
+function drain(var steps as Countdown) returns Int:
+    var taken = 0
+    while steps.advance():
+        taken = taken + 1
+    return taken

@@ -1,0 +1,8 @@
+function peak(readings as List[Float]) returns Option[Float]:
+    var best as Option[Float] = none
+    for reading in readings:
+        match best:
+            case some(current):
+                if reading > current: best = some(reading)
+            case none: best = some(reading)
+    return best

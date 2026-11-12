@@ -1,0 +1,5 @@
+# Hidden behavioural check of library_module_reads_files: test blocks that the reference fix passes.
+
+test "the mean of integers":
+    assert mean([2, 4, 9]) == 5
+    assert mean([]) == 0

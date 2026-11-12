@@ -1,0 +1,14 @@
+# expect-error: 11 E0075
+# category: errors
+import std.args
+import std.files
+
+public function main() returns Int:
+    let arguments = args.list()
+    if arguments.is_empty():
+        print_error("usage: lines FILE")
+        return 2
+    let text = try files.read_text(Path(arguments[0])) on IoError as e:
+        print_error("lines: {e.path}: {e.reason}")
+    print("{text.lines().length()}")
+    return 0

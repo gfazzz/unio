@@ -1,0 +1,11 @@
+# expect-error: 9 E0068
+# category: errors
+enum Shape:
+    Circle(radius as Float)
+    Rectangle(width as Float, height as Float)
+    Triangle(base as Float, height as Float)
+
+function area(shape as Shape) returns Float:
+    match shape:
+        case Shape.Circle(radius): return 3.14 * radius * radius
+        case Shape.Rectangle(width, height): return width * height

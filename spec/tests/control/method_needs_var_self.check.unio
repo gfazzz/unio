@@ -1,0 +1,6 @@
+# Hidden behavioural check of method_needs_var_self: test blocks that the reference fix passes.
+
+test "page hits are counted":
+    let hits = count_pages(["/", "/about", "/"])
+    assert hits["/"] == 2
+    assert hits["/about"] == 1

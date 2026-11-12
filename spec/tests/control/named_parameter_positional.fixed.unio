@@ -1,0 +1,10 @@
+function retry_delays(attempts as Int, named base_ms as Int) returns List[Int]:
+    var delays as List[Int] = []
+    var delay = base_ms
+    for _ in range(0, attempts):
+        delays.append(delay)
+        delay = delay * 2
+    return delays
+
+function default_schedule() returns List[Int]:
+    return retry_delays(4, base_ms = 100)

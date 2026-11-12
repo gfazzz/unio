@@ -1,0 +1,5 @@
+function total_score(scores as List[Int]) returns Int:
+    var points = 0
+    for score in scores:
+        points = points + score
+    return points

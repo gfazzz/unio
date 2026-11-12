@@ -1,0 +1,5 @@
+# Hidden behavioural check of duplicate_constant: test blocks that the reference fix passes.
+
+test "titles become slugs":
+    assert slugify("Hello  Big World") == "hello-big-world"
+    assert slugify("") == ""

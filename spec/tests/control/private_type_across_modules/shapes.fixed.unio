@@ -1,0 +1,8 @@
+public struct Square:
+    public side as Int
+
+public function square(side as Int) returns Square:
+    return Square(side = side)
+
+public function area(shape as Square) returns Int:
+    return shape.side * shape.side

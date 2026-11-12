@@ -1,0 +1,4 @@
+# expect-error: 4 E0076
+# category: errors
+function lookup_port(services as Map[Text, Int], name as Text) returns Int:
+    return (try services.get(name)) or 0

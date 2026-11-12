@@ -1,0 +1,3 @@
+function banner(title as Text) returns Text:
+    let line = "=".repeat(title.length())
+    return "{line}\n{title}\n{line}"

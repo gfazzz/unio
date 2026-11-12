@@ -1,0 +1,8 @@
+struct Budget:
+    var limit as Int
+    var spent as Int
+
+function after_purchase(budget as Budget, price as Int) returns Budget:
+    var updated = budget
+    updated.spent = updated.spent + price
+    return updated

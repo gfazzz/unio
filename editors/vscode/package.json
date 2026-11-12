@@ -1,8 +1,8 @@
 {
   "name": "unio",
   "displayName": "Unio",
-  "description": "Syntax highlighting for the Unio programming language, in .unio files and in ```unio blocks of Markdown.",
-  "version": "0.1.2",
+  "description": "Unio for VS Code and Cursor: highlighting of .unio files and of ```unio blocks of Markdown, and the language server unio lsp (diagnostics, go to definition, hover with types, completion, formatting, rename).",
+  "version": "0.2.0",
   "publisher": "unio",
   "license": "SEE LICENSE IN README.md",
   "repository": {
@@ -13,7 +13,13 @@
     "vscode": "^1.80.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:unio"
   ],
   "contributes": {
     "languages": [
@@ -49,10 +55,39 @@
           "meta.embedded.block.unio": "unio"
         }
       }
+    ],
+    "configuration": {
+      "title": "Unio",
+      "properties": {
+        "unio.server.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the language server unio lsp for .unio files."
+        },
+        "unio.server.path": {
+          "type": "string",
+          "default": "unio",
+          "description": "The unio executable that runs the language server (unio lsp)."
+        },
+        "unio.server.arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Arguments after 'unio lsp', for example [\"--policy\", \"/path/to/policy.toml\"]: the [compile] table of the policy limits every analysis worker."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "unio.restartServer",
+        "title": "Unio: Restart the language server"
+      }
     ]
   },
   "scripts": {
-    "test": "node --test test/grammar.test.mjs"
+    "test": "node --test test/grammar.test.mjs test/client.test.mjs"
   },
   "devDependencies": {
     "vscode-oniguruma": "2.0.1",

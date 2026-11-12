@@ -1,0 +1,14 @@
+# expect-error: 14 E0073
+# category: errors
+error UnknownUnit:
+    unit as Text
+
+function to_meters(value as Float, unit as Text) returns Float fails with UnknownUnit:
+    match unit:
+        case "m": return value
+        case "km": return value * 1000.0
+        case "cm": return value / 100.0
+        case _: fail UnknownUnit(unit = unit)
+
+function describe(value as Float, unit as Text) returns Text fails with UnknownUnit:
+    return "{value} {unit} = {to_meters(value, unit)} m"

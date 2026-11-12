@@ -1,0 +1,9 @@
+# expect-error: 7 E0077
+# category: resources
+function running_totals(values as List[Int]) returns List[Int]:
+    var totals as List[Int] = []
+    let sum = 0
+    for value in values:
+        sum = sum + value
+        totals.append(sum)
+    return totals

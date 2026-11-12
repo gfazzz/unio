@@ -1,0 +1,13 @@
+# Hidden behavioural check of json_private_field: test blocks that the reference fix passes.
+
+test "a config is decoded from JSON":
+    let config = try load_config("\{\"host\": \"localhost\", \"port\": 8080\}") on Error as e:
+        assert_fail(e.to_text())
+    assert address(config) == "localhost:8080"
+
+test "a missing field is a decode error":
+    try:
+        let config = try load_config("\{\"host\": \"localhost\"\}")
+        assert_fail("expected a decode error")
+    on DecodeError as e: assert not e.message.is_empty()
+    on ParseError as e: assert_fail(e.to_text())

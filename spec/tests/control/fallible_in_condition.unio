@@ -1,0 +1,17 @@
+# expect-error: 16 E0073
+# category: errors
+error BadDate:
+    text as Text
+
+function day_of_year(text as Text) returns Int fails with BadDate:
+    let parts = text.split_whitespace()
+    if parts.length() != 2: fail BadDate(text = text)
+    match (parts[0].to_int(), parts[1].to_int()):
+        case (some(month), some(day)):
+            if month < 1 or month > 12 or day < 1 or day > 31: fail BadDate(text = text)
+            return (month - 1) * 30 + day
+        case _: fail BadDate(text = text)
+
+function is_first_quarter(text as Text) returns Bool fails with BadDate:
+    if day_of_year(text) <= 90: return true
+    return false

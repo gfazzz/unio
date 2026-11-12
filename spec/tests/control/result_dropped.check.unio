@@ -1,0 +1,9 @@
+# Hidden behavioural check of result_dropped: test blocks that the reference fix passes.
+
+test "invalid signups are rejected":
+    let signups = [
+        Signup(email = "ann@example.org", age = 30),
+        Signup(email = "bob", age = 30),
+        Signup(email = "kid@example.org", age = 9),
+    ]
+    assert accepted(signups) == ["ann@example.org"]

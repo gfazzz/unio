@@ -1,0 +1,5 @@
+import report
+
+public function main() returns Int:
+    print(report.summary([3, 4, 5]))
+    return 0

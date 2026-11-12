@@ -1,0 +1,3 @@
+function connect_url(host as Text, path as Text = "/", named port as Int = 80) returns Text:
+    if port == 80: return "http://{host}{path}"
+    return "http://{host}:{port}{path}"

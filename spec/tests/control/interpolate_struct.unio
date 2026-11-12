@@ -1,0 +1,8 @@
+# expect-error: 8 E0067
+# category: types
+struct Task:
+    title as Text
+    done as Bool
+
+function checklist(tasks as List[Task]) returns List[Text]:
+    return ["[{"x" if task.done else " "}] {task}" for task in tasks]

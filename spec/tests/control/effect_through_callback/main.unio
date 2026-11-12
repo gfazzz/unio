@@ -1,0 +1,21 @@
+# expect-error: 6 E0085
+# category: resources
+import std.files
+
+function file_size(name as Text) returns Int:
+    let text = try files.read_text(Path(name)) on IoError as e:
+        return 0
+    return text.length()
+
+function apply_all(items as List[Text], action as Function[(Text) -> Int]) returns Int:
+    var total = 0
+    for item in items:
+        total = total + action(item)
+    return total
+
+function word_count(text as Text) returns Int:
+    return text.split_whitespace().length()
+
+public function main() returns Int:
+    print("{apply_all(["a b", "c"], file_size)}")
+    return 0

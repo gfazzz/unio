@@ -1,0 +1,12 @@
+struct Stopwatch:
+    var laps as List[Int]
+
+extend Stopwatch:
+    function lap(var self, millis as Int):
+        self.laps.append(millis)
+
+    function total(self) returns Int:
+        var sum = 0
+        for lap in self.laps:
+            sum = sum + lap
+        return sum

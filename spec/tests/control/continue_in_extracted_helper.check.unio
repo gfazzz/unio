@@ -1,0 +1,5 @@
+# Hidden behavioural check of continue_in_extracted_helper: test blocks that the reference fix passes.
+
+test "comment lines score nothing":
+    assert total_score(["# note", " ab ", "cde"]) == 5
+    assert line_score("#") == 0

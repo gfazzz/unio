@@ -1,0 +1,4 @@
+# Hidden behavioural check of resource_parameter_stored: test blocks that the reference fix passes.
+
+test "the audit entry names the lock":
+    assert audited("files") == "files: check"

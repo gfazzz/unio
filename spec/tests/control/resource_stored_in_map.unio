@@ -1,0 +1,27 @@
+# expect-error: 25 E0081
+# category: resources
+struct Lock:
+    name as Text
+    var held as Int
+
+extend Lock with Resource:
+    function release(var self):
+        print("unlocked {self.name}")
+
+extend Lock:
+    function guard(var self, work as Text) returns Text:
+        self.held = self.held + 1
+        return "{self.name}: {work}"
+
+function acquire(name as Text) returns Lock:
+    return Lock(name = name, held = 0)
+
+function lock_report(names as List[Text]) returns Map[Text, Text]:
+    var report as Map[Text, Text] = {}
+    for name in names:
+        using lock = acquire(name):
+            let line = lock.guard("audit")
+            var held as Map[Text, Lock] = {}
+            held[name] = lock
+            report[name] = line
+    return report

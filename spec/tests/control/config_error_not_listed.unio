@@ -1,0 +1,25 @@
+# expect-error: 23 E0074
+# category: errors
+error ConfigError:
+    key as Text
+    message as Text
+
+struct Setting:
+    key as Text
+    value as Text
+
+function parse_line(line as Text) returns Setting fails with ConfigError:
+    match line.index_of("="):
+        case some(at):
+            let key = line.slice(0, at).trim()
+            if key.is_empty(): fail ConfigError(key = "", message = "empty key")
+            return Setting(key = key, value = line.slice(at + 1, line.length()).trim())
+        case none: fail ConfigError(key = line.trim(), message = "missing '='")
+
+function parse_config(text as Text) returns Map[Text, Text]:
+    var settings as Map[Text, Text] = {}
+    for line in text.lines():
+        if line.trim().is_empty() or line.starts_with("#"): continue
+        let setting = try parse_line(line)
+        settings[setting.key] = setting.value
+    return settings

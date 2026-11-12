@@ -1,0 +1,8 @@
+# Hidden behavioural check of non_var_parameter_changed: test blocks that the reference fix passes.
+
+test "missing headers get defaults":
+    var headers = {"accept": "text/html"}
+    add_default(headers, "accept", "*/*")
+    add_default(headers, "user-agent", "unio/0.1")
+    assert headers["accept"] == "text/html"
+    assert headers["user-agent"] == "unio/0.1"

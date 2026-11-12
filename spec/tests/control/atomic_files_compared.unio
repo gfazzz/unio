@@ -1,0 +1,13 @@
+# expect-error: 8 E0066
+# category: resources
+import std.files
+
+function write_pair(path as Path, other as Path, text as Text) returns Bool fails with IoError:
+    using first = try files.open_atomic(path):
+        using second = try files.open_atomic(other):
+            if first == second: return false
+            try first.write(text)
+            try second.write(text)
+            try first.commit()
+            try second.commit()
+            return true

@@ -1,0 +1,5 @@
+# Hidden behavioural check of if_missing_colon: test blocks that the reference fix passes.
+
+test "error lines are collected":
+    assert error_lines("INFO a\n  ERROR b\nERROR c") == ["ERROR b", "ERROR c"]
+    assert error_lines("") == []

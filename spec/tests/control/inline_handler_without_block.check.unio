@@ -1,0 +1,5 @@
+# Hidden behavioural check of inline_handler_without_block: test blocks that the reference fix passes.
+
+test "a default database when none is configured":
+    assert database_url({"database": "pg://db"}) == "pg://db"
+    assert database_url({}) == "sqlite://local.db"

@@ -1,0 +1,6 @@
+# Hidden behavioural check of var_argument_from_parameter: test blocks that the reference fix passes.
+
+test "scores are clamped and the input is kept":
+    let input = [-5, 50, 150]
+    assert normalized(input) == [0, 50, 100]
+    assert input == [-5, 50, 150]

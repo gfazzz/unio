@@ -1,0 +1,5 @@
+# Hidden behavioural check of ternary_operator: test blocks that the reference fix passes.
+
+test "plural forms":
+    assert plural(1, "file") == "1 file"
+    assert plural(3, "file") == "3 files"

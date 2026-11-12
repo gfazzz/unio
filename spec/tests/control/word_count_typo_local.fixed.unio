@@ -1,0 +1,6 @@
+function word_frequencies(text as Text) returns Map[Text, Int]:
+    var counts as Map[Text, Int] = {}
+    for word in text.to_lower().split_whitespace():
+        let current = counts.get(word) or 0
+        counts[word] = current + 1
+    return counts

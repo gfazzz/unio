@@ -1,0 +1,6 @@
+# Hidden behavioural check of struct_unknown_field: test blocks that the reference fix passes.
+
+test "points parse from two numbers":
+    assert parse_point("3, 4") == some(Point(x = 3, y = 4))
+    assert parse_point("3") == none
+    assert parse_point("a, 4") == none

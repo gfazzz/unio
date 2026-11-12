@@ -1,0 +1,4 @@
+# Hidden behavioural check of resource_in_list_literal: test blocks that the reference fix passes.
+
+test "both locks are taken":
+    assert lock_both("x", "y") == ["x: step", "y: step"]

@@ -1,0 +1,7 @@
+# Hidden behavioural check of import_list_with_commas: test blocks that the reference fix passes.
+
+test "a missing directory is an error":
+    try:
+        let names = try joined_names(Path("no-such-directory-for-joined-names"))
+        assert_fail("expected an error")
+    on IoError as e: assert not e.reason.is_empty()

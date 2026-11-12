@@ -1,0 +1,5 @@
+# Hidden behavioural check of try_before_print: test blocks that the reference fix passes.
+
+test "the number of names is returned":
+    assert report(["a", "b"]) == 2
+    assert report([]) == 0

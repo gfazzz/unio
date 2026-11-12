@@ -1,0 +1,13 @@
+# expect-error: 12 E0042
+# category: resources
+function move_done(var pending as List[Text], var done as List[Text], task as Text):
+    var kept as List[Text] = []
+    for item in pending:
+        if item == task: done.append(item)
+        else: kept.append(item)
+    pending = kept
+
+function finish(var todo as List[Text], task as Text) returns List[Text]:
+    var done = todo
+    move_done(todo, todo, task)
+    return done

@@ -1,0 +1,5 @@
+function invert(mapping as Map[Text, Text]) returns Map[Text, Text]:
+    var inverted as Map[Text, Text] = {}
+    for key, value in mapping.entries():
+        inverted[value] = key
+    return inverted

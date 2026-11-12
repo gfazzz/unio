@@ -1,0 +1,6 @@
+# expect-error: 5 E0012
+# category: style
+function next_ticket(last as Int) returns Text:
+    var number = last
+    number++
+    return "T-{number}"

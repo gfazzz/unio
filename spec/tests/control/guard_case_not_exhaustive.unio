@@ -1,0 +1,6 @@
+# expect-error: 4 E0068
+# category: errors
+function shipping_cost(weight as Option[Int]) returns Int:
+    match weight:
+        case some(grams) if grams <= 500: return 4
+        case none: return 0

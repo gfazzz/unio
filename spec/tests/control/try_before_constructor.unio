@@ -1,0 +1,14 @@
+# expect-error: 13 E0076
+# category: errors
+struct Range2:
+    low as Int
+    high as Int
+
+function span(values as List[Int]) returns Option[Range2]:
+    match values.max():
+        case some(high):
+            var low = high
+            for value in values:
+                if value < low: low = value
+            return some(try Range2(low = low, high = high))
+        case none: return none

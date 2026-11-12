@@ -1,0 +1,6 @@
+# Hidden behavioural check of port_handler_pass: test blocks that the reference fix passes.
+
+test "invalid ports fall back to 8080":
+    assert port_or_default("443") == 443
+    assert port_or_default("http") == 8080
+    assert port_or_default("0") == 8080

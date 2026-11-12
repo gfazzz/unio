@@ -1,0 +1,902 @@
+Third-party notices for Unio
+============================
+
+Unio is licensed under the MIT licence or the Apache License 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE). The `unio` binary and its runtime library `libunio.a`
+(`unio.lib` on Windows), which `unio build` links into every executable, also contain the
+third-party code listed below. Each part is used under the licence named for it; the texts
+of the MIT licence and of the Apache License 2.0 are in LICENSE-MIT and LICENSE-APACHE.
+"Apache-2.0 WITH LLVM-exception" is the Apache License 2.0 with the LLVM exception, which
+waives the attribution conditions of sections 4 (a), 4 (b), and 4 (d) for code that is
+compiled or linked into an object form, as in an executable of `unio build`.
+
+Besides the crates, both files contain the Rust standard library of the pinned toolchain
+(compiler/rust-toolchain.toml; MIT OR Apache-2.0, https://github.com/rust-lang/rust), and an
+executable of `unio build` contains what the system linker adds: the C runtime start files
+and the system libraries of the platform (glibc on Linux, libSystem on macOS, the Microsoft
+C runtime on Windows), under their own licences.
+
+This file is generated from compiler/Cargo.lock by .github/scripts/third_party_notices.py;
+CI fails when it is stale. Do not edit it by hand.
+
+allocator-api2 0.2.21
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/zakarumych/allocator-api2
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Zakarum <zaq.dev@icloud.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+anyhow 1.0.104
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/dtolnay/anyhow
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  David Tolnay <dtolnay@gmail.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+arbitrary 1.5.0
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-fuzz/arbitrary/
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Rust-Fuzz Project Developers; Nick Fitzgerald <fitzgen@gmail.com>; Manish Goregaokar <manishsmail@gmail.com>; Simonas Kazlauskas <arbitrary@kazlauskas.me>; Brian L. Troutwine <brian@troutwine.us>; Corey Farwell <coreyf@rwell.org>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | MIT License
+  |
+  | Copyright (c) 2019 Manish Goregaokar
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+bumpalo 3.20.3
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/fitzgen/bumpalo
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Nick Fitzgerald <fitzgen@gmail.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2019 Nick Fitzgerald
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+cfg-if 1.0.5
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-lang/cfg-if
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Alex Crichton <alex@alexcrichton.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2014 Alex Crichton
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+cranelift-assembler-x64 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://crates.io/crates/cranelift-assembler-x64
+  Targets:  all
+  NOTICE:   none in the crate
+  Licence files: none in the crate; the licence of its manifest applies, with the copyright of its authors above
+
+cranelift-bforest 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-bitset 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  Licence files: none in the crate; the licence of its manifest applies, with the copyright of its authors above
+
+cranelift-codegen 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-codegen-shared 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-control 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-entity 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-frontend 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-module 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+cranelift-object 0.137.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/wasmtime
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Cranelift Project Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+crc32fast 1.5.4
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/srijs/rust-crc32fast
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Sam Rijs <srijs@airpost.net>; Alex Crichton <alex@alexcrichton.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | MIT License
+  |
+  | Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
+  |
+  | Permission is hereby granted, free of charge, to any person obtaining a copy
+  | of this software and associated documentation files (the "Software"), to deal
+  | in the Software without restriction, including without limitation the rights
+  | to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  | copies of the Software, and to permit persons to whom the Software is
+  | furnished to do so, subject to the following conditions:
+  |
+  | The above copyright notice and this permission notice shall be included in all
+  | copies or substantial portions of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  | IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  | FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  | AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  | LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  | OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  | SOFTWARE.
+
+equivalent 1.0.3
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/indexmap-rs/equivalent
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2016--2023
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+find-msvc-tools 0.1.15
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-lang/cc-rs
+  Targets:  cfg(windows)
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2014 Alex Crichton
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+fnv 1.0.7
+  Licence:  Apache-2.0 / MIT
+  Upstream: https://github.com/servo/rust-fnv
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Alex Crichton <alex@alexcrichton.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2017 Contributors
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+foldhash 0.2.0
+  Licence:  Zlib
+  Upstream: https://github.com/orlp/foldhash
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Orson Peters <orsonpeters@gmail.com>
+
+  LICENSE:
+  | Copyright (c) 2024 Orson Peters
+  |
+  | This software is provided 'as-is', without any express or implied warranty. In
+  | no event will the authors be held liable for any damages arising from the use of
+  | this software.
+  |
+  | Permission is granted to anyone to use this software for any purpose, including
+  | commercial applications, and to alter it and redistribute it freely, subject to
+  | the following restrictions:
+  |
+  | 1. The origin of this software must not be misrepresented; you must not claim
+  |     that you wrote the original software. If you use this software in a product,
+  |     an acknowledgment in the product documentation would be appreciated but is
+  |     not required.
+  |
+  | 2. Altered source versions must be plainly marked as such, and must not be
+  |     misrepresented as being the original software.
+  |
+  | 3. This notice may not be removed or altered from any source distribution.
+
+gimli 0.33.0
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/gimli-rs/gimli
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2015 The Rust Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+hashbrown 0.16.1
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-lang/hashbrown
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Amanieu d'Antras <amanieu@gmail.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2016 Amanieu d'Antras
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+hashbrown 0.17.1
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-lang/hashbrown
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2016 Amanieu d'Antras
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+indexmap 2.14.2
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/indexmap-rs/indexmap
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2016--2017
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+libm 0.2.16
+  Licence:  MIT
+  Upstream: https://github.com/rust-lang/compiler-builtins
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Alex Crichton <alex@alexcrichton.com>; Amanieu d'Antras <amanieu@gmail.com>; Jorge Aparicio <japaricious@gmail.com>; Trevor Gross <tg@trevorgross.com>
+  LICENSE.txt: the Apache License 2.0, as in LICENSE-APACHE
+
+log 0.4.35
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/rust-lang/log
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Rust Project Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2014 The Rust Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+memchr 2.8.3
+  Licence:  Unlicense OR MIT
+  Upstream: https://github.com/BurntSushi/memchr
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Andrew Gallant <jamslam@gmail.com>; bluss
+
+  COPYING:
+  | This project is dual-licensed under the Unlicense and MIT licenses.
+  |
+  | You may use this code under the terms of either license.
+
+  LICENSE-MIT:
+  | The MIT License (MIT)
+  |
+  | Copyright (c) 2015 Andrew Gallant
+  |
+  | Permission is hereby granted, free of charge, to any person obtaining a copy
+  | of this software and associated documentation files (the "Software"), to deal
+  | in the Software without restriction, including without limitation the rights
+  | to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  | copies of the Software, and to permit persons to whom the Software is
+  | furnished to do so, subject to the following conditions:
+  |
+  | The above copyright notice and this permission notice shall be included in
+  | all copies or substantial portions of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  | IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  | FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  | AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  | LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  | OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+  | THE SOFTWARE.
+
+  UNLICENSE:
+  | This is free and unencumbered software released into the public domain.
+  |
+  | Anyone is free to copy, modify, publish, use, compile, sell, or
+  | distribute this software, either in source code form or as a compiled
+  | binary, for any purpose, commercial or non-commercial, and by any
+  | means.
+  |
+  | In jurisdictions that recognize copyright laws, the author or authors
+  | of this software dedicate any and all copyright interest in the
+  | software to the public domain. We make this dedication for the benefit
+  | of the public at large and to the detriment of our heirs and
+  | successors. We intend this dedication to be an overt act of
+  | relinquishment in perpetuity of all present and future rights to this
+  | software under copyright law.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  | EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  | MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  | IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+  | OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+  | ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+  | OTHER DEALINGS IN THE SOFTWARE.
+  |
+  | For more information, please refer to <http://unlicense.org/>
+
+object 0.40.0
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/gimli-rs/object
+  Targets:  all
+  NOTICE:   none in the crate
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2015 The Gimli Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+regalloc2 0.15.2
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/regalloc2
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Chris Fallin <chris@cfallin.org>; Mozilla SpiderMonkey Developers
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+rustc-hash 2.1.3
+  Licence:  Apache-2.0 OR MIT
+  Upstream: https://github.com/rust-lang/rustc-hash
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Rust Project Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+serde 1.0.229
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/serde-rs/serde
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+serde_core 1.0.229
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/serde-rs/serde
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+smallvec 1.16.5
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/servo/rust-smallvec
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Servo Project Developers
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2018 The Servo Project Developers
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+stable_deref_trait 1.2.1
+  Licence:  MIT OR Apache-2.0
+  Upstream: https://github.com/storyyeller/stable_deref_trait
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Robert Grosse <n210241048576@gmail.com>
+  LICENSE-APACHE: the Apache License 2.0, as in LICENSE-APACHE
+
+  LICENSE-MIT:
+  | Copyright (c) 2017 Robert Grosse
+  |
+  | Permission is hereby granted, free of charge, to any
+  | person obtaining a copy of this software and associated
+  | documentation files (the "Software"), to deal in the
+  | Software without restriction, including without
+  | limitation the rights to use, copy, modify, merge,
+  | publish, distribute, sublicense, and/or sell copies of
+  | the Software, and to permit persons to whom the Software
+  | is furnished to do so, subject to the following
+  | conditions:
+  |
+  | The above copyright notice and this permission notice
+  | shall be included in all copies or substantial portions
+  | of the Software.
+  |
+  | THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+  | ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+  | TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  | PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+  | SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  | CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  | OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  | IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  | DEALINGS IN THE SOFTWARE.
+
+target-lexicon 0.13.5
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://github.com/bytecodealliance/target-lexicon
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  Dan Gohman <sunfish@mozilla.com>
+  LICENSE: the Apache License 2.0, as in LICENSE-APACHE
+
+wasmtime-internal-core 50.0.1
+  Licence:  Apache-2.0 WITH LLVM-exception
+  Upstream: https://crates.io/crates/wasmtime-internal-core
+  Targets:  all
+  NOTICE:   none in the crate
+  Authors:  The Wasmtime Project Developers
+  Licence files: none in the crate; the licence of its manifest applies, with the copyright of its authors above

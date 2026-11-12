@@ -1,0 +1,7 @@
+# Hidden behavioural check of var_argument_literal: test blocks that the reference fix passes.
+
+test "the sample is sorted":
+    assert sorted_sample() == [1, 2, 5, 9]
+    var values = [3, 3, 1]
+    sort_in_place(values)
+    assert values == [1, 3, 3]

@@ -1,0 +1,7 @@
+function log_event(name as Text):
+    pass
+
+function handle(events as List[Text]) returns Int:
+    for event in events:
+        log_event(event)
+    return events.length()

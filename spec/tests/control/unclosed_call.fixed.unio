@@ -1,0 +1,6 @@
+function area_label(width as Int, height as Int) returns Text:
+    return "area: {width * height}"
+
+function square_label(size as Int) returns Text:
+    let label = area_label(size, size)
+    return label

@@ -1,0 +1,4 @@
+# Hidden behavioural check of resource_field_of_plain_struct: test blocks that the reference fix passes.
+
+test "a job runs under the lock it names":
+    assert run(Job(title = "backup", lock_name = "disk")) == "disk: backup"

@@ -1,0 +1,5 @@
+# Hidden behavioural check of append_to_let_list: test blocks that the reference fix passes.
+
+test "primes below 20":
+    assert primes_below(20) == [2, 3, 5, 7, 11, 13, 17, 19]
+    assert primes_below(2) == []

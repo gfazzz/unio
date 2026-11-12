@@ -1,0 +1,22 @@
+# expect-error: 21 E0081
+# category: resources
+struct Connection:
+    host as Text
+    var sent as List[Text]
+
+extend Connection with Resource:
+    function release(var self):
+        print("closing {self.host} after {self.sent.length()} messages")
+
+extend Connection:
+    function send(var self, message as Text) returns Int:
+        self.sent.append(message)
+        return message.length()
+
+function connect(host as Text) returns Connection:
+    return Connection(host = host, sent = [])
+
+function send_batch(host as Text, messages as List[Text]) returns Int:
+    using connection = connect(host):
+        let sizes = messages.map(function (message as Text) returns Int: connection.send(message))
+        return sizes.fold(0, function (sum as Int, size as Int) returns Int: sum + size)

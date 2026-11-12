@@ -1,0 +1,9 @@
+## A checksum for a firmware image; this package is checked with --profile=core.
+function checksum(data as List[Int]) returns Int:
+    var sum = 0
+    for byte in data:
+        sum = (sum + byte) % 256
+    return sum
+
+function is_valid(data as List[Int], expected as Int) returns Bool:
+    return checksum(data) == expected

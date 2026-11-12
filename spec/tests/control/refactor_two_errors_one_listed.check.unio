@@ -1,0 +1,18 @@
+# Hidden behavioural check of refactor_two_errors_one_listed: test blocks that the reference fix passes.
+
+test "an age is read from a record":
+    let age = try age_of({"age": "42"}) on Error as e:
+        assert_fail(e.to_text())
+    assert age == 42
+
+test "missing and bad ages are errors":
+    try:
+        let age = try age_of({"name": "x"})
+        assert_fail("expected an error")
+    on MissingField as e: assert e.name == "age"
+    on BadNumber as e: assert_fail(e.text)
+    try:
+        let age = try age_of({"age": "old"})
+        assert_fail("expected an error")
+    on MissingField as e: assert_fail(e.name)
+    on BadNumber as e: assert e.text == "old"

@@ -1,0 +1,24 @@
+# expect-error: 20 E0080
+# category: resources
+struct Connection:
+    host as Text
+    var sent as List[Text]
+
+extend Connection with Resource:
+    function release(var self):
+        print("closing {self.host} after {self.sent.length()} messages")
+
+extend Connection:
+    function send(var self, message as Text) returns Int:
+        self.sent.append(message)
+        return message.length()
+
+function connect(host as Text) returns Connection:
+    return Connection(host = host, sent = [])
+
+function broadcast(host as Text, messages as List[Text]) returns Int:
+    var connection = connect(host)
+    var bytes = 0
+    for message in messages:
+        bytes = bytes + connection.send(message)
+    return bytes

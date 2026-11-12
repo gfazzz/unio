@@ -1,0 +1,10 @@
+# Hidden behavioural check of fallible_in_comprehension: test blocks that the reference fix passes.
+
+test "integer square roots":
+    let found = try roots([0, 1, 15, 16]) on Negative as e:
+        assert_fail("negative {e.value}")
+    assert found == [0, 1, 3, 4]
+    try:
+        let bad = try roots([4, -1])
+        assert_fail("expected an error")
+    on Negative as e: assert e.value == -1

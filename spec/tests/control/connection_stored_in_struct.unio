@@ -1,0 +1,26 @@
+# expect-error: 26 E0081
+# category: resources
+struct Connection:
+    host as Text
+    var sent as List[Text]
+
+extend Connection with Resource:
+    function release(var self):
+        print("closing {self.host} after {self.sent.length()} messages")
+
+extend Connection:
+    function send(var self, message as Text) returns Int:
+        self.sent.append(message)
+        return message.length()
+
+function connect(host as Text) returns Connection:
+    return Connection(host = host, sent = [])
+
+struct Session:
+    user as Text
+    connection as Connection
+
+function login(user as Text, host as Text) returns Session:
+    using connection = connect(host):
+        let size = connection.send("login {user}")
+        return Session(user = user, connection = connection)

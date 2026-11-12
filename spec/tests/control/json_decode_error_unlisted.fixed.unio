@@ -1,0 +1,14 @@
+import std.json as json
+
+struct Release:
+    public name as Text
+    public version as Text
+
+function load_release(text as Text) returns Release fails with ParseError, DecodeError:
+    let value = try json.parse(text)
+    return try json.decode[Release](value)
+
+function tag(text as Text) returns Text:
+    let release = try load_release(text) on Error as e:
+        return "invalid"
+    return "{release.name}-{release.version}"

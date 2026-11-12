@@ -1,0 +1,20 @@
+# expect-error: 20 E0074
+# category: errors
+error MissingField:
+    name as Text
+
+error BadNumber:
+    text as Text
+
+function field(record as Map[Text, Text], name as Text) returns Text fails with MissingField:
+    match record.get(name):
+        case some(value): return value
+        case none: fail MissingField(name = name)
+
+function number(text as Text) returns Int fails with BadNumber:
+    match text.to_int():
+        case some(value): return value
+        case none: fail BadNumber(text = text)
+
+function age_of(record as Map[Text, Text]) returns Int fails with MissingField:
+    return try number(try field(record, "age"))

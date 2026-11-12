@@ -1,0 +1,10 @@
+# expect-error: 6 E0003
+# category: style
+function error_lines(log as Text) returns List[Text]:
+    var found as List[Text] = []
+    for line in log.lines()
+        let trimmed = line.trim()
+        if trimmed.starts_with("ERROR"):
+            found.append(trimmed)
+            print("found: {trimmed}")
+    return found

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Formatting and consistency checks for documentation and specification files.
 
-- UTF-8, a final newline, no trailing white space, no tabs (except corpus
-  files that test tabs);
+- UTF-8, a final newline, no trailing white space, no tabs (except the corpus
+  and control files that test tabs);
 - relative links in Markdown files point to existing files;
 - every English document has a Russian localization.
 """
@@ -14,7 +14,10 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CHECKED = (".md", ".unio", ".ebnf", ".py", ".yml", ".json", ".toml")
 SKIP_DIRS = {".git", "target", "node_modules", "__pycache__"}
-TABS_ALLOWED = {os.path.join("spec", "tests", "invalid", "tab_indent.unio")}
+TABS_ALLOWED = {
+    os.path.join("spec", "tests", "invalid", "tab_indent.unio"),
+    os.path.join("spec", "tests", "control", "tab_indentation.unio"),
+}
 
 # English document -> Russian localization.
 SPECIAL = {

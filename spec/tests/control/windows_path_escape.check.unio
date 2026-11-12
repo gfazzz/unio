@@ -1,0 +1,4 @@
+# Hidden behavioural check of windows_path_escape: test blocks that the reference fix passes.
+
+test "a data path on drive D":
+    assert data_path("sales") == "D:\\data\\sales.csv"

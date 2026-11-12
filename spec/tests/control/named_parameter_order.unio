@@ -1,0 +1,5 @@
+# expect-error: 3 E0041
+# category: types
+function connect_url(host as Text, named port as Int = 80, path as Text = "/") returns Text:
+    if port == 80: return "http://{host}{path}"
+    return "http://{host}:{port}{path}"

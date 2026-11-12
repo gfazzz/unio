@@ -1,0 +1,9 @@
+enum Light:
+    Red
+    Green
+
+function can_cross(car_light as Light, walk_light as Light) returns Bool:
+    match (car_light, walk_light):
+        case (Light.Red, Light.Green): return true
+        case (Light.Red, Light.Red): return false
+        case (Light.Green, _): return false

@@ -41,6 +41,9 @@ pub struct Module {
     pub given: bool,
     pub symbols: HashMap<String, Symbol>,
     pub imports: HashMap<String, Binding>,
+    /// Names that an import failed to bind (E0048, E0053, E0054): known but poisoned, so that
+    /// their uses give no further message (semantics 2.8).
+    pub failed_imports: HashSet<String>,
     /// Imported modules with the span of their import, for cycles.
     pub edges: Vec<(ModId, Span)>,
 }
@@ -213,9 +216,11 @@ pub struct Program {
 }
 
 /// The directory of the trusted standard library, chosen by its origin only (RFC 0004): the
-/// copy embedded by `unio build`, `UNIO_STDLIB` set by the operator, or the library of the
-/// compiler's build. A `stdlib` directory in or above a package is never used, so a package
-/// cannot replace library modules, their effects, or their layers.
+/// files a worker was given by its tool, `UNIO_STDLIB` set by the operator, the `stdlib/` of the
+/// checkout whose build directory this compiler runs from, or else the library embedded in the
+/// compiler ([`crate::vfs::BUILTIN_ROOT`]), which an installed `unio` uses. A `stdlib`
+/// directory in or above a package is never used, so a package cannot replace library modules,
+/// their effects, or their layers.
 pub fn trusted_stdlib() -> Option<PathBuf> {
     if let Some(embedded) = crate::vfs::embedded_stdlib() {
         return embedded;
@@ -229,9 +234,31 @@ pub fn trusted_stdlib() -> Option<PathBuf> {
         }
         return None;
     }
-    let built_in = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib");
-    if built_in.join("core/prelude.unio").is_file() {
-        return std::fs::canonicalize(built_in).ok();
+    checkout_stdlib().or_else(crate::vfs::builtin_stdlib)
+}
+
+/// The library of the checkout this compiler was built in, while it runs from there: the
+/// executable lies below `compiler/target` of a checkout that has `compiler/unio/build.rs` and
+/// `stdlib/`, as `cargo build` and `cargo test` leave it. The origin is the place of the
+/// compiler, never the project, and the compiler records no path of its build (C-4): a copy
+/// installed anywhere else uses the library embedded in it. Inside the checkout the library is
+/// read from disk, so that its modules are tested with `unio test stdlib/...` and edited
+/// without a rebuild.
+fn checkout_stdlib() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let target = exe
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.file_name().is_some_and(|n| n == "target"))?;
+    let workspace = target.parent()?;
+    let root = workspace.parent()?;
+    let library = root.join("stdlib");
+    let is_checkout = workspace.file_name().is_some_and(|n| n == "compiler")
+        && workspace.join("unio/build.rs").is_file()
+        && library.join("core/prelude.unio").is_file();
+    if is_checkout {
+        return std::fs::canonicalize(library).ok();
     }
     None
 }
@@ -298,7 +325,7 @@ pub fn symbol_module_files(query: &str, start: &Path) -> Vec<PathBuf> {
                     LAYERS
                         .iter()
                         .map(|l| root.join(l).join(&rest))
-                        .filter(|p| p.is_file()),
+                        .filter(|p| crate::vfs::is_file(p)),
                 );
             }
         } else {
@@ -359,6 +386,7 @@ impl Program {
                 given: m.report,
                 symbols: HashMap::new(),
                 imports: HashMap::new(),
+                failed_imports: HashSet::new(),
                 edges: Vec::new(),
             })
             .collect();
@@ -528,6 +556,7 @@ impl Program {
             given: false,
             symbols: HashMap::new(),
             imports: HashMap::new(),
+            failed_imports: HashSet::new(),
             edges: Vec::new(),
         });
         self.by_path.insert(canonical, id);
@@ -852,6 +881,17 @@ impl Program {
                     .and_then(|f| crate::vfs::canonicalize(f).ok())
                     .and_then(|f| self.by_path.get(&f).copied());
                 let Some(target) = target else {
+                    // The names the import would bind are poisoned (semantics 2.8).
+                    let bound: Vec<String> = if import.names.is_empty() {
+                        let name = import
+                            .alias
+                            .as_ref()
+                            .unwrap_or(import.module.last().unwrap());
+                        vec![name.text.clone()]
+                    } else {
+                        import.names.iter().map(|n| n.text.clone()).collect()
+                    };
+                    self.modules[module].failed_imports.extend(bound);
                     let span = import.module.first().unwrap().span.to(import
                         .module
                         .last()
@@ -888,14 +928,19 @@ impl Program {
                             Some(symbol) if self.symbol_public(symbol) => {
                                 bindings.push((name.clone(), Binding::Symbol(target, symbol)));
                             }
-                            _ => self.error(
-                                module,
-                                Diagnostic::error(
-                                    "E0054",
-                                    name.span,
-                                    catalog::name_not_in_module(&name.text, &dotted),
-                                ),
-                            ),
+                            _ => {
+                                self.modules[module]
+                                    .failed_imports
+                                    .insert(name.text.clone());
+                                self.error(
+                                    module,
+                                    Diagnostic::error(
+                                        "E0054",
+                                        name.span,
+                                        catalog::name_not_in_module(&name.text, &dotted),
+                                    ),
+                                )
+                            }
                         }
                     }
                 }
@@ -1051,17 +1096,25 @@ impl Program {
                     }
                 }
                 "Self" => return Ty::SelfTy,
+                // A type with the wrong number of arguments is unknown, so that it gives no
+                // further mismatch (semantics 2.8).
                 "List" => {
-                    arity(self, 1);
+                    if !arity(self, 1) {
+                        return Ty::Unknown;
+                    }
                     return Ty::List(Box::new(one(&arguments, 0)));
                 }
                 "Set" => {
-                    arity(self, 1);
+                    if !arity(self, 1) {
+                        return Ty::Unknown;
+                    }
                     let element = self.hashable_key(module, ty, &arguments, true);
                     return Ty::Set(Box::new(element));
                 }
                 "Map" => {
-                    arity(self, 2);
+                    if !arity(self, 2) {
+                        return Ty::Unknown;
+                    }
                     let key = self.hashable_key(module, ty, &arguments, false);
                     return Ty::Map(Box::new(key), Box::new(one(&arguments, 1)));
                 }
@@ -1113,6 +1166,7 @@ impl Program {
                 }
                 Ty::Named(def, arguments)
             }
+            _ if self.modules[module].failed_imports.contains(names[0]) => Ty::Unknown,
             _ => {
                 let candidates = self.visible_type_names(module);
                 let name = names.join(".");
@@ -1352,6 +1406,18 @@ impl Program {
         f.fails = fails;
     }
 
+    /// The function of a module-level declaration, a duplicate included.
+    fn module_function(&self, module: ModId, sig: &ast::Signature) -> Option<FnId> {
+        if let Some(Symbol::Func(id)) = self.modules[module].symbols.get(&sig.name.text) {
+            if self.funcs[*id].span == sig.name.span {
+                return Some(*id);
+            }
+        }
+        self.funcs.iter().position(|f| {
+            f.module == module && f.span == sig.name.span && matches!(f.owner, Owner::Module)
+        })
+    }
+
     fn resolve_signatures(&mut self) {
         for module in 0..self.modules.len() {
             let items = self.modules[module].analysis.file.items.clone();
@@ -1359,24 +1425,16 @@ impl Program {
             for item in &items {
                 match item {
                     ast::Item::Declaration(d) => match &d.kind {
+                        // A duplicate (E0051) has a function of its own, checked with its
+                        // own parameters, so that the duplicate is its one message.
                         ast::DeclarationKind::Function(f) => {
-                            if let Some(Symbol::Func(id)) = self.modules[module]
-                                .symbols
-                                .get(&f.signature.name.text)
-                                .copied()
-                            {
-                                if self.funcs[id].span == f.signature.name.span {
-                                    self.resolve_signature(id, &f.signature, &HashMap::new());
-                                }
+                            if let Some(id) = self.module_function(module, &f.signature) {
+                                self.resolve_signature(id, &f.signature, &HashMap::new());
                             }
                         }
                         ast::DeclarationKind::External(sig) => {
-                            if let Some(Symbol::Func(id)) =
-                                self.modules[module].symbols.get(&sig.name.text).copied()
-                            {
-                                if self.funcs[id].span == sig.name.span {
-                                    self.resolve_signature(id, sig, &HashMap::new());
-                                }
+                            if let Some(id) = self.module_function(module, sig) {
+                                self.resolve_signature(id, sig, &HashMap::new());
                             }
                         }
                         ast::DeclarationKind::Constant(c) => {
@@ -1628,7 +1686,14 @@ impl Program {
                             .zip(&given)
                             .all(|(a, b)| loosely_equal(a, b))
                         && loosely_equal(&expected_ret, &given_ret)
-                        && self.funcs[m].self_param.is_some() == self.funcs[r].self_param.is_some();
+                        // `self` and `var self`, and a `var` parameter, are part of the
+                        // signature: a caller of the interface relies on them (L-11, L-29).
+                        && self.funcs[m].self_param == self.funcs[r].self_param
+                        && self.funcs[m]
+                            .params
+                            .iter()
+                            .zip(&self.funcs[r].params)
+                            .all(|(a, b)| a.var == b.var && a.named_only == b.named_only);
                     if !same {
                         let span = self.funcs[m].span;
                         self.error(

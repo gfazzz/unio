@@ -1,0 +1,11 @@
+# Hidden behavioural check of max_without_order: test blocks that the reference fix passes.
+
+test "the newer version wins":
+    assert newer(Version(major = 1, minor = 2), Version(major = 1, minor = 5)) == Version(
+        major = 1,
+        minor = 5,
+    )
+    assert newer(Version(major = 2, minor = 0), Version(major = 1, minor = 9)) == Version(
+        major = 2,
+        minor = 0,
+    )

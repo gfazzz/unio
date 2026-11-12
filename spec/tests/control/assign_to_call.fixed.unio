@@ -1,0 +1,6 @@
+struct Settings:
+    var values as Map[Text, Text]
+
+function set_theme(var settings as Settings, theme as Text):
+    settings.values["theme"] = theme
+    print("theme: {theme}")

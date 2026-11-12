@@ -1,0 +1,15 @@
+# expect-error: 11 E0085
+# category: resources
+import std.args
+import std.files
+
+function count_words(text as Text) returns Int:
+    return text.split_whitespace().length()
+
+public function main() returns Int:
+    for name in args.list():
+        let text = try files.read_text(Path(name)) on IoError as e:
+            print_error("{name}: {e.reason}")
+            return 1
+        print("{name}: {count_words(text)}")
+    return 0

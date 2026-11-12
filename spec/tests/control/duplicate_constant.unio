@@ -1,0 +1,10 @@
+# expect-error: 4 E0051
+# category: types
+let SEPARATOR as Text = "-"
+let SEPARATOR as Text = "_"
+
+function slugify(title as Text) returns Text:
+    var slug = ""
+    for index, word in title.to_lower().split_whitespace().enumerate():
+        slug = slug + (SEPARATOR if index > 0 else "") + word
+    return slug

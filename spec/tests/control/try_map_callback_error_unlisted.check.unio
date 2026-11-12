@@ -1,0 +1,10 @@
+# Hidden behavioural check of try_map_callback_error_unlisted: test blocks that the reference fix passes.
+
+test "numbers are parsed until the first bad one":
+    let numbers = try parse_numbers("1 2  3") on NotANumber as e:
+        assert_fail(e.text)
+    assert numbers == [1, 2, 3]
+    try:
+        let bad = try parse_numbers("1 x 3")
+        assert_fail("expected an error")
+    on NotANumber as e: assert e.text == "x"

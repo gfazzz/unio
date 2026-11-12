@@ -1,0 +1,12 @@
+struct Counter:
+    var hits as Map[Text, Int]
+
+extend Counter:
+    function hit(var self, page as Text):
+        self.hits[page] = (self.hits.get(page) or 0) + 1
+
+function count_pages(log as List[Text]) returns Map[Text, Int]:
+    var counter = Counter(hits = {})
+    for page in log:
+        counter.hit(page)
+    return counter.hits

@@ -1,0 +1,9 @@
+import std.files
+
+error ConfigMissing:
+    path as Path
+
+function load(path as Path) returns Text fails with ConfigMissing:
+    try:
+        return try files.read_text(path)
+    on IoError as e: fail ConfigMissing(path = e.path)

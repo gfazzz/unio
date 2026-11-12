@@ -1,0 +1,9 @@
+# Hidden behavioural check of same_var_twice_transfer: test blocks that the reference fix passes.
+
+test "money moves from payer to payee":
+    var ann = Wallet(owner = "ann", cents = 800)
+    var bob = Wallet(owner = "bob", cents = 0)
+    assert pay(ann, bob)
+    assert ann.cents == 300
+    assert bob.cents == 500
+    assert not pay(ann, bob)

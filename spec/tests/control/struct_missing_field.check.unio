@@ -1,0 +1,9 @@
+# Hidden behavioural check of struct_missing_field: test blocks that the reference fix passes.
+
+test "contacts with and without a phone":
+    let full = parse_contact("ann ann@example.org 555-0101")
+    assert full == some(Contact(name = "ann", email = "ann@example.org", phone = some("555-0101")))
+    match parse_contact("bob bob@example.org"):
+        case some(contact): assert contact.phone == none
+        case none: assert_fail("expected a contact")
+    assert parse_contact("nobody") == none

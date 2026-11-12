@@ -1,0 +1,6 @@
+# Hidden behavioural check of map_put_on_let: test blocks that the reference fix passes.
+
+test "keys and values swap":
+    let inverted = invert({"en": "hello", "fr": "bonjour"})
+    assert inverted["hello"] == "en"
+    assert inverted["bonjour"] == "fr"

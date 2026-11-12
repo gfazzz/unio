@@ -1,0 +1,4 @@
+function greeting(name as Option[Text]) returns Text:
+    match name:
+        case some(text): return "Hello, {text}!"
+        case none: return "Hello, stranger!"

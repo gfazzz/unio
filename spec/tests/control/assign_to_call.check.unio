@@ -1,0 +1,6 @@
+# Hidden behavioural check of assign_to_call: test blocks that the reference fix passes.
+
+test "the theme is stored":
+    var settings = Settings(values = {})
+    set_theme(settings, "dark")
+    assert settings.values["theme"] == "dark"

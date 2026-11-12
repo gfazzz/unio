@@ -49,6 +49,11 @@ pub fn clear_ballast() {
 /// The size of the heap memory an object holds.
 pub trait Measure {
     fn measure(&self) -> usize;
+
+    /// Called once when the object is dropped, before its contents are. An object that holds
+    /// values hands them to [`crate::value::release`] here, so that a deep structure is freed
+    /// by a loop instead of by recursion on the native stack (RFC 0007).
+    fn release(&mut self) {}
 }
 
 /// A heap object whose size is counted.
@@ -85,6 +90,7 @@ impl<T: Measure + Clone> Clone for Counted<T> {
 impl<T: Measure> Drop for Counted<T> {
     fn drop(&mut self) {
         sub(self.bytes);
+        self.value.release();
     }
 }
 

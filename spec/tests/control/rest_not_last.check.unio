@@ -1,0 +1,5 @@
+# Hidden behavioural check of rest_not_last: test blocks that the reference fix passes.
+
+test "the sum of the last two items":
+    assert last_two([1, 2, 3, 10]) == some(13)
+    assert last_two([1]) == none

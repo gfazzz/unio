@@ -1,0 +1,10 @@
+# Hidden behavioural check of fallible_in_interpolation: test blocks that the reference fix passes.
+
+test "lengths are converted to meters":
+    let text = try describe(2.5, "km") on UnknownUnit as e:
+        assert_fail(e.unit)
+    assert text == "2.5 km = 2500.0 m"
+    try:
+        let bad = try describe(1.0, "ft")
+        assert_fail("expected an error")
+    on UnknownUnit as e: assert e.unit == "ft"

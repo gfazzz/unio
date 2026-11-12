@@ -1,0 +1,8 @@
+# expect-error: 5 E0012
+# category: style
+import std.text
+
+unsafe module
+
+function words(line as Text) returns Text:
+    return text.join(line.split_whitespace(), " ")

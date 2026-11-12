@@ -1,0 +1,5 @@
+# Hidden behavioural check of float_list_max: test blocks that the reference fix passes.
+
+test "the highest reading":
+    assert peak([1.5, 9.25, 3.0]) == some(9.25)
+    assert peak([]) == none

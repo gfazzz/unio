@@ -1,0 +1,4 @@
+# Hidden behavioural check of connection_parameter_captured: test blocks that the reference fix passes.
+
+test "a message sent twice":
+    assert chat("example.org") == 4

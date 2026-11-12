@@ -1,0 +1,8 @@
+# expect-error: 5 E0059
+# category: types
+struct Config:
+    name as Text
+    timeout_seconds as Option
+
+function effective_timeout(config as Config) returns Int:
+    return config.timeout_seconds or 30

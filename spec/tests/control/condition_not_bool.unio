@@ -1,0 +1,6 @@
+# expect-error: 5 E0061
+# category: types
+function has_errors(lines as List[Text]) returns Bool:
+    for line in lines:
+        if line.index_of("ERROR"): return true
+    return false

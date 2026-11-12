@@ -1,0 +1,6 @@
+# Hidden behavioural check of same_list_merge: test blocks that the reference fix passes.
+
+test "a finished task moves to done":
+    var todo = ["write", "test", "ship"]
+    assert finish(todo, "test") == ["test"]
+    assert todo == ["write", "ship"]

@@ -1,0 +1,6 @@
+# Hidden behavioural check of nested_option_enum_match: test blocks that the reference fix passes.
+
+test "badges by priority":
+    assert badge(some(Priority.High)) == "!!"
+    assert badge(some(Priority.Low)) == "."
+    assert badge(none) == ""

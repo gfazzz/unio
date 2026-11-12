@@ -1,0 +1,6 @@
+# Hidden behavioural check of public_after_var: test blocks that the reference fix passes.
+
+test "a deposit raises the balance":
+    var account = Account(owner = "ann", balance = 10)
+    deposit(account, 5)
+    assert account.balance == 15

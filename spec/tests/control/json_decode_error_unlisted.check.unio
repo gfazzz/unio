@@ -1,0 +1,8 @@
+# Hidden behavioural check of json_decode_error_unlisted: test blocks that the reference fix passes.
+
+test "a release becomes a tag":
+    assert tag("\{\"name\": \"unio\", \"version\": \"0.1.0\"\}") == "unio-0.1.0"
+
+test "broken JSON and a missing field are invalid":
+    assert tag("\{") == "invalid"
+    assert tag("\{\"name\": \"unio\"\}") == "invalid"

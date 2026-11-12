@@ -1,0 +1,6 @@
+function average(values as List[Int]) returns Float:
+    if values.is_empty(): return 0.0
+    var sum = 0
+    for value in values:
+        sum = sum + value
+    return sum.to_float() / values.length().to_float()

@@ -1,0 +1,21 @@
+struct Lock:
+    name as Text
+    var held as Int
+
+extend Lock with Resource:
+    function release(var self):
+        print("unlocked {self.name}")
+
+extend Lock:
+    function guard(var self, work as Text) returns Text:
+        self.held = self.held + 1
+        return "{self.name}: {work}"
+
+function acquire(name as Text) returns Lock:
+    return Lock(name = name, held = 0)
+
+function copy_between(source as Text, target as Text) returns List[Text]:
+    using first = acquire(source):
+        using second = acquire(target):
+            if not is_same(first, second): return [first.guard("read"), second.guard("write")]
+            return [first.guard("read and write")]

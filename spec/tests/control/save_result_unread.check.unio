@@ -1,0 +1,6 @@
+# Hidden behavioural check of save_result_unread: test blocks that the reference fix passes.
+
+test "only backups that fit are counted":
+    var disk = Disk(free = 25, files = [])
+    assert save_backups(disk, ["a", "b", "c"], 10) == 2
+    assert disk.files == ["a", "b"]

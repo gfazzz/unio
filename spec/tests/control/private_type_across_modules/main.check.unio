@@ -1,0 +1,4 @@
+# Hidden behavioural check of private_type_across_modules: test blocks that the reference fix passes.
+
+test "a square of side 4":
+    assert describe(4) == "square of area 16"

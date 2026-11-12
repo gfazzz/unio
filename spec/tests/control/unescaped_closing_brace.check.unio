@@ -1,0 +1,4 @@
+# Hidden behavioural check of unescaped_closing_brace: test blocks that the reference fix passes.
+
+test "a CSS rule":
+    assert css_rule("h1", "red") == "h1 \{ color: red; \}"

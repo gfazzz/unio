@@ -1,0 +1,7 @@
+# expect-error: 7 E0074
+# category: errors
+import std.files
+
+function require_directory(path as Path):
+    if not files.is_directory(path):
+        fail IoError(path = path, kind = files.IoErrorKind.NotFound, reason = "not a directory")

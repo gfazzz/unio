@@ -1,0 +1,4 @@
+# Hidden behavioural check of var_parameter_reassigned_let: test blocks that the reference fix passes.
+
+test "lines are trimmed in place":
+    assert cleaned([" a ", "b  "]) == ["a", "b"]

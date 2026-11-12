@@ -1,0 +1,3 @@
+function plural(count as Int, word as Text) returns Text:
+    let suffix = "" if count == 1 else "s"
+    return "{count} {word}{suffix}"

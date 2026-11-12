@@ -1,0 +1,13 @@
+struct Money:
+    cents as Int
+    currency as Text
+
+extend Money with Display:
+    function to_text(self) returns Text:
+        let units = self.cents / 100
+        let rest = self.cents % 100
+        let padded = "{rest}" if rest >= 10 else "0{rest}"
+        return "{units}.{padded} {self.currency}"
+
+function receipt(prices as List[Money]) returns List[Text]:
+    return ["- {price}" for price in prices]

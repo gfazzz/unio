@@ -1,6 +1,8 @@
 # Unio: refined concept
 
-Version: 0.14. Changes from 0.13: brevity without implicitness, RFC 0002 (sections 2.3, 2.5, 10, rationale 20).
+Version: 0.15. Changes from 0.14: reference counting instead of a tracing GC in 0.1, RFC 0007 (sections 4.1 to 4.3, 8.1, 10, rationale 21).
+
+Changes from 0.13: brevity without implicitness, RFC 0002 (sections 2.3, 2.5, 10, rationale 20).
 
 Changes from 0.12: accepted comparative findings, precise contracts and RFC 0001 (`docs/language-contracts.md`).
 
@@ -344,7 +346,7 @@ Domain errors and program defects are thus distinguished syntactically, and the 
 
 ### 4.1 Two models
 
-- **Managed values.** Structs, collections, text, and closures live on the heap under the GC. The programmer does not think about freeing them.
+- **Managed values.** Structs, collections, text, and closures live on the heap and are freed by reference counting when their last reference goes away (RFC 0007). The programmer does not think about freeing them.
 - **Resources.** Files, sockets, processes, device handles, and in the compute extension tensors and GPU buffers. They have an explicit lifetime.
 
 The boundary between the models: a type implements the interface `Resource` (method `release`), therefore it is a resource. Such a value:
@@ -364,13 +366,13 @@ function count_lines(path as Path) returns Int fails with IoError:
 
 ### 4.2 What the first release includes
 
-The first release contains the GC and resources with `using`. The GC belongs to the `alloc` and `std` layers; `core` does not depend on it, so that code without a GC remains possible (section 8.1). Memory budgets, lifetimes for tensors, and accounting for GPU computation completion belong to the compute extension and are designed on top of the same `Resource` interface: a tensor is a resource; a lifetime scope is an owning resource with a budget.
+The first release contains automatic memory management by reference counting and resources with `using`. It belongs to the `alloc` and `std` layers; `core` does not depend on it, so that code without a GC remains possible (section 8.1). Memory budgets, lifetimes for tensors, and accounting for GPU computation completion belong to the compute extension and are designed on top of the same `Resource` interface: a tensor is a resource; a lifetime scope is an owning resource with a budget.
 
-### 4.3 Garbage collector
+### 4.3 Memory management
 
-- Precise, tracing, non-moving in the first version. Ease of debugging matters more than peak throughput.
-- Pauses are bounded for CLI workloads; measured and published.
-- `Resource` does not depend on the GC: release is deterministic and does not wait for a collection.
+- Reference counting with copy-on-write in the first version: precise, immediate, non-moving, and without tracing, because values form no cycles (RFC 0007). Ease of debugging matters more than peak throughput.
+- No pause depends on the memory that stays live. Freeing a structure the program drops takes time proportional to that structure and is bounded per megabyte; measured and published (`bench/free/`).
+- `Resource` does not depend on memory management: release is deterministic and does not wait for the last reference to a value to go away.
 
 ## 5. Modules and packages
 
@@ -432,14 +434,14 @@ A web server and the services and applications of an operating system are ordina
 **Library layers.** The standard library and the runtime are split into three layers, and a module may use only its own layer and the layers before it:
 
 - `core`: basic types and operations that need neither an allocator, nor a GC, nor an operating system;
-- `alloc`: what needs an allocator (text that is built at run time, lists, maps, JSON); in 0.1 the allocator is the GC heap;
+- `alloc`: what needs an allocator (text that is built at run time, lists, maps, JSON); in 0.1 the allocator is the heap of the runtime;
 - `std`: what needs the operating system (files, environment, processes, standard output, the sandbox).
 
 Module names do not contain the layer (`std.json` lives in `alloc`), so applications are not affected; the layer is a property of where a module lives and is checked.
 
-**Build profiles.** A profile chooses which layers are available. The `application` profile has all three, the GC, and the sandbox of the operating system. The `system` profile always has `core`, has `alloc` only with an allocator that the program provides, and has neither a GC nor `std`. The syntax, the types, and error handling are the same in every profile; a profile only removes capabilities and never changes what a construct means. If a function needs a layer that the profile lacks, the compiler reports the chain of calls that leads to it. Release 0.1 implements the `application` profile and the check `unio check --profile=core`, which verifies that a package depends on nothing but `core`.
+**Build profiles.** A profile chooses which layers are available. The `application` profile has all three, automatic memory management, and the sandbox of the operating system. The `system` profile always has `core`, has `alloc` only with an allocator that the program provides, and has neither automatic memory management nor `std`. The syntax, the types, and error handling are the same in every profile; a profile only removes capabilities and never changes what a construct means. If a function needs a layer that the profile lacks, the compiler reports the chain of calls that leads to it. Release 0.1 implements the `application` profile and the check `unio check --profile=core`, which verifies that a package depends on nothing but `core`.
 
-**Allocators.** In the `application` profile the GC heap is the only allocator and no function takes one: application code does not pay in readability for a need it does not have. In the `system` profile every function of the `alloc` layer takes an `Allocator` as its first parameter, and an allocator is a `Resource` whose lifetime is a `using` block, so the reader sees where memory comes from and when it is returned. The same `alloc` sources serve both profiles: the compiler supplies the GC heap in `application`.
+**Allocators.** In the `application` profile the heap of the runtime is the only allocator and no function takes one: application code does not pay in readability for a need it does not have. In the `system` profile every function of the `alloc` layer takes an `Allocator` as its first parameter, and an allocator is a `Resource` whose lifetime is a `using` block, so the reader sees where memory comes from and when it is returned. The same `alloc` sources serve both profiles: the compiler supplies the heap of the runtime in `application`.
 
 Because an allocator is a `Resource`, the rule of section 4.1 applies to it unchanged: it cannot be stored in an ordinary struct or collection that outlives its `using` block. The same rule extends to what it allocates: in the `system` profile a value allocated from an allocator is tied to that allocator's block, and the compiler rejects storing it anywhere that outlives the block, with the same diagnostic as a resource escape. A value that must live longer is allocated from a longer-lived allocator, named explicitly at the call. This is the only lifetime analysis the profile adds, and it is a design constraint of the 0.5 RFC, not a new mechanism in the language.
 
@@ -478,7 +480,7 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | How changes to the language and to programs are made | Test first: a failing check, then the change, then all checks green (section 1.2) |
 | Visibility inside types | Fields and methods private unless `public`; error and variant fields visible with their type; interface methods visible with the interface; functions of a type called as `T.name(...)` |
 | Classes | None. Structs and `extend` for data and methods, interfaces with defaults and interface values for polymorphism, composition for reuse; a shared mutable value type is designed with the concurrency of 0.2 |
-| Boundary between GC and resources | A type implementing `Resource` is a resource and lives in `using` |
+| Boundary between managed values and resources | A type implementing `Resource` is a resource and lives in `using` |
 | Compiler error format | JSON with code, span, explanation, and patch; fixed in the requirements before the first release |
 | Concurrency in the core | None. The core has no shared mutable state between threads, so a concurrency model can be added later without breakage |
 | `Decimal` in the core | No. `std.decimal` as a struct with the standard operator interfaces; explicit construction `Decimal("19.99")` |
@@ -495,9 +497,10 @@ See `docs/examples/todo.unio`: a command-line utility with a task list, a storag
 | Explicit allocators | Only in the `system` profile, as the first parameter of `alloc` functions and as a `Resource`; none in `application` |
 | Implicit context parameter | No. The allocator, permissions, and logging are passed or derived visibly |
 | Content-addressed code | As a tool feature: `unio symbol` reports content hashes used by the cache and by agents; no hashes in source or semantics |
-| Ownership and borrowing | No. GC plus `Resource`; the only ownership analysis is the `using` escape check |
+| Ownership and borrowing | No. Reference counting plus `Resource`; the only ownership analysis is the `using` escape check |
 | Comparative-review contracts | RFC 0001; `docs/language-contracts.md`, L-27–L-32, S-13–S-20, T-12–T-15, C-11b |
 | Brevity of everyday code | RFC 0002: lambda types from the expected function type, one-line branches, the pattern test `is`; no second syntax for lambdas, no implicit return, no statement modifiers |
+| Memory management of managed values in 0.1 | Reference counting with copy-on-write, no tracing; values form no cycles; freeing is proportional to what is freed (RFC 0007, C-13) |
 
 ## 11. Rationale for the latest decisions
 
@@ -524,3 +527,4 @@ The decisions on questions left open in version 0.1 of the concept follow from t
 
 19. **Precise contracts instead of implicit assumptions.** [RFC 0001](rfcs/0001-language-contracts.md) and the [normative contracts](language-contracts.md) adopt findings from Python/Ruby/JS/TS, Swift/Rust/Go, C#/Kotlin/Java and OTP: evaluation, implementation ownership, required results, named parameters, streams, JSON boundaries, Unicode, reproducible tests and caches. Later releases receive explicit concurrency/supervision criteria. This refines the design; the delivery table separates sources from future implementation.
 20. **Brevity without implicitness.** A review of the code written in Unio so far showed that most of its length came from three patterns: lambdas that repeat types the call already fixes, branches that need a line of their own for one statement, and full `match` statements that test a single variant. Removing them keeps every behavior visible: the lambda still says `function`, the branch still has its header, and `is` names the variant it tests. Ruby's expressiveness was the benchmark; what Ruby gets through implicit return, optional parentheses, and modifiers would add second ways to write the same thing and was declined.
+21. **Reference counting instead of a tracing GC.** The value model already excludes cycles and copy-on-write already needs the count, so a tracing collector would add a second mechanism to find nothing. Counting frees a value at a point of the program the reader can see and never scans the memory that stays live; its one pause is freeing what the program drops, measured at about 0.5 ms per MB (`bench/free/`), so 7.1 bounds it per megabyte rather than by the 10 ms of a collector's pause. Incremental freeing, which would bound that pause by a constant, waits for a later release. The decision is in [RFC 0007](rfcs/0007-reference-counting-for-0-1.md), requirement C-13, and the 7.1 row.

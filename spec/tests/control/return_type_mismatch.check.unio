@@ -1,0 +1,6 @@
+# Hidden behavioural check of return_type_mismatch: test blocks that the reference fix passes.
+
+test "percentages become fractions":
+    assert parse_percentage(" 50% ") == some(0.5)
+    assert parse_percentage("50") == none
+    assert parse_percentage("x%") == none

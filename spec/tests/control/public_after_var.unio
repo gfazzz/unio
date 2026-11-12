@@ -1,0 +1,8 @@
+# expect-error: 5 E0012
+# category: style
+public struct Account:
+    public owner as Text
+    var public balance as Int
+
+public function deposit(var account as Account, amount as Int):
+    account.balance = account.balance + amount

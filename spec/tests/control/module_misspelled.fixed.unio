@@ -1,0 +1,4 @@
+import std.files
+
+function config_exists(name as Text) returns Bool:
+    return files.exists(Path(name))

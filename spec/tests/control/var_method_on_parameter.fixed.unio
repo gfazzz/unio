@@ -1,0 +1,4 @@
+function with_terminator(words as List[Text]) returns List[Text]:
+    var copy = words
+    copy.append(".")
+    return copy

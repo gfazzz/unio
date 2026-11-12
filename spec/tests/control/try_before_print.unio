@@ -1,0 +1,6 @@
+# expect-error: 5 E0076
+# category: errors
+function report(names as List[Text]) returns Int:
+    for name in names:
+        try print("- {name}")
+    return names.length()

@@ -1,0 +1,17 @@
+# expect-error: 3 E0052
+# category: types
+from std.text import split
+
+function split(line as Text, separator as Text) returns List[Text]:
+    var parts as List[Text] = []
+    var current = ""
+    for character in line.chars():
+        if character == separator:
+            parts.append(current)
+            current = ""
+        else: current = current + character
+    parts.append(current)
+    return parts
+
+function columns(line as Text) returns Int:
+    return split(line, ";").length()

@@ -1,0 +1,5 @@
+# expect-error: 4 E0007
+# category: style
+function plural(count as Int, word as Text) returns Text:
+    let suffix = count == 1 ? "" : "s"
+    return "{count} {word}{suffix}"

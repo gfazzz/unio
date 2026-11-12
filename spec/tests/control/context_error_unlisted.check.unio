@@ -1,0 +1,7 @@
+# Hidden behavioural check of context_error_unlisted: test blocks that the reference fix passes.
+
+test "a missing file is reported with its operation":
+    try:
+        let text = try load_settings(Path("no-such-settings-for-the-control-set.toml"))
+        assert_fail("expected a context error")
+    on ContextError as e: assert e.operation == "reading settings"

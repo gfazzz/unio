@@ -1,0 +1,6 @@
+function primes_below(limit as Int) returns List[Int]:
+    var primes as List[Int] = []
+    for candidate in range(2, limit):
+        if primes.find(function (p as Int) returns Bool: candidate % p == 0).is_none():
+            primes.append(candidate)
+    return primes

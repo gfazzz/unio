@@ -1,0 +1,12 @@
+# expect-error: 11 E0079
+# category: resources
+struct Playlist:
+    name as Text
+    var songs as List[Text]
+
+function add_song(var songs as List[Text], song as Text):
+    if not songs.contains(song): songs.append(song)
+
+function with_song(playlist as Playlist, song as Text) returns Playlist:
+    add_song(playlist.songs, song)
+    return playlist

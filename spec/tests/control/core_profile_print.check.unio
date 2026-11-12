@@ -1,0 +1,6 @@
+# Hidden behavioural check of core_profile_print: test blocks that the reference fix passes.
+
+test "duty cycles are scaled and capped":
+    assert duty_cycle(50) == 127
+    assert duty_cycle(200) == 255
+    assert scale(1, 1, 0) == 0

@@ -1,0 +1,6 @@
+# Hidden behavioural check of call_unknown_argument_name: test blocks that the reference fix passes.
+
+test "prices have two decimal places":
+    assert format_price(1205) == "12.05 EUR"
+    assert format_price(99, currency = "USD") == "0.99 USD"
+    assert invoice_total([1000, 250]) == "12.50 USD"

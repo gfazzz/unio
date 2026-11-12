@@ -1,0 +1,2 @@
+function lookup_port(services as Map[Text, Int], name as Text) returns Int:
+    return services.get(name) or 0

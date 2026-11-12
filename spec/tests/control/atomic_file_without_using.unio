@@ -1,0 +1,9 @@
+# expect-error: 6 E0080
+# category: resources
+import std.files
+
+function write_report(path as Path, rows as List[Text]) fails with IoError:
+    var file = try files.open_atomic(path)
+    for row in rows:
+        try file.write_line(row)
+    try file.commit()

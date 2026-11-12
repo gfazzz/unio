@@ -1,0 +1,5 @@
+# Hidden behavioural check of line_comment_slashes: test blocks that the reference fix passes.
+
+test "percentages round down":
+    assert percent(1, 3) == 33
+    assert percent(5, 5) == 100

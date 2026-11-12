@@ -1,0 +1,5 @@
+# expect-error: 4 E0020
+# category: style
+function in_working_hours(hour as Int) returns Bool:
+    let inside = 9 <= hour < 17
+    return inside

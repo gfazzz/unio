@@ -1,0 +1,5 @@
+# Hidden behavioural check of dependency_not_installed: test blocks that the reference fix passes.
+
+test "words are title-cased":
+    assert title_case(["hello", "WORLD"]) == "Hello World"
+    assert title_case([]) == ""

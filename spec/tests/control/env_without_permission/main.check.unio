@@ -1,0 +1,5 @@
+# Hidden behavioural check of env_without_permission: test blocks that the reference fix passes.
+
+test "the config lies in the home directory when there is one":
+    assert config_path(some("/home/ann")) == "/home/ann/.config/tool.toml"
+    assert config_path(none) == "tool.toml"

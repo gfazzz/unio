@@ -1,0 +1,6 @@
+# Hidden behavioural check of var_method_on_parameter: test blocks that the reference fix passes.
+
+test "a terminator is added to a copy":
+    let words = ["end", "of", "line"]
+    assert with_terminator(words) == ["end", "of", "line", "."]
+    assert words.length() == 3

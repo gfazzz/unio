@@ -1,0 +1,17 @@
+# expect-error: 10 E0069
+# category: types
+interface Step:
+    function advance(var self) returns Bool
+
+struct Countdown:
+    var left as Int
+
+extend Countdown with Step:
+    function advance(self) returns Bool:
+        return self.left > 0
+
+function drain(var steps as Countdown) returns Int:
+    var taken = 0
+    while steps.advance():
+        taken = taken + 1
+    return taken

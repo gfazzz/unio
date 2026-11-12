@@ -1,0 +1,13 @@
+struct Cart:
+    var items as List[Text]
+
+function add_item(var cart as Cart, item as Text):
+    cart.items.append(item)
+
+function fill(carts as List[Cart], item as Text) returns List[Cart]:
+    var filled as List[Cart] = []
+    for cart in carts:
+        var copy = cart
+        add_item(copy, item)
+        filled.append(copy)
+    return filled

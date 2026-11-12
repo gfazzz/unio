@@ -1,0 +1,7 @@
+let SEPARATOR as Text = "-"
+
+function slugify(title as Text) returns Text:
+    var slug = ""
+    for index, word in title.to_lower().split_whitespace().enumerate():
+        slug = slug + (SEPARATOR if index > 0 else "") + word
+    return slug

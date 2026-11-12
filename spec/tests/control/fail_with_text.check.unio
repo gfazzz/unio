@@ -1,0 +1,10 @@
+# Hidden behavioural check of fail_with_text: test blocks that the reference fix passes.
+
+test "names are trimmed and must not be empty":
+    let name = try require_name("  Ann ") on EmptyName as e:
+        assert_fail(e.field)
+    assert name == "Ann"
+    try:
+        let empty = try require_name("   ")
+        assert_fail("expected an error")
+    on EmptyName as e: assert e.field == "name"

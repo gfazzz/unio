@@ -9,6 +9,7 @@ python3 bench/run.py --only wc,text,loop --check-floor
 python3 bench/run.py --native             # also the executables of unio build --release
 python3 bench/run.py --native --check-go  # the limits against Go of RFC 0003
 python3 bench/run.py --native --only empty --check-startup  # start-up of 7.1, at most 5 ms
+python3 bench/run.py --native --only free --check-free      # pause of freeing at once, RFC 0007
 ```
 
 With `--native`, each Unio program is also built with `unio build --release` into `bench/build/` and measured as "Unio native"; the ratios and `--check-floor` then refer to the native executable, and the interpreter stays in its own column.
@@ -24,6 +25,7 @@ The runner uses only the Python standard library. It generates the inputs into `
 | text | [text/](text/) | split lines, join, replace, interpolate a record per line |
 | loop | [loop/](loop/) | naive recursion and an arithmetic loop |
 | empty | [empty/](empty/) | nothing: the start of an empty program |
+| free | [free/](free/) | build about 100 MB of records (wide) or a chain of a million nested values (deep) and drop it at once |
 | tools | [../tools/](../tools/) | the project checkers in Unio against their Python references |
 
 ## Rules of the comparison
@@ -33,6 +35,7 @@ The runner uses only the Python standard library. It generates the inputs into `
 - The floor of 7.1 is 0.5x of Python on wc, json, text, and loop; the target is 3x. `--check-floor` exits with 1 when a benchmark is below the floor.
 - RFC 0003 adds limits for native executables against Go: at most 2x Go's time and at most 2x Go's peak memory plus 8 MB, with parity as the target; wc and loop are gated for 0.1, every benchmark for 0.2. `--check-go` exits with 1 when a gated benchmark is above a limit.
 - The start of an empty program (7.1: at most 5 ms) is the median of 101 runs, because one start takes a few milliseconds and a single run is noise; the best run and the spread are recorded too. It is timed by the launcher below, from its fork to the end of the program, so that the start of the launcher by Python is not counted. `--check-startup` exits with 1 when the native executable's median is above 5 ms; CI runs it on Linux x86-64.
+- The pause of freeing a structure at once (plan section 12, closure condition 3; RFC 0007) is the counterpart of a GC pause under reference counting. The program of free/ prints a line, drops the whole structure by one assignment, and prints another; the runner times the drop between the two lines as they arrive on a pipe, since the language has no clock. Each case runs 7 times in `unio run` and, with `--native`, as an executable; the median and the worst are reported with the peak memory. `--check-free` exits with 1 when the median pause of wide is above 1 ms per MB of peak memory, the row of 7.1 that RFC 0007 (accepted) put in place of "GC pause at a 100 MB heap at most 10 ms".
 - Peak memory is the peak resident set size of each process, the smallest of the runs. It is measured by [peak_rss.c](peak_rss.c), a small launcher built with the system C compiler, because Linux counts the memory of the process that starts a program into the program's peak, and Python would add about 13 MB to every number. Without a C compiler, memory is not measured.
 
 ## Status
@@ -66,3 +69,12 @@ Peak memory in MB, smallest of the runs (`--native --check-go`; empty from `--on
 The executable no longer carries the parser, the checker, or the lowering, nor the sources and syntax trees of the program at run time: an empty program peaks at 5.1 MB instead of 7.6 MB and loop at 5.3 MB instead of 7.7 MB (measured on this machine with the executables of both kinds), and the executable of an empty program is 5.96 MB instead of 6.33 MB (1.68 MB instead of 2.02 MB stripped; code and data 1.69 MB instead of 2.03 MB). Of the rest, 1 MiB is the reserve for `release` (C-17), written page by page at start. json holds the document as a list of one-character texts, each a heap value; that is a step of RFC 0003.
 
 The tools are 0.23x to 0.72x of their Python references in the interpreter. CI enforces the floor on the native executables for all four benchmarks and on the interpreter for wc, text, and loop, and reports the interpreter's json without failing; it enforces the start-up of 7.1 on the native executable of empty (the median of 101 runs, since shared runners are noisy), and enforces the limits against Go of RFC 0003 for wc and loop (best of 9 runs), reporting json and text, which are gated from 0.2.
+
+Freeing a structure at once (`python3 bench/run.py --only free --native`, 7 runs per case; RFC 0007): the range of the medians of four rounds, two with the runtime before freeing stopped recursing below 128 levels and two after, on the same machine while other builds ran on it. The two runtimes did not differ beyond this spread, except that deep peaked at 277 MB natively before, about 48 MB of it the stack of the recursive drop.
+
+| Case | Peak memory | `unio run` | Native | Per MB of peak |
+|---|---:|---:|---:|---:|
+| wide: 40,000 records and a map of 10,000 more | 100 MB (105 MB `unio run`) | 41 to 53 ms | 46 to 62 ms | 0.39 to 0.62 ms |
+| deep: a chain of 1,000,000 nested enum values | 229 MB (234 MB `unio run`) | 92 to 108 ms | 91 to 118 ms | 0.33 to 0.51 ms |
+
+The pause at 100 MB is about five times the 10 ms of the former GC-pause row of 7.1; RFC 0007 bounds it per megabyte freed (1 ms per MB) for 0.1 and leaves incremental freeing as the mitigation for later. Before the change, freeing recursed once per level of nesting: on an 8 MiB stack a chain of nested lists aborted the process between 120,000 and 160,000 levels; on the 1 GiB stack of `unio run` and executables, 10,000,000 links still passed (a pause of 1.15 s). CI runs it on Linux x86-64 with `--check-free` (step "Pause of freeing a structure at once (RFC 0007)" of the job `benchmarks`).

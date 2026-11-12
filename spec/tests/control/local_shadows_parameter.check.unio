@@ -1,0 +1,5 @@
+# Hidden behavioural check of local_shadows_parameter: test blocks that the reference fix passes.
+
+test "a discount lowers the price":
+    assert apply_discount(200, 25) == 150
+    assert apply_discount(99, 0) == 99

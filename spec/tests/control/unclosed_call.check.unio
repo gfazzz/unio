@@ -1,0 +1,4 @@
+# Hidden behavioural check of unclosed_call: test blocks that the reference fix passes.
+
+test "square areas":
+    assert square_label(3) == "area: 9"

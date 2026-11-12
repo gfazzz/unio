@@ -1,0 +1,5 @@
+# Hidden behavioural check of average_int_float: test blocks that the reference fix passes.
+
+test "average of integers":
+    assert average([1, 2, 3, 4]) == 2.5
+    assert average([]) == 0.0

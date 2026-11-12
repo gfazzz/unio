@@ -1,0 +1,4 @@
+# Hidden behavioural check of assign_to_for_variable: test blocks that the reference fix passes.
+
+test "names are trimmed and blanks dropped":
+    assert clean_names([" ann ", "  ", "bob"]) == ["ann", "bob"]

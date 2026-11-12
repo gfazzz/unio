@@ -1,0 +1,3 @@
+function check_mark(done as Bool) returns Text:
+    let mark = "\u{2714}" if done else " "
+    return "[{mark}]"

@@ -1,0 +1,8 @@
+# expect-error: 8 E0047
+# category: types
+function progress_bar(done as Int, width as Int) returns Text:
+    var bar = ""
+    let cells = range(0, width)
+    for cell in cells:
+        bar = bar + ("#" if cell < done else ".")
+    return "[{bar}] {done}/{cells.length()}"

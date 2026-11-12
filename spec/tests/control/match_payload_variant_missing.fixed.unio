@@ -1,0 +1,10 @@
+enum Shape:
+    Circle(radius as Float)
+    Rectangle(width as Float, height as Float)
+    Triangle(base as Float, height as Float)
+
+function area(shape as Shape) returns Float:
+    match shape:
+        case Shape.Circle(radius): return 3.14 * radius * radius
+        case Shape.Rectangle(width, height): return width * height
+        case Shape.Triangle(base, height): return base * height / 2.0

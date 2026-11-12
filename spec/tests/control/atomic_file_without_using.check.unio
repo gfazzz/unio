@@ -1,0 +1,7 @@
+# Hidden behavioural check of atomic_file_without_using: test blocks that the reference fix passes.
+
+test "an empty path cannot be written":
+    try:
+        try write_report(Path(""), ["a"])
+        assert_fail("expected an error")
+    on IoError as e: assert not e.reason.is_empty()

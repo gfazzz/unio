@@ -1,0 +1,4 @@
+# expect-error: 4 E0010
+# category: style
+function weekdays() returns List[Text]:
+    return ["mon", "tue", "wed", "thu", "fri")

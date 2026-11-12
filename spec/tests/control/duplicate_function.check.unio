@@ -1,0 +1,5 @@
+# Hidden behavioural check of duplicate_function: test blocks that the reference fix passes.
+
+test "rectangles and squares":
+    assert area(2, 3) == 6
+    assert square_area(4) == 16

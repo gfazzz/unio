@@ -1,0 +1,5 @@
+# Hidden behavioural check of match_result_missing_error: test blocks that the reference fix passes.
+
+test "status and timeout":
+    assert describe(200) == "status 200"
+    assert describe(0) == "timed out after 30 s"

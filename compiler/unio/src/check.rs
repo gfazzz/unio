@@ -173,6 +173,7 @@ pub fn check_program(program: &mut Program) {
         } else if is_undetermined(&value) {
             checker.err("E0060", c.name.span, catalog::cannot_infer());
         }
+        drop(checker);
         let ty = annotated.unwrap_or(ty);
         const_types.insert(id, ty);
     }
@@ -235,6 +236,7 @@ fn tests(program: &mut Program, known: &Known, const_types: &HashMap<ConstId, Ty
             }
             checker.scopes.push(Vec::new());
             checker.block(&body);
+            drop(checker);
             if !runs {
                 program.effect_facts.rewind(mark);
             }
@@ -607,6 +609,9 @@ struct Checker<'a> {
     /// The flows of the arguments of the last call checked, by parameter.
     last_args: Vec<(usize, Flow)>,
     self_var: bool,
+    /// The name of the receiver of the `var self` method being called: it takes the place of a
+    /// first `var` argument, so that it reaches no `var` parameter of the call (E0042, L-29).
+    var_receiver: Option<String>,
     /// Expressions where a resource may be created (E0080).
     creation_ok: HashSet<(usize, usize)>,
     /// Names of resources used where they do not leave their block (E0081).
@@ -617,6 +622,19 @@ struct Checker<'a> {
     coverage_budget: usize,
     /// Set when the alternatives of a pattern combine into more rows than are enumerated.
     pattern_overflow: std::cell::Cell<bool>,
+    /// What the language server asked to record, before the types are resolved (T-10).
+    noted: crate::lsp::facts::Noted,
+}
+
+impl Drop for Checker<'_> {
+    /// Gives what was noted for the language server, with the types as far as they were
+    /// inferred (T-10).
+    fn drop(&mut self) {
+        if !self.noted.is_empty() {
+            let noted = std::mem::take(&mut self.noted);
+            noted.finish(|t| self.resolved(t));
+        }
+    }
 }
 
 /// The number of pattern rows the coverage check of one `match` may examine. A match whose
@@ -657,11 +675,13 @@ impl<'a> Checker<'a> {
             field_owner: HashMap::new(),
             last_args: Vec::new(),
             self_var: false,
+            var_receiver: None,
             creation_ok: HashSet::new(),
             use_ok: HashSet::new(),
             silent: 0,
             coverage_budget: COVERAGE_LIMIT,
             pattern_overflow: std::cell::Cell::new(false),
+            noted: crate::lsp::facts::Noted::new(),
         }
     }
 
@@ -746,6 +766,12 @@ impl<'a> Checker<'a> {
         };
         // A parameter holds what each call passes (RFC 0005).
         let flow = self.new_flow(vec![Atom::Param(Holder::Func(f), i)]);
+        if self.noted.on {
+            if let Some(param) = self.p.funcs[f].params.get(i) {
+                let span = param.span;
+                self.noted.local(self.module, &name, span, &ty, true);
+            }
+        }
         self.scopes.last_mut().unwrap().push(Local {
             name,
             ty,
@@ -803,6 +829,9 @@ impl<'a> Checker<'a> {
             self.err("E0055", span, catalog::local_repeats(name));
         }
         self.expired.remove(name);
+        if self.noted.on {
+            self.noted.local(self.module, name, span, &ty, false);
+        }
         self.scopes.last_mut().unwrap().push(Local {
             name: name.to_string(),
             ty,
@@ -1316,20 +1345,6 @@ impl<'a> Checker<'a> {
         if self.is_resource(&ty) {
             let shown = self.p.show(&ty);
             self.err("E0080", span, catalog::resource_outside_using(&shown));
-        }
-    }
-
-    /// A parameter type that takes a resource without letting it escape.
-    fn takes_resource(&mut self, ty: &Ty) -> bool {
-        match ty {
-            Ty::Param(p) => self.p.params[*p]
-                .bounds
-                .iter()
-                .any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == self.known.resource)),
-            other => {
-                let other = self.resolved(other);
-                self.is_resource(&other)
-            }
         }
     }
 
@@ -2474,38 +2489,64 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ calls
 
     fn fn_params(
-        &self,
+        &mut self,
         f: FnId,
         subst: &HashMap<ParamId, Ty>,
         self_ty: Option<&Ty>,
     ) -> Vec<ParamSpec> {
-        self.p.funcs[f]
+        let declared: Vec<(String, Ty, bool, bool, bool)> = self.p.funcs[f]
             .params
             .iter()
-            .map(|p| ParamSpec {
-                name: Some(p.name.clone()),
-                ty: p.ty.subst(subst, self_ty),
-                named_only: p.named_only,
-                has_default: p.has_default,
-                var: p.var,
-                resource_bound: matches!(&p.ty, Ty::Param(id) if self.p.params[*id]
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    p.ty.clone(),
+                    p.named_only,
+                    p.has_default,
+                    p.var,
+                )
+            })
+            .collect();
+        declared
+            .into_iter()
+            .map(|(name, ty, named_only, has_default, var)| {
+                // A resource may be passed only to a parameter declared with a resource type
+                // or a type parameter bounded by `Resource`: the callee can then only use it
+                // and pass it on (semantics 7.2). A parameter of an unbounded type parameter,
+                // such as `item as T` of `List.append`, may store what it gets, even when `T`
+                // stands for a resource at this call (E0081, L-20).
+                let bounded = matches!(&ty, Ty::Param(id) if self.p.params[*id]
                     .bounds
                     .iter()
-                    .any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == self.known.resource))),
+                    .any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == self.known.resource)));
+                let own = ty.subst(&HashMap::new(), self_ty);
+                let resource_bound = bounded || self.is_resource(&own);
+                ParamSpec {
+                    name: Some(name),
+                    ty: ty.subst(subst, self_ty),
+                    named_only,
+                    has_default,
+                    var,
+                    resource_bound,
+                }
             })
             .collect()
     }
 
-    fn value_params(f: &FnTy) -> Vec<ParamSpec> {
+    fn value_params(&mut self, f: &FnTy) -> Vec<ParamSpec> {
         f.params
             .iter()
-            .map(|(label, ty)| ParamSpec {
-                name: label.clone(),
-                ty: ty.clone(),
-                named_only: label.is_some(),
-                has_default: false,
-                var: false,
-                resource_bound: false,
+            .map(|(label, ty)| {
+                // A function value of a resource parameter only uses what it gets (7.2).
+                let resolved = self.resolved(ty);
+                ParamSpec {
+                    name: label.clone(),
+                    ty: ty.clone(),
+                    named_only: label.is_some(),
+                    has_default: false,
+                    var: false,
+                    resource_bound: self.is_resource(&resolved),
+                }
             })
             .collect()
     }
@@ -2594,7 +2635,7 @@ impl<'a> Checker<'a> {
                 )
             }))
             .collect();
-        let mut var_roots: Vec<String> = Vec::new();
+        let mut var_roots: Vec<String> = self.var_receiver.take().into_iter().collect();
         for (i, p) in params.iter().enumerate() {
             let Some(arg) = assigned[i] else { continue };
             if p.var && self.silent == 0 {
@@ -2611,7 +2652,7 @@ impl<'a> Checker<'a> {
                     var_roots.push(name);
                 }
             }
-            if p.resource_bound || self.takes_resource(&p.ty.clone()) {
+            if p.resource_bound {
                 self.use_ok.insert(span_key(arg.value.span));
             }
         }
@@ -2932,6 +2973,10 @@ impl<'a> Checker<'a> {
     }
 
     fn unknown_name(&mut self, name: &str, span: Span) {
+        if self.p.modules[self.module].failed_imports.contains(name) {
+            // The import that should bind the name has been reported (semantics 2.8).
+            return;
+        }
         if self.expired.contains(name) {
             self.err("E0050", span, catalog::is_name_not_bound(name));
             return;
@@ -3092,6 +3137,28 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ expressions
 
     fn expr(&mut self, e: &ast::Expr, expected: &Ty) -> Ty {
+        let ty = self.expr_kind(e, expected);
+        if self.noted.on {
+            // The type of the expression and, for a local name, the binding it names (T-10).
+            let local = match &e.kind {
+                ExprKind::Name(n) => self.local_span(n),
+                _ => None,
+            };
+            self.noted.expr(self.module, e.span, &ty, local);
+        }
+        ty
+    }
+
+    /// The place where the innermost local of this name is bound.
+    fn local_span(&self, name: &str) -> Option<Span> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.iter().rev().find(|l| l.name == name))
+            .map(|l| l.span)
+    }
+
+    fn expr_kind(&mut self, e: &ast::Expr, expected: &Ty) -> Ty {
         match &e.kind {
             ExprKind::Int(_) => Ty::int(),
             ExprKind::Float(_) => Ty::float(),
@@ -3887,17 +3954,14 @@ impl<'a> Checker<'a> {
                             );
                         } else if let Some(field) = bad {
                             self.err("E0078", target.span, catalog::field_not_var(&field));
+                        } else {
+                            self.var_receiver = Some(Checker::root_name(&root));
                         }
                     }
-                    return self.call_function(
-                        f,
-                        subst,
-                        Some(self_ty),
-                        explicit,
-                        args,
-                        span,
-                        expected,
-                    );
+                    let result =
+                        self.call_function(f, subst, Some(self_ty), explicit, args, span, expected);
+                    self.var_receiver = None;
+                    return result;
                 }
                 // A field that holds a function.
                 if let Ty::Named(d, _) = &recv {
@@ -3992,7 +4056,7 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         match self.resolved(t) {
             Ty::Func(f) => {
-                let params = Checker::value_params(&f);
+                let params = self.value_params(&f);
                 let result = self.call(params, f.ret.clone(), args, span, expected);
                 let flows = std::mem::take(&mut self.last_args);
                 self.add_use(Callee::Value(flow), flows, span);
@@ -4208,6 +4272,12 @@ impl<'a> Checker<'a> {
             _ => None,
         };
         let Some(d) = def else {
+            if self.p.modules[self.module]
+                .failed_imports
+                .contains(&type_path[0].text)
+            {
+                return;
+            }
             let written = type_path
                 .iter()
                 .map(|n| n.text.as_str())

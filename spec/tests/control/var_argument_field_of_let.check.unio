@@ -1,0 +1,7 @@
+# Hidden behavioural check of var_argument_field_of_let: test blocks that the reference fix passes.
+
+test "a song is added once":
+    let list = Playlist(name = "mix", songs = ["a"])
+    assert with_song(list, "b").songs == ["a", "b"]
+    assert with_song(list, "a").songs == ["a"]
+    assert list.songs == ["a"]

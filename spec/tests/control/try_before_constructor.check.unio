@@ -1,0 +1,5 @@
+# Hidden behavioural check of try_before_constructor: test blocks that the reference fix passes.
+
+test "the span of values":
+    assert span([4, 1, 9]) == some(Range2(low = 1, high = 9))
+    assert span([]) == none

@@ -1,0 +1,2 @@
+function data_path(name as Text) returns Text:
+    return "D:\\data\\{name}.csv"

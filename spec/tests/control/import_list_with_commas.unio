@@ -1,0 +1,7 @@
+# expect-error: 3 E0012
+# category: style
+import std.files, std.text
+
+function joined_names(directory as Path) returns Text fails with IoError:
+    let names = [entry.name() for entry in try files.list_directory(directory)]
+    return text.join(names, ", ")

@@ -1,0 +1,4 @@
+# Hidden behavioural check of number_with_unit: test blocks that the reference fix passes.
+
+test "the timeout in seconds":
+    assert timeout_seconds() == 1.5

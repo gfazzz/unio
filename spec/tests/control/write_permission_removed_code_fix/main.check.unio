@@ -1,0 +1,5 @@
+# Hidden behavioural check of write_permission_removed_code_fix: test blocks that the reference fix passes.
+
+test "a summary counts lines and characters":
+    assert summarize("a\nbc\n") == "2 lines, 5 characters"
+    assert main() == 2

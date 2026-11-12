@@ -1,0 +1,5 @@
+function first_negative(values as List[Int]) returns Option[Int]:
+    var found as Option[Int] = none
+    for value in values:
+        if value < 0 and found.is_none(): found = some(value)
+    return found

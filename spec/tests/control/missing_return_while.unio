@@ -1,0 +1,9 @@
+# expect-error: 3 E0082
+# category: errors
+function gcd(a as Int, b as Int) returns Int:
+    var x = a
+    var y = b
+    while y != 0:
+        let rest = x % y
+        x = y
+        y = rest

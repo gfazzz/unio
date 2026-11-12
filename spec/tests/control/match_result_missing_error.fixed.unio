@@ -1,0 +1,11 @@
+error Timeout:
+    seconds as Int
+
+function fetch_status(code as Int) returns Result[Text, Timeout]:
+    if code == 0: return error(Timeout(seconds = 30))
+    return ok("status {code}")
+
+function describe(code as Int) returns Text:
+    match fetch_status(code):
+        case ok(status): return status
+        case error(problem): return "timed out after {problem.seconds} s"

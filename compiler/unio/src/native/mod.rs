@@ -188,29 +188,31 @@ fn compile(
 }
 
 /// The runtime library (`libunio.a`, on Windows `unio.lib`): `UNIO_RUNTIME_LIB`, or the one
-/// built next to this compiler.
+/// next to this compiler. An installation keeps it in `lib/unio` beside the `bin` directory of
+/// the compiler (`<prefix>/bin/unio` and `<prefix>/lib/unio/libunio.a`, docs/runtime.md 8.4);
+/// `cargo build` leaves it in the directory of the compiler itself.
 pub fn runtime_library() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("UNIO_RUNTIME_LIB") {
         return Ok(PathBuf::from(p));
     }
     let name = Target::host().map_or("libunio.a", Target::runtime_file);
     let exe = std::env::current_exe().map_err(|e| format!("the compiler's location: {e}"))?;
-    let candidate = exe
-        .parent()
-        .map(|d| d.join(name))
-        .ok_or("the compiler's location")?;
-    if candidate.is_file() {
-        return Ok(candidate);
+    // A link to the compiler, as in a directory on PATH, leads to its installation.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let dir = exe.parent().ok_or("the compiler's location")?;
+    let mut candidates = vec![dir.join(name)];
+    if let Some(prefix) = dir.parent() {
+        candidates.push(prefix.join("lib").join("unio").join(name));
+        // Test binaries live in target/<profile>/deps.
+        candidates.push(prefix.join(name));
     }
-    // Test binaries live in target/<profile>/deps.
-    if let Some(up) = exe.parent().and_then(Path::parent).map(|d| d.join(name)) {
-        if up.is_file() {
-            return Ok(up);
-        }
+    if let Some(found) = candidates.iter().find(|c| c.is_file()) {
+        return Ok(found.clone());
     }
     Err(format!(
-        "the runtime library {} is missing; build it with cargo build -p unio",
-        candidate.display()
+        "the runtime library {name} is missing: it belongs in {} or {}; build it with cargo build -p unio, or set UNIO_RUNTIME_LIB",
+        candidates[0].display(),
+        candidates.get(1).unwrap_or(&candidates[0]).display()
     ))
 }
 

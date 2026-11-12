@@ -1,0 +1,3 @@
+# Form check of deep_nesting: the error is in the form alone, so the fix is checked by its
+# form: it is clean, in the one style, and changes only the faulty construct.
+# changed lines: 6-6

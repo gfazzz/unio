@@ -1,0 +1,4 @@
+# expect-error: 4 E0006
+# category: style
+function data_path(name as Text) returns Text:
+    return "D:\data\\{name}.csv"

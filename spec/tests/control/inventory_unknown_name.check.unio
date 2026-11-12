@@ -1,0 +1,16 @@
+# Hidden behavioural check of inventory_unknown_name: test blocks that the reference fix passes.
+
+test "stock value multiplies quantity and price":
+    let items = [
+        Item(name = "bolt", quantity = 10, price_cents = 25),
+        Item(name = "nut", quantity = 4, price_cents = 10),
+    ]
+    assert stock_value(items) == 290
+    assert stock_value([]) == 0
+
+test "low stock lists the names under the threshold":
+    let items = [
+        Item(name = "bolt", quantity = 10, price_cents = 25),
+        Item(name = "nut", quantity = 2, price_cents = 10),
+    ]
+    assert low_stock(items, 5) == ["nut"]

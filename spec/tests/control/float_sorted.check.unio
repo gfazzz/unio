@@ -1,0 +1,6 @@
+# Hidden behavioural check of float_sorted: test blocks that the reference fix passes.
+
+test "median of odd and even lists":
+    assert median([3.0, 1.0, 2.0]) == some(2.0)
+    assert median([4.0, 1.0, 3.0, 2.0]) == some(2.5)
+    assert median([]) == none

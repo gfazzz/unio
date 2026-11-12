@@ -1,0 +1,5 @@
+# Hidden behavioural check of unknown_method: test blocks that the reference fix passes.
+
+test "initials are upper case":
+    assert initials("ada lovelace") == "AL"
+    assert initials("") == ""

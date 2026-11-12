@@ -1,0 +1,9 @@
+function normalize(var scores as List[Int]):
+    for index in range(0, scores.length()):
+        if scores[index] < 0: scores[index] = 0
+        if scores[index] > 100: scores[index] = 100
+
+function normalized(scores as List[Int]) returns List[Int]:
+    var copy = scores
+    normalize(copy)
+    return copy

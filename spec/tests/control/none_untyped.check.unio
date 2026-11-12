@@ -1,0 +1,5 @@
+# Hidden behavioural check of none_untyped: test blocks that the reference fix passes.
+
+test "the first negative value":
+    assert first_negative([3, -1, -5]) == some(-1)
+    assert first_negative([1]) == none

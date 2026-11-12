@@ -1,0 +1,4 @@
+# Hidden behavioural check of resource_captured_by_stored_lambda: test blocks that the reference fix passes.
+
+test "the average of the readings":
+    assert average_reading("hall") == 5

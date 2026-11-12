@@ -1,0 +1,15 @@
+# expect-error: 11 E0056
+# category: types
+struct Item:
+    name as Text
+    quantity as Int
+    price_cents as Int
+
+function stock_value(items as List[Item]) returns Int:
+    var total = 0
+    for item in items:
+        total = total + item.quantity * item.price_cent
+    return total
+
+function low_stock(items as List[Item], threshold as Int) returns List[Text]:
+    return [item.name for item in items if item.quantity < threshold]

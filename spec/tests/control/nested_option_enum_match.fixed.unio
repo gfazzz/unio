@@ -1,0 +1,9 @@
+enum Priority:
+    Low
+    High
+
+function badge(priority as Option[Priority]) returns Text:
+    match priority:
+        case some(Priority.High): return "!!"
+        case some(Priority.Low): return "."
+        case none: return ""

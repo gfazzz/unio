@@ -1,0 +1,7 @@
+# Hidden behavioural check of assign_to_literal_comparison: test blocks that the reference fix passes.
+
+test "negative balances are reset":
+    var balance = -5
+    assert reset_if_negative(balance)
+    assert balance == 0
+    assert not reset_if_negative(balance)

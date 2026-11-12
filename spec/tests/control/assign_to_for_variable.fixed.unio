@@ -1,0 +1,6 @@
+function clean_names(names as List[Text]) returns List[Text]:
+    var cleaned as List[Text] = []
+    for name in names:
+        let trimmed = name.trim()
+        if not trimmed.is_empty(): cleaned.append(trimmed)
+    return cleaned

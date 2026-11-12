@@ -1,0 +1,6 @@
+# Hidden behavioural check of import_cycle: test blocks that the reference fix passes.
+
+test "total and mean":
+    assert total([3, 4, 5]) == 12
+    assert mean([3, 4, 5]) == 4
+    assert mean([]) == 0

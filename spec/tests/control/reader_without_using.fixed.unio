@@ -1,0 +1,10 @@
+import std.files
+
+function count_bytes(path as Path) returns Int fails with IoError:
+    var total = 0
+    using reader = try files.open_reader(path):
+        while true:
+            match try reader.read_bytes(max_bytes = 4096):
+                case some(chunk): total = total + chunk.length()
+                case none: break
+    return total

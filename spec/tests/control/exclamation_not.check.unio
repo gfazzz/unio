@@ -1,0 +1,6 @@
+# Hidden behavioural check of exclamation_not: test blocks that the reference fix passes.
+
+test "admin pages need a login":
+    assert needs_login("/admin/users", false)
+    assert not needs_login("/admin/users", true)
+    assert not needs_login("/home", false)

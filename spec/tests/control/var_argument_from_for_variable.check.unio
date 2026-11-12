@@ -1,0 +1,6 @@
+# Hidden behavioural check of var_argument_from_for_variable: test blocks that the reference fix passes.
+
+test "every cart gets the item":
+    let carts = fill([Cart(items = []), Cart(items = ["tea"])], "milk")
+    assert carts[0].items == ["milk"]
+    assert carts[1].items == ["tea", "milk"]

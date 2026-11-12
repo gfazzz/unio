@@ -1,0 +1,19 @@
+interface Shape:
+    function area(self) returns Float
+    function name(self) returns Text
+
+struct Square:
+    side as Float
+
+extend Square with Shape:
+    function area(self) returns Float:
+        return self.side * self.side
+
+    function name(self) returns Text:
+        return "square"
+
+function total_area(squares as List[Square]) returns Float:
+    var total = 0.0
+    for square in squares:
+        total = total + square.area()
+    return total

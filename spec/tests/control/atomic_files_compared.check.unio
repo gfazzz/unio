@@ -1,0 +1,7 @@
+# Hidden behavioural check of atomic_files_compared: test blocks that the reference fix passes.
+
+test "an empty path fails before anything is written":
+    try:
+        let written = try write_pair(Path(""), Path(""), "x")
+        assert_fail("expected an error")
+    on IoError as e: assert not e.reason.is_empty()

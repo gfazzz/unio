@@ -1,0 +1,12 @@
+# expect-error: 11 E0024
+# category: style
+error Empty:
+    field as Text
+
+function first_char(text as Text) returns Text fails with Empty:
+    if text.is_empty(): fail Empty(field = "text")
+    return text.slice(0, 1)
+
+function badge(name as Text) returns Text:
+    let label = "[" + (try first_char(name) on Empty: return "[?]") + "]"
+    return label

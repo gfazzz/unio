@@ -1,0 +1,4 @@
+# Hidden behavioural check of increment_operator: test blocks that the reference fix passes.
+
+test "tickets are numbered in turn":
+    assert next_ticket(41) == "T-42"

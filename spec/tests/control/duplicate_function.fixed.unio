@@ -1,0 +1,5 @@
+function area(width as Int, height as Int) returns Int:
+    return width * height
+
+function square_area(side as Int) returns Int:
+    return side * side

@@ -1,0 +1,13 @@
+# Hidden behavioural check of config_call_without_try: test blocks that the reference fix passes.
+
+test "settings are read and comments skipped":
+    let settings = try parse_config("# comment\nname = demo\n\nport=8080\n") on ConfigError as e:
+        assert_fail(e.message)
+    assert settings["name"] == "demo"
+    assert settings["port"] == "8080"
+
+test "a line without '=' is an error":
+    try:
+        let settings = try parse_config("name demo")
+        assert_fail("expected a config error")
+    on ConfigError as e: assert e.message == "missing '='"

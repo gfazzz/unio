@@ -1,0 +1,6 @@
+# expect-error: 6 E0012
+# category: style
+function greet(name as Text) returns Text:
+    return "Hello, {name}"
+
+print(greet("world"))

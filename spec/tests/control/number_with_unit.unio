@@ -1,0 +1,6 @@
+# expect-error: 3 E0008
+# category: style
+let TIMEOUT_MS as Int = 1500ms
+
+function timeout_seconds() returns Float:
+    return TIMEOUT_MS.to_float() / 1000.0

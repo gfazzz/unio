@@ -1,0 +1,5 @@
+# Hidden behavioural check of break_outside_loop: test blocks that the reference fix passes.
+
+test "the first word or nothing":
+    assert first_word("  hello world") == "hello"
+    assert first_word("   ") == ""

@@ -1,0 +1,5 @@
+# Hidden behavioural check of json_try_before_encode: test blocks that the reference fix passes.
+
+test "events are written as a JSON array":
+    assert serialize([Event(kind = "click", count = 2)]) == "[\{\"kind\":\"click\",\"count\":2\}]"
+    assert serialize([]) == "[]"

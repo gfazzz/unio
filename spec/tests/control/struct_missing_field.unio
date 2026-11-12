@@ -1,0 +1,12 @@
+# expect-error: 12 E0063
+# category: types
+struct Contact:
+    name as Text
+    email as Text
+    phone as Option[Text]
+
+function parse_contact(line as Text) returns Option[Contact]:
+    let parts = line.split_whitespace()
+    if parts.length() < 2: return none
+    let phone = parts.get(2)
+    return some(Contact(name = parts[0], email = parts[1]))

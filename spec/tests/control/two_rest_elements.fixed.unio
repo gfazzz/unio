@@ -1,0 +1,4 @@
+function head_and_tail(words as List[Text]) returns Text:
+    match words:
+        case [first, rest...]: return "{first} and {rest.length()} more"
+        case []: return "nothing"

@@ -1,0 +1,4 @@
+# Hidden behavioural check of connection_captured_in_lambda: test blocks that the reference fix passes.
+
+test "a batch is sent over one connection":
+    assert send_batch("example.org", ["ab", "cde"]) == 5

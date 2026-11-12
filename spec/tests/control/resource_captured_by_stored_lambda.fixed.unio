@@ -1,0 +1,17 @@
+struct Meter:
+    name as Text
+    var readings as List[Int]
+
+extend Meter with Resource:
+    function release(var self):
+        print("meter {self.name} closed")
+
+function open_meter(name as Text) returns Meter:
+    return Meter(name = name, readings = [3, 5, 8])
+
+function average_reading(name as Text) returns Int:
+    using meter = open_meter(name):
+        var sum = 0
+        for reading in meter.readings:
+            sum = sum + reading
+        return sum / meter.readings.length()

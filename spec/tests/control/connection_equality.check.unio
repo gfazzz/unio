@@ -1,0 +1,4 @@
+# Hidden behavioural check of connection_equality: test blocks that the reference fix passes.
+
+test "two connections are different resources":
+    assert relay("example.org", "hey") == 6

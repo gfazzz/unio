@@ -1,0 +1,4 @@
+function next_ticket(last as Int) returns Text:
+    var number = last
+    number = number + 1
+    return "T-{number}"

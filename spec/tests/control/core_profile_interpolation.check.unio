@@ -1,0 +1,6 @@
+# Hidden behavioural check of core_profile_interpolation: test blocks that the reference fix passes.
+
+test "the checksum wraps at 256":
+    assert checksum([200, 100]) == 44
+    assert is_valid([1, 2, 3], 6)
+    assert not is_valid([1], 2)

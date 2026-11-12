@@ -1,0 +1,5 @@
+# Hidden behavioural check of interpolate_struct: test blocks that the reference fix passes.
+
+test "tasks become checklist lines":
+    let tasks = [Task(title = "write", done = true), Task(title = "test", done = false)]
+    assert checklist(tasks) == ["[x] write", "[ ] test"]

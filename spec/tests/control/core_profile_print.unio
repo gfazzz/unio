@@ -1,0 +1,12 @@
+# expect-error: 9 E0084
+# category: types
+# profile: core
+## Fixed-point arithmetic for a motor controller; this package is checked with --profile=core.
+function scale(value as Int, numerator as Int, denominator as Int) returns Int:
+    if denominator == 0: return 0
+    return value * numerator / denominator
+
+function duty_cycle(speed as Int) returns Int:
+    let duty = scale(speed, 255, 100)
+    print_error("duty")
+    return min(duty, 255)

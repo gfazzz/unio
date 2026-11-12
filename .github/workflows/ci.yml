@@ -26,8 +26,11 @@ jobs:
       # The checks are the Unio tools of tools/, run by the interpreter of sprint S5
       # (docs/runtime.md 8.3). The Python checkers stay as the reference: the job
       # python-parity compares them, and bench/ uses them in performance comparisons.
+      # Inside compiler/, so that rustup uses the toolchain of compiler/rust-toolchain.toml:
+      # rustup finds it from the working directory, not from --manifest-path.
       - name: Build the interpreter
-        run: cargo build --release --manifest-path compiler/Cargo.toml -p unio
+        working-directory: compiler
+        run: cargo build --release --locked -p unio
       - name: Documentation formatting and links
         run: compiler/target/release/unio run $SANDBOX tools/check_docs.unio
       - name: Grammar consistency and corpus
@@ -38,6 +41,11 @@ jobs:
         run: compiler/target/release/unio run $SANDBOX tools/check_api.unio
       - name: Unio test blocks (stdlib, examples, tools)
         run: compiler/target/release/unio test $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+      # Plan section 12, release condition 4: the notices list the crates of Cargo.lock that
+      # the shipped unio and libunio.a contain. The list is the same on every system.
+      - name: Third-party notices are up to date
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 .github/scripts/third_party_notices.py --check
 
   python-parity:
     # The Python checkers are kept as the reference for parity and benchmarks (AGENTS.md,
@@ -65,7 +73,8 @@ jobs:
         with:
           python-version: "3.13"
       - name: Build the interpreter
-        run: cargo build --release --manifest-path compiler/Cargo.toml -p unio
+        working-directory: compiler
+        run: cargo build --release --locked -p unio
       - name: Text benchmarks meet the floor
         run: python3 bench/run.py --runs 3 --only wc,text,loop --check-floor
       - name: JSON benchmark in the interpreter (below the floor, not yet enforced)
@@ -78,6 +87,10 @@ jobs:
       # of 101 runs, timed by the launcher from its fork to the end of the program.
       - name: Native start-up of an empty program at most 5 ms (7.1)
         run: python3 bench/run.py --only empty --native --check-startup --json bench/results-startup.json
+      # RFC 0007 and requirement 7.1: freeing about 100 MB at once takes at most 1 ms per MB of
+      # peak memory (median of 7 runs), in the interpreter and natively; bench/free/.
+      - name: Pause of freeing a structure at once (RFC 0007)
+        run: python3 bench/run.py --only free --native --check-free --json bench/results-free.json
       # RFC 0003: native time and peak memory against Go, blocking for the benchmarks gated
       # for 0.1 (wc and loop); json and text are measured and printed but do not fail the step
       # (gated from 0.2). Each language's time is the best of 9 runs, which a slow run on a
@@ -124,13 +137,18 @@ jobs:
         working-directory: compiler
     steps:
       - uses: actions/checkout@v4
+      # rustup alone: the toolchain itself is the one compiler/rust-toolchain.toml pins, which
+      # the next step installs and checks, as on every runner.
       - name: Rust toolchain, when the runner image has none
         shell: bash
         run: |
           if ! command -v rustup >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
+      - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
+        shell: bash
+        run: sh ../.github/scripts/pinned_toolchain.sh
       - name: Code generation for every target
         run: cargo test --release -p unio --lib 'native::'
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
@@ -154,6 +172,9 @@ jobs:
         working-directory: compiler
     steps:
       - uses: actions/checkout@v4
+      - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
+        shell: bash
+        run: sh ../.github/scripts/pinned_toolchain.sh
       - name: Formatting
         run: cargo fmt --check
       - name: Lints
@@ -162,6 +183,10 @@ jobs:
         run: cargo test
       - name: Formatter speed (T-3, release build)
         run: cargo test --release --test format thousand
+      # Check A of R-10 (plan section 12, condition 2); on Windows the test acts as the operator
+      # that allows the weaker sandbox, as the other tests do (tests/common.rs).
+      - name: Control set yields the expected diagnostics (R-10)
+        run: cargo test --release -p unio --test control
       # Linux x86-64, macOS on AArch64 (macos-latest), Windows x86-64 with the MSVC linker of
       # the runner's Visual Studio (docs/runtime.md 8.4); Linux AArch64 in native-linux-arm.
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
@@ -173,9 +198,149 @@ jobs:
         shell: bash
         working-directory: .
         run: |
-          cargo build --release --manifest-path compiler/Cargo.toml
+          (cd compiler && cargo build --release --locked)
           compiler/target/release/unio fmt --check $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/valid/*.unio
       - name: Unio sources pass name and type checks (docs/semantics.md)
         shell: bash
         working-directory: .
         run: compiler/target/release/unio check $SANDBOX docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio spec/tests/semantic/valid/*.unio
+
+  release:
+    # Plan section 12, release condition 1: the release build in the installed layout of
+    # .github/scripts/release_build.sh, kept for the jobs below: `install` runs it where there is
+    # no checkout, and `reproducible` builds it again elsewhere and compares the bytes.
+    name: release build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
+        run: sh .github/scripts/pinned_toolchain.sh
+      - name: Release build in the installed layout
+        run: sh .github/scripts/release_build.sh "$RUNNER_TEMP/unio-install"
+      - name: Executable of a reference program and the hashes of the build
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe"
+          cp examples/wc.unio "$RUNNER_TEMP/probe/"
+          cd "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/unio-install/bin/unio" build --release wc.unio -o wc
+          "$RUNNER_TEMP/unio-install/bin/unio" build --print-toolchain > "$RUNNER_TEMP/unio-install/TOOLCHAIN"
+          cd "$RUNNER_TEMP/unio-install"
+          sha256sum bin/unio lib/unio/libunio.a ../probe/wc | sed 's# \.\./probe/# probe/#' > SHA256SUMS
+          cat TOOLCHAIN SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unio-${{ runner.os }}
+          path: ${{ runner.temp }}/unio-install
+          if-no-files-found: error
+
+  install:
+    # Plan section 12, release condition 1: the installed unio, with no checkout of the
+    # repository on the machine and no variable of Unio, checks, formats, runs, tests, and
+    # builds a program written in an empty directory, and the executable runs. On Windows CI
+    # allows the weaker sandbox as the operator, as in the other jobs (SB-5, SB-10).
+    name: installed unio
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unio-${{ runner.os }}
+          path: ${{ runner.temp }}/prefix
+      - name: Installed unio works without the source tree
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -eux
+          unset UNIO_STDLIB UNIO_POLICY UNIO_RUNTIME_LIB
+          chmod +x prefix/bin/unio* || true
+          # No checkout: this job never checks the repository out.
+          test ! -e "$GITHUB_WORKSPACE/stdlib"
+          export PATH="$PWD/prefix/bin:$PATH"
+          if [ "$RUNNER_OS" = Windows ]; then
+            # The operator's policy allows the weaker sandbox, for the tool and the executable.
+            printf 'allow_weaker = true\n' > policy.toml
+            export UNIO_POLICY="$PWD/policy.toml"
+          fi
+          mkdir work && cd work
+          printf '%s\n' \
+            '## The program of the installation check: it greets with a sum.' \
+            '' \
+            'import std.args' \
+            '' \
+            'function total(values as List[Int]) returns Int:' \
+            '    var sum = 0' \
+            '    for value in values:' \
+            '        sum = sum + value' \
+            '    return sum' \
+            '' \
+            'public function main() returns Int:' \
+            '    print("hello {total([1, 2, 3])} {args.list().length()}")' \
+            '    return 0' \
+            '' \
+            'test "the total of three numbers":' \
+            '    assert total([1, 2, 3]) == 6' > hello.unio
+          unio check hello.unio
+          unio fmt --check hello.unio
+          test "$(unio run hello.unio -- a b | tr -d '\r')" = "hello 6 2"
+          unio test hello.unio | tee test.out
+          grep -F "the total of three numbers" test.out
+          unio symbol std.args.list | tee symbol.out
+          grep -F "declared: <unio>/stdlib" symbol.out
+          exe=hello
+          if [ "$RUNNER_OS" = Windows ]; then exe=hello.exe; fi
+          unio build --release hello.unio -o "$exe"
+          test "$(./$exe x | tr -d '\r')" = "hello 6 1"
+
+  reproducible:
+    # Plan section 12, release condition 2: a second runner builds the release again from the
+    # same commit and lock file, in another directory and with another CARGO_HOME, and the
+    # bytes of unio, libunio.a, and an executable of `unio build` are compared with those of the
+    # job `release` on Linux x86-64 (C-4, R-6).
+    name: independent reproducible build
+    needs: release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: elsewhere/checkout
+      - uses: actions/download-artifact@v4
+        with:
+          name: unio-Linux
+          path: ${{ runner.temp }}/first
+      - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
+        run: sh elsewhere/checkout/.github/scripts/pinned_toolchain.sh
+      - name: The release built again in another directory, with another CARGO_HOME
+        run: |
+          mkdir -p "$RUNNER_TEMP/cargo-home"
+          CARGO_HOME="$RUNNER_TEMP/cargo-home" sh elsewhere/checkout/.github/scripts/release_build.sh "$RUNNER_TEMP/second"
+          mkdir -p "$RUNNER_TEMP/probe-second/a/b"
+          cp elsewhere/checkout/examples/wc.unio "$RUNNER_TEMP/probe-second/a/b/"
+          cd "$RUNNER_TEMP/probe-second/a/b"
+          "$RUNNER_TEMP/second/bin/unio" build --release wc.unio -o wc
+          "$RUNNER_TEMP/second/bin/unio" build --print-toolchain > "$RUNNER_TEMP/second/TOOLCHAIN"
+          cd "$RUNNER_TEMP/second"
+          sha256sum bin/unio lib/unio/libunio.a ../probe-second/a/b/wc | sed 's# \.\./probe-second/a/b/# probe/#' > SHA256SUMS
+      - name: Two builds on two runners give the same bytes (unio, libunio.a, an executable)
+        run: |
+          cd "$RUNNER_TEMP"
+          echo "first runner:";  cat first/TOOLCHAIN first/SHA256SUMS
+          echo "second runner:"; cat second/TOOLCHAIN second/SHA256SUMS
+          diff first/TOOLCHAIN second/TOOLCHAIN
+          diff first/SHA256SUMS second/SHA256SUMS

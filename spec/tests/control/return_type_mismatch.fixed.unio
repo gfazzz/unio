@@ -1,0 +1,6 @@
+function parse_percentage(text as Text) returns Option[Float]:
+    let trimmed = text.trim()
+    if not trimmed.ends_with("%"): return none
+    match trimmed.slice(0, trimmed.length() - 1).to_float():
+        case some(value): return some(value / 100.0)
+        case none: return none

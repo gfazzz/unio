@@ -1,0 +1,13 @@
+public struct Box:
+    width as Int
+    height as Int
+
+extend Box:
+    public function square(side as Int) returns Box:
+        return Box(width = side, height = side)
+
+    public function area(self) returns Int:
+        return self.width * self.height
+
+    public function side(self) returns Int:
+        return self.width

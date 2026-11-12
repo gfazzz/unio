@@ -1,0 +1,11 @@
+# expect-error: 9 E0061
+# category: types
+function unique_tags(posts as List[List[Text]]) returns List[Text]:
+    var seen = Set[Text]()
+    var tags as List[Text] = []
+    for post in posts:
+        for tag in post:
+            if not seen.contains(tag):
+                seen.insert(post)
+                tags.append(tag)
+    return tags

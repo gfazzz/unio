@@ -1,0 +1,9 @@
+# Hidden behavioural check of fallible_in_condition: test blocks that the reference fix passes.
+
+test "dates in the first quarter":
+    let early = try is_first_quarter("2 14") on BadDate as e:
+        assert_fail(e.text)
+    assert early
+    let late = try is_first_quarter("11 3") on BadDate as e:
+        assert_fail(e.text)
+    assert not late

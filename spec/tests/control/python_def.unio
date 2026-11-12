@@ -1,0 +1,7 @@
+# expect-error: 3 E0012
+# category: style
+def sum_of_squares(values as List[Int]) returns Int:
+    var total = 0
+    for value in values:
+        total = total + value * value
+    return total

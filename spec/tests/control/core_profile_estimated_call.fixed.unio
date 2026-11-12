@@ -1,0 +1,16 @@
+## Decoders of a serial display; this package is checked with --profile=core.
+struct Decoder:
+    decode as Function[(Int) -> Option[Text]]
+
+function digit_name(code as Int) returns Option[Text]:
+    match code:
+        case 0: return some("zero")
+        case 1: return some("one")
+        case 2: return some("two")
+        case _: return none
+
+function can_show(decoder as Decoder, code as Int) returns Bool:
+    return decoder.decode(code).is_some()
+
+function default_decoder() returns Decoder:
+    return Decoder(decode = digit_name)

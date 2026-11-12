@@ -1,0 +1,5 @@
+# Hidden behavioural check of return_inline_handler_without_block: test blocks that the reference fix passes.
+
+test "initials, or a question mark":
+    assert initial("ann") == "A"
+    assert initial("") == "?"

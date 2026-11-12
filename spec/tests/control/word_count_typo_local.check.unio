@@ -1,0 +1,7 @@
+# Hidden behavioural check of word_count_typo_local: test blocks that the reference fix passes.
+
+test "words are counted case-insensitively":
+    let counts = word_frequencies("The cat and the hat")
+    assert counts["the"] == 2
+    assert counts["cat"] == 1
+    assert counts.length() == 4

@@ -1,0 +1,7 @@
+struct Version:
+    major as Int
+    minor as Int
+
+function newer(a as Version, b as Version) returns Version:
+    if a.major != b.major: return a if a.major > b.major else b
+    return a if a.minor >= b.minor else b

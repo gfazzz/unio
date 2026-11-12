@@ -1,0 +1,4 @@
+# Hidden behavioural check of unsafe_module_after_import: test blocks that the reference fix passes.
+
+test "words are joined by one space":
+    assert words("  a   b ") == "a b"

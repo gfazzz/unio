@@ -1,0 +1,15 @@
+error Rejected:
+    item as Text
+
+function accept_all(
+    items as List[Text],
+    check as Function[(Text) -> Bool fails with Rejected],
+) returns Int fails with Rejected:
+    var accepted = 0
+    for item in items:
+        if try check(item): accepted = accepted + 1
+    return accepted
+
+function no_spaces(item as Text) returns Bool fails with Rejected:
+    if item.contains(" "): fail Rejected(item = item)
+    return not item.is_empty()

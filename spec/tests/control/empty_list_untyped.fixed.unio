@@ -1,0 +1,5 @@
+function even_numbers(values as List[Int]) returns List[Int]:
+    var evens as List[Int] = []
+    for value in values:
+        if value % 2 == 0: evens.append(value)
+    return evens

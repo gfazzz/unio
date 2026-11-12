@@ -1,0 +1,4 @@
+# Hidden behavioural check of connection_returned_from_using: test blocks that the reference fix passes.
+
+test "the greeting is already sent when the connection opens":
+    assert greet_and_leave("example.org", "ann") == 5

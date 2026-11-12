@@ -1,0 +1,11 @@
+# Hidden behavioural check of break_in_match_without_loop: test blocks that the reference fix passes.
+
+test "words up to the stop":
+    assert first_words(
+        [Token.Word(text = "a"), Token.Word(text = "b"), Token.Stop, Token.Word(text = "c")],
+    ) == [
+        "a",
+        "b",
+    ]
+    assert first_word(Token.Stop) == ""
+    assert first_word(Token.Word(text = "x")) == "x"

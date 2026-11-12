@@ -1,0 +1,5 @@
+# expect-error: 4 E0007
+# category: style
+function price_label(cents as Int) returns Text:
+    let $dollars = cents / 100
+    return "USD {dollars}"

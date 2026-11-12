@@ -1,0 +1,6 @@
+# Hidden behavioural check of duplicate_method: test blocks that the reference fix passes.
+
+test "area and perimeter":
+    let r = Rectangle(width = 3, height = 4)
+    assert r.area() == 12
+    assert r.perimeter() == 14

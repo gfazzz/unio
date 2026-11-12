@@ -1,0 +1,7 @@
+# Hidden behavioural check of float_map_key: test blocks that the reference fix passes.
+
+test "equal samples share a bucket":
+    let counts = histogram([1.5, 2.0, 1.5])
+    assert counts[(1.5).total_order()] == 2
+    assert counts[(2.0).total_order()] == 1
+    assert counts.length() == 2

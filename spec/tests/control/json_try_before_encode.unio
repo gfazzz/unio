@@ -1,0 +1,10 @@
+# expect-error: 10 E0076
+# category: errors
+import std.json as json
+
+struct Event:
+    public kind as Text
+    public count as Int
+
+function serialize(events as List[Event]) returns Text:
+    return try json.encode(events)

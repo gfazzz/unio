@@ -1,0 +1,4 @@
+# expect-error: 3 E0012
+# category: style
+function connect_label(host as Text, named port = 443) returns Text:
+    return "{host}:{port}"

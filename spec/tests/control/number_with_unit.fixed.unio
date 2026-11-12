@@ -1,0 +1,4 @@
+let TIMEOUT_MS as Int = 1500
+
+function timeout_seconds() returns Float:
+    return TIMEOUT_MS.to_float() / 1000.0

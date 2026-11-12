@@ -1,0 +1,19 @@
+error ValidationError:
+    field as Text
+
+struct Signup:
+    email as Text
+    age as Int
+
+function validate(signup as Signup) returns Result[Signup, ValidationError]:
+    if not signup.email.contains("@"): return error(ValidationError(field = "email"))
+    if signup.age < 13: return error(ValidationError(field = "age"))
+    return ok(signup)
+
+function accepted(signups as List[Signup]) returns List[Text]:
+    var emails as List[Text] = []
+    for signup in signups:
+        match validate(signup):
+            case ok(valid): emails.append(valid.email)
+            case error(problem): print_error("rejected: {problem.field}")
+    return emails

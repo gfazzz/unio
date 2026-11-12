@@ -1,0 +1,5 @@
+# Hidden behavioural check of imported_name_missing: test blocks that the reference fix passes.
+
+test "cells are joined by commas":
+    assert csv_row(["a", "b"]) == "a,b"
+    assert csv_row([]) == ""

@@ -1,0 +1,6 @@
+# Hidden behavioural check of resource_stored_in_map: test blocks that the reference fix passes.
+
+test "each lock reports its audit":
+    let report = lock_report(["a", "b"])
+    assert report["a"] == "a: audit"
+    assert report["b"] == "b: audit"

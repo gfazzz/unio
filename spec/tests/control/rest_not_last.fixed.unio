@@ -1,0 +1,4 @@
+function last_two(items as List[Int]) returns Option[Int]:
+    match items.reversed():
+        case [last, before, rest...]: return some(last + before)
+        case _: return none

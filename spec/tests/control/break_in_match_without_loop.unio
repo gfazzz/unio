@@ -1,0 +1,18 @@
+# expect-error: 18 E0083
+# category: errors
+enum Token:
+    Word(text as Text)
+    Stop
+
+function first_words(tokens as List[Token]) returns List[Text]:
+    var words as List[Text] = []
+    for token in tokens:
+        match token:
+            case Token.Word(text): words.append(text)
+            case Token.Stop: break
+    return words
+
+function first_word(token as Token) returns Text:
+    match token:
+        case Token.Word(text): return text
+        case Token.Stop: break

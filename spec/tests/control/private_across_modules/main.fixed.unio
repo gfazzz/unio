@@ -1,0 +1,6 @@
+import geometry
+
+public function main() returns Int:
+    let box = geometry.Box.square(3)
+    print("area {box.area()}, side {box.side()}")
+    return 0

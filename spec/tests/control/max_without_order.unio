@@ -1,0 +1,8 @@
+# expect-error: 8 E0062
+# category: types
+struct Version:
+    major as Int
+    minor as Int
+
+function newer(a as Version, b as Version) returns Version:
+    return max(a, b)

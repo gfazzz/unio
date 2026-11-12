@@ -1,0 +1,8 @@
+# expect-error: 8 E0064
+# category: types
+function pad_left(text as Text, width as Int, fill as Text) returns Text:
+    if text.length() >= width: return text
+    return fill.repeat(width - text.length()) + text
+
+function invoice_number(number as Int) returns Text:
+    return "INV-" + pad_left("{number}", 6)

@@ -1,0 +1,2 @@
+function add_default(var headers as Map[Text, Text], name as Text, value as Text):
+    if not headers.contains(name): headers[name] = value

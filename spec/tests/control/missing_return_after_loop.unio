@@ -1,0 +1,5 @@
+# expect-error: 3 E0082
+# category: errors
+function find_user_id(names as List[Text], wanted as Text) returns Int:
+    for index, name in names.enumerate():
+        if name == wanted: return index

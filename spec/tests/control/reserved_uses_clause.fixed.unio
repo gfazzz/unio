@@ -1,0 +1,5 @@
+function render(rows as List[Text]) returns Text:
+    var text = ""
+    for row in rows:
+        text = text + row + "\n"
+    return text

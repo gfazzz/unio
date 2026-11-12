@@ -1,0 +1,6 @@
+function histogram(samples as List[Float]) returns Map[OrderedFloat, Int]:
+    var counts as Map[OrderedFloat, Int] = {}
+    for sample in samples:
+        let key = sample.total_order()
+        counts[key] = (counts.get(key) or 0) + 1
+    return counts

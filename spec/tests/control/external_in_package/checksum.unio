@@ -1,0 +1,6 @@
+# expect-error: 6 E0086
+# category: types
+unsafe module
+
+## Adler-32 of the code points of a text, from the C library.
+public external function adler32(text as Text) returns Int

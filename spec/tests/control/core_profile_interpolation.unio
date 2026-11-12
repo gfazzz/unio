@@ -1,0 +1,13 @@
+# expect-error: 11 E0084
+# category: types
+# profile: core
+## A checksum for a firmware image; this package is checked with --profile=core.
+function checksum(data as List[Int]) returns Int:
+    var sum = 0
+    for byte in data:
+        sum = (sum + byte) % 256
+    return sum
+
+function is_valid(data as List[Int], expected as Int) returns Bool:
+    let label = "checksum {checksum(data)}"
+    return label.length() > 0 and checksum(data) == expected

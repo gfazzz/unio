@@ -1,0 +1,6 @@
+# expect-error: 3 E0053
+# category: types
+import std.file
+
+function config_exists(name as Text) returns Bool:
+    return file.exists(Path(name))

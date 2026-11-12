@@ -1,0 +1,5 @@
+# Hidden behavioural check of named_parameter_positional: test blocks that the reference fix passes.
+
+test "delays double":
+    assert default_schedule() == [100, 200, 400, 800]
+    assert retry_delays(0, base_ms = 5) == []

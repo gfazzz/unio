@@ -1,0 +1,8 @@
+# expect-error: 5 E0012
+# category: style
+function log_event(name as Text):
+
+function handle(events as List[Text]) returns Int:
+    for event in events:
+        log_event(event)
+    return events.length()

@@ -1,0 +1,6 @@
+function weighted(values as List[Int]) returns Int:
+    var total = 0
+    for value in values:
+        let weight = value * 2
+        total = total + weight
+    return total

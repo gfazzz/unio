@@ -1,0 +1,6 @@
+# Hidden behavioural check of try_before_map_get: test blocks that the reference fix passes.
+
+test "unknown services have port 0":
+    let services = {"http": 80, "ssh": 22}
+    assert lookup_port(services, "ssh") == 22
+    assert lookup_port(services, "ftp") == 0

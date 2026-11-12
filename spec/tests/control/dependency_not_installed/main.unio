@@ -1,0 +1,14 @@
+# expect-error: 3 E0048
+# category: types
+from deps.strings.casing import join
+
+function title_case(words as List[Text]) returns Text:
+    var parts as List[Text] = []
+    for word in words:
+        if word.is_empty(): continue
+        parts.append(word.slice(0, 1).to_upper() + word.slice(1, word.length()).to_lower())
+    return join(parts, " ")
+
+public function main() returns Int:
+    print(title_case(["hello", "WORLD"]))
+    return 0

@@ -1,0 +1,8 @@
+# expect-error: 7 E0057
+# category: types
+import geometry
+
+public function main() returns Int:
+    let box = geometry.Box.square(3)
+    print("area {box.area()}, side {box.width}")
+    return 0

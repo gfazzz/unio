@@ -1,0 +1,8 @@
+import std.files
+
+function save_report(path as Path, lines as List[Text]) returns Bool fails with IoError:
+    using file = try files.open_atomic(path):
+        for line in lines:
+            try file.write_line(line)
+        try file.commit()
+        return file.is_replaced()

@@ -1,0 +1,4 @@
+# Hidden behavioural check of resource_returned_by_helper_using: test blocks that the reference fix passes.
+
+test "a lock named after the job":
+    assert job_label(7) == "job-7: start"

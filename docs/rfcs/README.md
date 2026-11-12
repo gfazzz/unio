@@ -27,3 +27,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 | [0004](0004-external-functions-and-unsafe-modules.md) | External functions and unsafe modules in 0.1 | accepted |
 | [0005](0005-effects-of-function-values.md) | Effects of function values are carried by calls | accepted (semantics implemented in `unio check` and `unio symbol`; tests of the implementation being added) |
 | [0006](0006-compile-limits-apart-from-program-limits.md) | Compile limits apart from program limits | accepted (implemented in the tools; macOS and Windows checks pending in CI) |
+| [0007](0007-reference-counting-for-0-1.md) | Reference counting instead of a tracing GC in 0.1 | accepted (2026-11-12; implemented; the CI step pending its first run) |

@@ -1,0 +1,7 @@
+# Hidden behavioural check of nested_try_refail_unlisted: test blocks that the reference fix passes.
+
+test "an unreadable config is reported as missing":
+    try:
+        let text = try load(Path("no-such-config-for-nested-try.toml"))
+        assert_fail("expected an error")
+    on ConfigMissing as e: assert e.path == Path("no-such-config-for-nested-try.toml")

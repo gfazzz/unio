@@ -1,0 +1,21 @@
+# expect-error: 20 E0080
+# category: resources
+struct Lock:
+    name as Text
+    var held as Int
+
+extend Lock with Resource:
+    function release(var self):
+        print("unlocked {self.name}")
+
+extend Lock:
+    function guard(var self, work as Text) returns Text:
+        self.held = self.held + 1
+        return "{self.name}: {work}"
+
+function acquire(name as Text) returns Lock:
+    return Lock(name = name, held = 0)
+
+function lock_both(a as Text, b as Text) returns List[Text]:
+    let locks = [acquire(name) for name in [a, b]]
+    return [lock.name for lock in locks]

@@ -25,7 +25,7 @@
 //! executable to the path the operator chose.
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -92,6 +92,9 @@ pub struct Spec {
     pub limits: Limits,
     pub allow_weaker: bool,
     pub stdlib: Option<PathBuf>,
+    /// Data for the worker on its standard input after the configuration: the request and the
+    /// unsaved buffers of the language server (SB-13), which so reach it without a file.
+    pub input: Vec<u8>,
 }
 
 /// The directory with `unio.toml` nearest above the path, by its written path and without
@@ -138,7 +141,8 @@ impl Spec {
             }
         }
         let stdlib = unio::program::trusted_stdlib();
-        if let Some(dir) = &stdlib {
+        // The library embedded in the compiler is in the worker's memory; it reads no files.
+        if let Some(dir) = stdlib.as_ref().filter(|d| !unio::vfs::is_builtin(d)) {
             let scope = tree(dir);
             if !read.contains(&scope) {
                 read.push(scope);
@@ -273,6 +277,8 @@ struct Config {
     cpu: Option<u64>,
     allow_weaker: bool,
     probe: Option<String>,
+    /// The length of the data after the configuration.
+    input: usize,
     /// The marker of the process tree, for the profile of the link step (macOS).
     tree: Option<tree::Marker>,
 }
@@ -310,6 +316,9 @@ fn encode(spec: &Spec, temp: &Path, marker: Option<&tree::Marker>) -> String {
     }
     if let Some(probe) = std::env::var_os(PROBE) {
         out.push_str(&format!("probe {}\n", hex(probe.as_encoded_bytes())));
+    }
+    if !spec.input.is_empty() {
+        out.push_str(&format!("input {}\n", spec.input.len()));
     }
     out.push_str("end\n");
     out
@@ -350,6 +359,7 @@ fn decode(text: &str) -> Result<Config, String> {
                 let bytes = unhex(value).ok_or_else(|| bad(line))?;
                 config.probe = Some(String::from_utf8_lossy(&bytes).into_owned());
             }
+            "input" => config.input = value.parse().map_err(|_| bad(line))?,
             "end" => return Ok(config),
             _ => return Err(bad(line)),
         }
@@ -360,6 +370,14 @@ fn decode(text: &str) -> Result<Config, String> {
 // ---------------------------------------------------------------- inside the worker
 
 static INSIDE: OnceLock<Inside> = OnceLock::new();
+
+/// The data this worker received after its configuration.
+static INPUT: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// The data the tool gave this worker after its configuration ([`Spec::input`]).
+pub fn input() -> &'static [u8] {
+    INPUT.get().map_or(&[], Vec::as_slice)
+}
 
 struct Inside {
     temp: PathBuf,
@@ -412,19 +430,31 @@ pub fn enter(arguments: &[String]) -> Entered {
     let Some((role, rest)) = arguments.split_first() else {
         return fail("started without a role");
     };
+    // The configuration up to its last line, then the data of its declared length.
+    let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
     let mut text = String::new();
-    if std::io::stdin()
-        .lock()
-        .take(1 << 20)
-        .read_to_string(&mut text)
-        .is_err()
-    {
-        return fail("the configuration cannot be read");
+    loop {
+        let mut line = String::new();
+        match (&mut stdin).take(1 << 20).read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) if text.len() + line.len() <= 1 << 20 => {
+                text.push_str(&line);
+                if line == "end\n" {
+                    break;
+                }
+            }
+            _ => return fail("the configuration cannot be read"),
+        }
     }
     let config = match decode(&text) {
         Ok(config) => config,
         Err(problem) => return fail(&problem),
     };
+    let mut input = vec![0u8; config.input];
+    if stdin.read_exact(&mut input).is_err() {
+        return fail("the input after the configuration cannot be read");
+    }
+    let _ = INPUT.set(input);
     if !os::end_with_parent(config.parent) {
         return fail("its tool has already ended");
     }
@@ -706,7 +736,9 @@ pub fn start(
     let config = encode(spec, temp.path(), marker.as_ref());
     if let Some(mut stdin) = child.stdin.take() {
         // A worker that ends early closes the pipe; its code tells why.
-        let _ = stdin.write_all(config.as_bytes());
+        let _ = stdin
+            .write_all(config.as_bytes())
+            .and_then(|()| stdin.write_all(&spec.input));
     }
     let mut stdout = child.stdout.take().expect("a piped standard output");
     let mut stderr = child.stderr.take().expect("a piped standard error");

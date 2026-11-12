@@ -1,0 +1,8 @@
+# expect-error: 8 E0065
+# category: types
+struct Sale:
+    region as Text
+    units as Int
+
+function report_line(sale as Sale) returns Text:
+    return sale.region + ": " + sale.units + " units"

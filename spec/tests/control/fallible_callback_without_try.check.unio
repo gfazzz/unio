@@ -1,0 +1,10 @@
+# Hidden behavioural check of fallible_callback_without_try: test blocks that the reference fix passes.
+
+test "items are counted until one is rejected":
+    let count = try accept_all(["a", "", "b"], no_spaces) on Rejected as e:
+        assert_fail(e.item)
+    assert count == 2
+    try:
+        let bad = try accept_all(["a", "b c"], no_spaces)
+        assert_fail("expected a rejection")
+    on Rejected as e: assert e.item == "b c"

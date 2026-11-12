@@ -1,0 +1,6 @@
+# Hidden behavioural check of assign_to_handler_name: test blocks that the reference fix passes.
+
+test "names are checked":
+    assert username_message("Ann") == "welcome, ann"
+    assert username_message("al") == "rejected: too short"
+    assert username_message("a b c") == "rejected: contains a space"

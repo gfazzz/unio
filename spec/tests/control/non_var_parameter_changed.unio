@@ -1,0 +1,4 @@
+# expect-error: 4 E0078
+# category: resources
+function add_default(headers as Map[Text, Text], name as Text, value as Text):
+    if not headers.contains(name): headers[name] = value

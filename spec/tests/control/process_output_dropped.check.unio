@@ -1,0 +1,7 @@
+# Hidden behavioural check of process_output_dropped: test blocks that the reference fix passes.
+
+test "without permission to start git the check fails with a process error":
+    try:
+        let clean = try git_is_clean()
+        assert_fail("expected a process error without permission")
+    on ProcessError as e: assert e.program == "git"

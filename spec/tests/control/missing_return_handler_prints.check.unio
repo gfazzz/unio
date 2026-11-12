@@ -1,0 +1,4 @@
+# Hidden behavioural check of missing_return_handler_prints: test blocks that the reference fix passes.
+
+test "a missing config has size 0":
+    assert config_size(Path("no-such-config-for-the-control-set.toml")) == 0

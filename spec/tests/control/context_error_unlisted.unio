@@ -1,0 +1,9 @@
+# expect-error: 8 E0074
+# category: errors
+import std.errors
+import std.files
+
+function load_settings(path as Path) returns Text fails with IoError:
+    let text = try files.read_text(path) on IoError as e:
+        fail errors.context("reading settings", e)
+    return text.trim()

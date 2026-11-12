@@ -1,0 +1,4 @@
+# Hidden behavioural check of empty_function_body: test blocks that the reference fix passes.
+
+test "events are counted":
+    assert handle(["a", "b"]) == 2

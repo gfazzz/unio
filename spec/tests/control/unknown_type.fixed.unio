@@ -1,0 +1,12 @@
+struct Order:
+    id as Int
+    total_cents as Int
+
+function largest(orders as List[Order]) returns Option[Order]:
+    var best as Option[Order] = none
+    for order in orders:
+        match best:
+            case some(current):
+                if order.total_cents > current.total_cents: best = some(order)
+            case none: best = some(order)
+    return best

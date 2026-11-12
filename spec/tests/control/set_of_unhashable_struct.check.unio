@@ -1,0 +1,4 @@
+# Hidden behavioural check of set_of_unhashable_struct: test blocks that the reference fix passes.
+
+test "tags keep their first order":
+    assert unique_tags([["rust", "unio"], ["unio", "ai"]]) == ["rust", "unio", "ai"]

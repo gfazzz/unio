@@ -1,0 +1,8 @@
+# expect-error: 5 E0045
+# category: types
+function median(values as List[Float]) returns Option[Float]:
+    if values.is_empty(): return none
+    let ordered = values.sorted()
+    let middle = ordered.length() / 2
+    if ordered.length() % 2 == 1: return some(ordered[middle])
+    return some((ordered[middle - 1] + ordered[middle]) / 2.0)

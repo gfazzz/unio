@@ -1,0 +1,7 @@
+# Hidden behavioural check of chained_comparison: test blocks that the reference fix passes.
+
+test "working hours are 9 to 17":
+    assert in_working_hours(9)
+    assert in_working_hours(16)
+    assert not in_working_hours(17)
+    assert not in_working_hours(3)

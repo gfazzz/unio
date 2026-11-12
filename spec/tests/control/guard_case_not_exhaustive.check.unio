@@ -1,0 +1,6 @@
+# Hidden behavioural check of guard_case_not_exhaustive: test blocks that the reference fix passes.
+
+test "costs by weight":
+    assert shipping_cost(some(300)) == 4
+    assert shipping_cost(some(1000)) == 6
+    assert shipping_cost(none) == 0

@@ -1,0 +1,3 @@
+function percent(part as Int, whole as Int) returns Int:
+    # Integer percentage, rounded down.
+    return part * 100 / whole

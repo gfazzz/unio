@@ -1,5 +1,9 @@
 # The toolchain is pinned so that builds are reproducible (C-4) and CI does not change with
 # the Rust version a runner happens to have. Update it deliberately, with the lints it brings.
+# rustup reads this file from the working directory, so cargo runs inside compiler/ (CI checks
+# the version with .github/scripts/pinned_toolchain.sh). No targets are listed: each platform
+# builds `unio` and `libunio.a` for itself; the lints of the other targets need
+# `rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin`.
 [toolchain]
 channel = "1.97.0"
 components = ["clippy", "rustfmt"]

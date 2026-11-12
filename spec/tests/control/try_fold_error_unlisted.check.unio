@@ -1,0 +1,10 @@
+# Hidden behavioural check of try_fold_error_unlisted: test blocks that the reference fix passes.
+
+test "expenses add up within the budget":
+    let total = try total_expenses([100, 250]) on OverBudget as e:
+        assert_fail("over budget")
+    assert total == 350
+    try:
+        let over = try total_expenses([600, 600])
+        assert_fail("expected over budget")
+    on OverBudget as e: assert e.spent == 1200

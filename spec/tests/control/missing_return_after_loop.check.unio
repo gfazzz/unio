@@ -1,0 +1,5 @@
+# Hidden behavioural check of missing_return_after_loop: test blocks that the reference fix passes.
+
+test "an index, or -1 when absent":
+    assert find_user_id(["ann", "bob"], "bob") == 1
+    assert find_user_id(["ann"], "zed") == -1

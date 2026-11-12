@@ -1,0 +1,4 @@
+# Hidden behavioural check of empty_interpolation: test blocks that the reference fix passes.
+
+test "a salutation":
+    assert template("Ann") == "Dear Ann,"

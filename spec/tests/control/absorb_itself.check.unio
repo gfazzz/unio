@@ -1,0 +1,8 @@
+# Hidden behavioural check of absorb_itself: test blocks that the reference fix passes.
+
+test "the counts of the day move into the week":
+    var week = Tally(label = "week", counts = [1, 2])
+    var day = Tally(label = "monday", counts = [3])
+    assert merge_daily(week, day) == 3
+    assert week.counts == [1, 2, 3]
+    assert day.counts == []

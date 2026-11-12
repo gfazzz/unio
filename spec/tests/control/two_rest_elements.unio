@@ -1,0 +1,6 @@
+# expect-error: 5 E0034
+# category: style
+function head_and_tail(words as List[Text]) returns Text:
+    match words:
+        case [first, middle..., rest...]: return "{first} and {rest.length()} more"
+        case []: return "nothing"

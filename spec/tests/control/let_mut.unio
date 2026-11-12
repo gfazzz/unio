@@ -1,0 +1,7 @@
+# expect-error: 4 E0012
+# category: style
+function sum_of_squares(values as List[Int]) returns Int:
+    let mut total = 0
+    for value in values:
+        total = total + value * value
+    return total

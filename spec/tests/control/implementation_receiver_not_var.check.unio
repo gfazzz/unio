@@ -1,0 +1,8 @@
+# Hidden behavioural check of implementation_receiver_not_var: test blocks that the reference fix passes.
+
+test "a countdown takes as many steps as it has left":
+    var three = Countdown(left = 3)
+    assert drain(three) == 3
+    assert three.left == 0
+    var none_left = Countdown(left = 0)
+    assert drain(none_left) == 0

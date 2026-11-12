@@ -1,0 +1,7 @@
+# Hidden behavioural check of handler_assigns_fallback: test blocks that the reference fix passes.
+
+test "colors parse, invalid ones are black":
+    assert color_or_black("#ff8000") == 16744448
+    assert color_or_black("#FFFFFF") == 16777215
+    assert color_or_black("red") == 0
+    assert color_or_black("#12345g") == 0

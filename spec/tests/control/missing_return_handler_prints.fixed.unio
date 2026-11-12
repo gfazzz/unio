@@ -1,0 +1,8 @@
+import std.files
+
+function config_size(path as Path) returns Int:
+    try:
+        return (try files.read_text(path)).length()
+    on IoError as e:
+        print_error("config: {e.reason}")
+        return 0

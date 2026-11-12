@@ -1,0 +1,4 @@
+function report(names as List[Text]) returns Int:
+    for name in names:
+        print("- {name}")
+    return names.length()

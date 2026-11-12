@@ -1,0 +1,4 @@
+# Hidden behavioural check of named_argument_first: test blocks that the reference fix passes.
+
+test "a box of hashes":
+    assert box() == ["###", "###"]

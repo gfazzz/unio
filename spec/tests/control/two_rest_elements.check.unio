@@ -1,0 +1,5 @@
+# Hidden behavioural check of two_rest_elements: test blocks that the reference fix passes.
+
+test "first word and the count of the rest":
+    assert head_and_tail(["a", "b", "c"]) == "a and 2 more"
+    assert head_and_tail([]) == "nothing"

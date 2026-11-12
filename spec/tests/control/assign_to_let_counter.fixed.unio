@@ -1,0 +1,5 @@
+function count_vowels(text as Text) returns Int:
+    var count = 0
+    for character in text.to_lower().chars():
+        if "aeiou".contains(character): count = count + 1
+    return count

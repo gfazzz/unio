@@ -1,0 +1,4 @@
+# expect-error: 4 E0045
+# category: types
+function peak(readings as List[Float]) returns Option[Float]:
+    return readings.max()

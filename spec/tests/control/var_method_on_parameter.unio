@@ -1,0 +1,5 @@
+# expect-error: 4 E0078
+# category: resources
+function with_terminator(words as List[Text]) returns List[Text]:
+    words.append(".")
+    return words

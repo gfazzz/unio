@@ -1,0 +1,4 @@
+function first_word(text as Text) returns Text:
+    let words = text.split_whitespace()
+    if words.is_empty(): return ""
+    return words[0]

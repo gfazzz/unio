@@ -1,0 +1,7 @@
+# expect-error: 3 E0032
+# category: style
+function render(rows as List[Text]) returns Text uses io:
+    var text = ""
+    for row in rows:
+        text = text + row + "\n"
+    return text

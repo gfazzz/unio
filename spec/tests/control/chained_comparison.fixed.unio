@@ -1,0 +1,3 @@
+function in_working_hours(hour as Int) returns Bool:
+    let inside = 9 <= hour and hour < 17
+    return inside

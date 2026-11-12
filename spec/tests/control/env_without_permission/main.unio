@@ -1,0 +1,12 @@
+# expect-error: 11 E0085
+# category: resources
+import std.env
+
+function config_path(home as Option[Text]) returns Text:
+    match home:
+        case some(directory): return "{directory}/.config/tool.toml"
+        case none: return "tool.toml"
+
+public function main() returns Int:
+    print(config_path(env.get("HOME")))
+    return 0

@@ -1,0 +1,5 @@
+# expect-error: 5 E0047
+# category: types
+function page_numbers(total_items as Int, page_size as Int) returns List[Int]:
+    let pages = (total_items + page_size - 1) / page_size
+    return range(1, pages + 1)

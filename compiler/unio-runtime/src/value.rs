@@ -703,6 +703,12 @@ impl crate::heap::Measure for Vec<Value> {
     fn measure(&self) -> usize {
         self.capacity() * std::mem::size_of::<Value>()
     }
+
+    fn release(&mut self) {
+        if self.iter().any(owns_values) {
+            release(Pending::Values(std::mem::take(self).into_iter()));
+        }
+    }
 }
 
 impl crate::heap::Measure for Vec<u8> {
@@ -923,6 +929,25 @@ impl crate::heap::Measure for OrderedMap {
         self.entries.capacity() * 2 * std::mem::size_of::<Value>()
             + self.index.capacity() * (std::mem::size_of::<Value>() + 16)
     }
+
+    fn release(&mut self) {
+        // A key is held twice, by its entry and by the index, so both are handed over: the one
+        // dropped last frees the key, and it must not do so by recursion either.
+        if self.index.keys().any(|k| owns_values(&k.0)) {
+            release(Pending::Keys(std::mem::take(&mut self.index).into_keys()));
+        }
+        if self
+            .entries
+            .iter()
+            .flatten()
+            .any(|(k, v)| owns_values(k) || owns_values(v))
+        {
+            release(Pending::Entries(
+                std::mem::take(&mut self.entries).into_iter(),
+                None,
+            ));
+        }
+    }
 }
 
 /// A set that iterates in insertion order.
@@ -969,11 +994,235 @@ impl crate::heap::Measure for OrderedSet {
     fn measure(&self) -> usize {
         self.map.measure()
     }
+
+    fn release(&mut self) {
+        self.map.release();
+    }
+}
+
+// ---------------------------------------------------------------- freeing without recursion
+
+// Dropping a value drops what it holds, and Rust does that by recursion: a chain of a million
+// nested values took a million nested calls of `drop`, and a chain long enough ran out of the
+// native stack and aborted the process instead of ending with a code of the runtime. Here every
+// object that holds values hands them to `release` when it is dropped. Up to `DEEP` levels it
+// frees them by recursion, as before, which keeps the order and the speed of freeing ordinary
+// structures: freeing every level through a list measured about 50% slower on the wide case of
+// bench/free/ with only 3% more instructions, the cost of freeing a parent before its contents.
+// Below that level the contents go to a list that a loop of the frame at that level frees one
+// by one: objects dropped inside the loop only add their contents to the list, so the depth of
+// the stack is bounded by `DEEP` whatever the depth of the structure (RFC 0007). Values that
+// hold no values, and values still shared, are dropped in place. Freeing stays immediate and
+// complete: the loop ends before the outermost `drop` returns, nothing is deferred, and the
+// heap count is exact.
+
+/// The levels of nesting freed by recursion before the loop takes over.
+const DEEP: u32 = 128;
+
+/// The contents of a dropped object, still to be freed.
+enum Pending {
+    One(Option<Value>),
+    Values(std::vec::IntoIter<Value>),
+    Fields(std::vec::IntoIter<(Rc<str>, Value)>),
+    Entries(std::vec::IntoIter<Option<(Value, Value)>>, Option<Value>),
+    Keys(std::collections::hash_map::IntoKeys<Key, usize>),
+}
+
+impl Pending {
+    /// The next value, and whether more may follow.
+    fn next(&mut self) -> Option<(Value, bool)> {
+        match self {
+            Pending::One(value) => value.take().map(|v| (v, false)),
+            Pending::Values(items) => items.next().map(|v| (v, items.len() > 0)),
+            Pending::Fields(items) => items.next().map(|(_, v)| (v, items.len() > 0)),
+            Pending::Keys(keys) => keys.next().map(|k| (k.0, keys.len() > 0)),
+            Pending::Entries(items, spare) => {
+                if let Some(v) = spare.take() {
+                    return Some((v, items.len() > 0));
+                }
+                let (k, v) = items.by_ref().flatten().next()?;
+                *spare = Some(v);
+                Some((k, true))
+            }
+        }
+    }
+}
+
+thread_local! {
+    static DEPTH: Cell<u32> = const { Cell::new(0) };
+    static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
+    static RELEASING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether dropping the value would drop other values: it is the last holder of an object
+/// that contains values. Dropping any other value never reaches [`release`].
+fn owns_values(value: &Value) -> bool {
+    match value {
+        Value::List(r) | Value::Tuple(r) => Rc::strong_count(r) == 1 && !r.is_empty(),
+        Value::Map(r) => Rc::strong_count(r) == 1 && !r.is_empty(),
+        Value::Set(r) => Rc::strong_count(r) == 1 && !r.is_empty(),
+        Value::Struct(r) => Rc::strong_count(r) == 1 && !r.fields.is_empty(),
+        Value::Enum(r) => Rc::strong_count(r) == 1 && !r.fields.is_empty(),
+        Value::Function(r) => Rc::strong_count(r) == 1,
+        Value::Resource(r) => Rc::strong_count(r) == 1,
+        _ => false,
+    }
+}
+
+/// Frees the contents of a dropped object, by recursion up to `DEEP` levels and by a loop
+/// below; see the comment above.
+fn release(work: Pending) {
+    let Ok(depth) = DEPTH.try_with(Cell::get) else {
+        // The thread is ending and its lists are gone: free by recursion as Rust does.
+        drop(work);
+        return;
+    };
+    if depth < DEEP {
+        DEPTH.with(|d| d.set(depth + 1));
+        drop(work);
+        DEPTH.with(|d| d.set(depth));
+        return;
+    }
+    let outer = RELEASING.with(|r| !r.replace(true));
+    PENDING.with(|p| p.borrow_mut().push(work));
+    if !outer {
+        return;
+    }
+    loop {
+        // Take the next value that holds others, dropping in place those that do not; the
+        // borrow ends before the value is dropped, since its drop adds to the list.
+        let next = PENDING.with(|p| {
+            let mut pending = p.borrow_mut();
+            loop {
+                let top = pending.last_mut()?;
+                match top.next() {
+                    Some((value, more)) => {
+                        if !more {
+                            pending.pop();
+                        }
+                        if owns_values(&value) {
+                            return Some(value);
+                        }
+                    }
+                    None => {
+                        pending.pop();
+                    }
+                }
+            }
+        });
+        match next {
+            Some(value) => drop(value),
+            None => break,
+        }
+    }
+    RELEASING.with(|r| r.set(false));
+}
+
+impl Drop for StructValue {
+    fn drop(&mut self) {
+        if self.fields.iter().any(|(_, v)| owns_values(v)) {
+            release(Pending::Fields(
+                std::mem::take(&mut self.fields).into_iter(),
+            ));
+        }
+    }
+}
+
+impl Drop for EnumValue {
+    fn drop(&mut self) {
+        match std::mem::take(&mut self.fields) {
+            Fields::Zero => {}
+            Fields::One([(_, value)]) => {
+                if owns_values(&value) {
+                    release(Pending::One(Some(value)));
+                }
+            }
+            Fields::Many(fields) => {
+                if fields.iter().any(|(_, v)| owns_values(v)) {
+                    release(Pending::Fields(fields.into_iter()));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a chain of `depth` levels of each kind of value that holds values and frees it on
+    /// a thread with a small stack: freeing by recursion overflowed a 8 MiB stack at about
+    /// 100,000 levels of lists and aborted the process (RFC 0007).
+    #[test]
+    fn deep_structures_are_freed_without_recursion() {
+        let freed = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let before = crate::heap::live_bytes();
+                let depth = 1_000_000;
+                let wrappers: [fn(usize, Value) -> Value; 6] = [
+                    |_, v| Value::list(vec![Value::text("item"), v]),
+                    |_, v| Value::tuple(vec![v, Value::Int(1)]),
+                    |i, v| {
+                        Value::variant(
+                            "Chain",
+                            "Link",
+                            vec![("value", Value::Int(i as i64)), ("next", v)],
+                        )
+                    },
+                    |_, v| Value::variant("Option", "some", vec![("value", v)]),
+                    |_, v| Value::record("Node", vec![("next", v), ("name", Value::text("n"))]),
+                    |i, v| {
+                        let mut map = OrderedMap::new();
+                        map.put(Value::Int(i as i64), v);
+                        Value::map(map)
+                    },
+                ];
+                for wrap in wrappers {
+                    let mut chain = Value::Unit;
+                    for i in 0..depth {
+                        chain = wrap(i, chain);
+                    }
+                    drop(chain);
+                    assert_eq!(crate::heap::live_bytes(), before);
+                }
+                // Keys are hashed when they are put, so a key cannot be built a million levels
+                // deep; a set of keys that hold values checks that keys are freed by the loop too.
+                let mut chain = Value::Unit;
+                for i in 0..depth {
+                    let mut set = OrderedSet::new();
+                    set.insert(Value::list(vec![Value::Int(i as i64)]));
+                    set.insert(Value::tuple(vec![Value::text("key"), Value::Int(i as i64)]));
+                    chain = Value::list(vec![Value::set(set), chain]);
+                }
+                drop(chain);
+                assert_eq!(crate::heap::live_bytes(), before);
+            })
+            .unwrap()
+            .join();
+        assert!(freed.is_ok());
+    }
+
+    /// A value that is still shared is not freed with the structure that dropped it.
+    #[test]
+    fn freeing_a_structure_keeps_its_shared_parts() {
+        let shared = Value::list(vec![Value::text("kept"), Value::list(vec![Value::Int(7)])]);
+        let mut outer = Value::Unit;
+        for _ in 0..1000 {
+            outer = Value::list(vec![shared.clone(), outer]);
+        }
+        drop(outer);
+        match &shared {
+            Value::List(items) => {
+                assert_eq!(Rc::strong_count(items), 1);
+                assert_eq!(items.len(), 2);
+                assert!(
+                    matches!(&items[1], Value::List(inner) if matches!(inner[0], Value::Int(7)))
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn text_indexes_characters_not_bytes() {

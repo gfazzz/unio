@@ -1,0 +1,6 @@
+# Hidden behavioural check of condition_not_bool: test blocks that the reference fix passes.
+
+test "error lines are found":
+    assert has_errors(["INFO ok", "ERROR disk full"])
+    assert not has_errors(["INFO ok", "WARN slow"])
+    assert not has_errors(["INFO an ERROR later"])

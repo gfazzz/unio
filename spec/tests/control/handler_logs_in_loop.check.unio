@@ -1,0 +1,5 @@
+# Hidden behavioural check of handler_logs_in_loop: test blocks that the reference fix passes.
+
+test "bad records are skipped":
+    assert sum_valid(["1", "two", "3"]) == 4
+    assert sum_valid([]) == 0

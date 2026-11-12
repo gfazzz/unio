@@ -1,0 +1,4 @@
+# Hidden behavioural check of reserved_uses_clause: test blocks that the reference fix passes.
+
+test "rows become lines":
+    assert render(["a", "b"]) == "a\nb\n"

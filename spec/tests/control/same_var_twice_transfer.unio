@@ -1,0 +1,14 @@
+# expect-error: 14 E0042
+# category: resources
+struct Wallet:
+    owner as Text
+    var cents as Int
+
+function transfer(var source as Wallet, var target as Wallet, cents as Int) returns Bool:
+    if source.cents < cents: return false
+    source.cents = source.cents - cents
+    target.cents = target.cents + cents
+    return true
+
+function pay(var payer as Wallet, var payee as Wallet) returns Bool:
+    return transfer(payer, payer, 500)

@@ -1,0 +1,5 @@
+# Hidden behavioural check of option_without_argument: test blocks that the reference fix passes.
+
+test "a missing timeout defaults to 30 seconds":
+    assert effective_timeout(Config(name = "a", timeout_seconds = none)) == 30
+    assert effective_timeout(Config(name = "b", timeout_seconds = some(5))) == 5

@@ -1,0 +1,15 @@
+# expect-error: 10 E0085
+# category: resources
+import std.process
+
+function branch_name(output as Text) returns Text:
+    let name = output.trim()
+    return "detached" if name.is_empty() else name
+
+public function main() returns Int:
+    let output = try process.run("git", ["branch", "--show-current"]) on ProcessError as e:
+        print_error("git: {e.reason}")
+        return 1
+    if output.status != 0: return output.status
+    print(branch_name(output.stdout))
+    return 0

@@ -1,0 +1,4 @@
+# expect-error: 4 E0007
+# category: style
+function needs_login(path as Text, logged_in as Bool) returns Bool:
+    return path.starts_with("/admin") and !logged_in

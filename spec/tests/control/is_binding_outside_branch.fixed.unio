@@ -1,0 +1,7 @@
+struct User:
+    name as Text
+    nickname as Option[Text]
+
+function display_name(user as User) returns Text:
+    if user.nickname is some(nick): return "{nick} ({user.name})"
+    return user.name

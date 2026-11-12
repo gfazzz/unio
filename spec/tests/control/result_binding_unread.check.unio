@@ -1,0 +1,5 @@
+# Hidden behavioural check of result_binding_unread: test blocks that the reference fix passes.
+
+test "only parsable amounts are added":
+    assert total(["10", " 5 ", "x"]) == 15
+    assert total([]) == 0

@@ -1,0 +1,8 @@
+# expect-error: 6 E0077
+# category: resources
+function retries_left(setting as Option[Int]) returns Int:
+    match setting:
+        case some(count):
+            if count < 0: count = 0
+            return count
+        case none: return 3

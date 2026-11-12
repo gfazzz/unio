@@ -1,0 +1,5 @@
+function shipping_cost(weight as Option[Int]) returns Int:
+    match weight:
+        case some(grams) if grams <= 500: return 4
+        case some(grams): return 4 + (grams - 500) / 250
+        case none: return 0

@@ -1,0 +1,5 @@
+# Hidden behavioural check of core_profile_estimated_call: test blocks that the reference fix passes.
+
+test "the default decoder knows the first digits":
+    assert can_show(default_decoder(), 2)
+    assert not can_show(default_decoder(), 7)

@@ -1,0 +1,9 @@
+function index_by_initial(names as List[Text]) returns Map[Text, List[Text]]:
+    var index as Map[Text, List[Text]] = {}
+    for name in names:
+        if name.is_empty(): continue
+        let initial = name.char_at(0).to_upper()
+        var group = index.get(initial) or []
+        group.append(name)
+        index[initial] = group
+    return index

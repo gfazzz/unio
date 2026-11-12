@@ -1,0 +1,6 @@
+# expect-error: 3 E0071
+# category: types
+function is_sorted(items as List[Order]) returns Bool:
+    for index in range(1, items.length()):
+        if items[index - 1] > items[index]: return false
+    return true

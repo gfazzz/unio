@@ -1,0 +1,7 @@
+# expect-error: 4 E0060
+# category: types
+function first_negative(values as List[Int]) returns Option[Int]:
+    var found = none
+    for value in values:
+        if value < 0 and found.is_none(): found = some(value)
+    return found

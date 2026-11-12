@@ -1,0 +1,10 @@
+error NotANumber:
+    text as Text
+
+function parse_number(text as Text) returns Int fails with NotANumber:
+    match text.trim().to_int():
+        case some(value): return value
+        case none: fail NotANumber(text = text)
+
+function parse_numbers(line as Text) returns List[Int] fails with NotANumber:
+    return try line.split_whitespace().try_map(parse_number)

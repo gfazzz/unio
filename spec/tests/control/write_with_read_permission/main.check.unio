@@ -1,0 +1,4 @@
+# Hidden behavioural check of write_with_read_permission: test blocks that the reference fix passes.
+
+test "rows are rendered as a table":
+    assert render(["a", "b"]) == "| a |\n| b |\n"

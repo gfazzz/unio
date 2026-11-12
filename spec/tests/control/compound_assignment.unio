@@ -1,0 +1,7 @@
+# expect-error: 6 E0012
+# category: style
+function total_score(scores as List[Int]) returns Int:
+    var points = 0
+    for score in scores:
+        points += score
+    return points

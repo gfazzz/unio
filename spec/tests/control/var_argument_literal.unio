@@ -1,0 +1,16 @@
+# expect-error: 15 E0079
+# category: resources
+function sort_in_place(var values as List[Int]):
+    var index = 1
+    while index < values.length():
+        var position = index
+        while position > 0 and values[position - 1] > values[position]:
+            let swap = values[position]
+            values[position] = values[position - 1]
+            values[position - 1] = swap
+            position = position - 1
+        index = index + 1
+
+function sorted_sample() returns List[Int]:
+    sort_in_place([5, 2, 9, 1])
+    return [5, 2, 9, 1]

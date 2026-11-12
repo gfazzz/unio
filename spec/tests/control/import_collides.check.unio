@@ -1,0 +1,5 @@
+# Hidden behavioural check of import_collides: test blocks that the reference fix passes.
+
+test "fields are split on the separator":
+    assert split("a;b;;c", ";") == ["a", "b", "", "c"]
+    assert columns("x;y") == 2

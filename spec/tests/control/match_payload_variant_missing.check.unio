@@ -1,0 +1,6 @@
+# Hidden behavioural check of match_payload_variant_missing: test blocks that the reference fix passes.
+
+test "areas of the three shapes":
+    assert area(Shape.Rectangle(width = 2.0, height = 3.0)) == 6.0
+    assert area(Shape.Triangle(base = 4.0, height = 3.0)) == 6.0
+    assert area(Shape.Circle(radius = 1.0)) == 3.14

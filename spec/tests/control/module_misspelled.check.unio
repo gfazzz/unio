@@ -1,0 +1,4 @@
+# Hidden behavioural check of module_misspelled: test blocks that the reference fix passes.
+
+test "a missing config does not exist":
+    assert not config_exists("no-such-config-file.toml")

@@ -1,0 +1,6 @@
+# Hidden behavioural check of elif_keyword: test blocks that the reference fix passes.
+
+test "temperatures are classified":
+    assert classify(-3) == "freezing"
+    assert classify(10) == "cold"
+    assert classify(20) == "warm"

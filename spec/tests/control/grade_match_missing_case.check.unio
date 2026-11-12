@@ -1,0 +1,7 @@
+# Hidden behavioural check of grade_match_missing_case: test blocks that the reference fix passes.
+
+test "scores map to letters":
+    assert label(95) == "A"
+    assert label(80) == "B"
+    assert label(55) == "C"
+    assert label(10) == "F"

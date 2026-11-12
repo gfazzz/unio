@@ -1,0 +1,7 @@
+# Hidden behavioural check of private_std_field: test blocks that the reference fix passes.
+
+test "an empty report path is rejected before writing":
+    try:
+        let saved = try save_report(Path(""), ["x"])
+        assert_fail("expected an error for an empty path")
+    on IoError as e: assert not e.reason.is_empty()

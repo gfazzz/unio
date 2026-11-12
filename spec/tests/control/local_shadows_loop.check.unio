@@ -1,0 +1,5 @@
+# Hidden behavioural check of local_shadows_loop: test blocks that the reference fix passes.
+
+test "the longest line is measured":
+    assert longest_line("ab\nabcd\nabc") == 4
+    assert longest_line("") == 0

@@ -1,0 +1,14 @@
+from std.text import split
+
+struct Point:
+    x as Int
+    y as Int
+
+function parse_point(text as Text) returns Option[Point]:
+    let parts = split(text, ",")
+    if parts.length() != 2: return none
+    let x = parts[0].trim().to_int()
+    let y = parts[1].trim().to_int()
+    match (x, y):
+        case (some(a), some(b)): return some(Point(x = a, y = b))
+        case _: return none

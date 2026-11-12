@@ -1,0 +1,7 @@
+function running_totals(values as List[Int]) returns List[Int]:
+    var totals as List[Int] = []
+    var sum = 0
+    for value in values:
+        sum = sum + value
+        totals.append(sum)
+    return totals

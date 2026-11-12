@@ -1,0 +1,15 @@
+error Negative:
+    value as Int
+
+function checked_sqrt_floor(value as Int) returns Int fails with Negative:
+    if value < 0: fail Negative(value = value)
+    var root = 0
+    while (root + 1) * (root + 1) <= value:
+        root = root + 1
+    return root
+
+function roots(values as List[Int]) returns List[Int] fails with Negative:
+    var result as List[Int] = []
+    for value in values:
+        result.append(try checked_sqrt_floor(value))
+    return result

@@ -1,0 +1,11 @@
+enum Command:
+    Add
+    List
+    Quit
+
+function parse_command(word as Text) returns Option[Command]:
+    match word.to_lower():
+        case "add": return some(Command.Add)
+        case "list": return some(Command.List)
+        case "quit": return some(Command.Quit)
+        case _: return none

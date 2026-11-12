@@ -1,0 +1,12 @@
+# expect-error: 9 E0012
+# category: style
+import std.files
+
+function read_or_empty(path as Path) returns Text:
+    var text = ""
+    try:
+        text = try files.read_text(path)
+    catch IoError as e:
+        print_error(e.reason)
+        print_error("using an empty text")
+    return text

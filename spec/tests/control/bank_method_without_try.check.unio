@@ -1,0 +1,11 @@
+# Hidden behavioural check of bank_method_without_try: test blocks that the reference fix passes.
+
+test "bills are paid while money lasts":
+    var account = Account(owner = "ann", balance = 100, frozen = false)
+    assert pay_all(account, [30, 90, 50]) == 2
+    assert account.balance == 20
+
+test "a frozen account pays nothing":
+    var account = Account(owner = "bob", balance = 100, frozen = true)
+    assert pay_all(account, [10]) == 0
+    assert account.balance == 100

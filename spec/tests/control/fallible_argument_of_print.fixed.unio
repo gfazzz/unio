@@ -1,0 +1,14 @@
+error Overflow:
+    value as Int
+
+function factorial(n as Int) returns Int fails with Overflow:
+    var result = 1
+    for factor in range(2, n + 1):
+        match result.checked_multiply(factor):
+            case some(product): result = product
+            case none: fail Overflow(value = n)
+    return result
+
+function print_table(limit as Int) fails with Overflow:
+    for n in range(0, limit):
+        print("{n}! = {try factorial(n)}")

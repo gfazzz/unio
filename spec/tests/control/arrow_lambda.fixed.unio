@@ -1,0 +1,3 @@
+function lengths(words as List[Text]) returns List[Int]:
+    let result = words.map(function (word as Text) returns Int: word.length())
+    return result

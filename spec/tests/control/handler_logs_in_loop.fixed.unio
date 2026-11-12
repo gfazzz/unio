@@ -1,0 +1,16 @@
+error BadRecord:
+    line as Int
+
+function parse_record(line as Text, number as Int) returns Int fails with BadRecord:
+    match line.trim().to_int():
+        case some(value): return value
+        case none: fail BadRecord(line = number)
+
+function sum_valid(lines as List[Text]) returns Int:
+    var sum = 0
+    for number, line in lines.enumerate(start = 1):
+        let value = try parse_record(line, number) on BadRecord as e:
+            print_error("skipping line {e.line}")
+            continue
+        sum = sum + value
+    return sum

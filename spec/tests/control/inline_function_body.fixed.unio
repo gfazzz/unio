@@ -1,0 +1,5 @@
+function double(n as Int) returns Int:
+    return n * 2
+
+function doubled(values as List[Int]) returns List[Int]:
+    return values.map(double)

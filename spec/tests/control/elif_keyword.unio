@@ -1,0 +1,6 @@
+# expect-error: 5 E0012
+# category: style
+function classify(celsius as Int) returns Text:
+    if celsius < 0: return "freezing"
+    elif celsius < 15: return "cold"
+    return "warm"

@@ -1,0 +1,16 @@
+# expect-error: 13 E0085
+# category: resources
+import std.files
+
+function render(rows as List[Text]) returns Text:
+    var text = ""
+    for row in rows:
+        text = text + "| {row} |\n"
+    return text
+
+public function main() returns Int:
+    let rows = ["alpha", "beta"]
+    try files.write_text(Path("out/table.md"), render(rows)) on IoError as e:
+        print_error("table: {e.reason}")
+        return 1
+    return 0

@@ -1,0 +1,5 @@
+# Hidden behavioural check of effect_through_callback: test blocks that the reference fix passes.
+
+test "words of every item are counted":
+    assert apply_all(["a b", "c"], word_count) == 3
+    assert main() == 0

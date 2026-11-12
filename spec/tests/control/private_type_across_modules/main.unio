@@ -1,0 +1,11 @@
+# expect-error: 6 E0057
+# category: types
+import shapes
+
+function describe(side as Int) returns Text:
+    let square as shapes.Square = shapes.square(side)
+    return "square of area {shapes.area(square)}"
+
+public function main() returns Int:
+    print(describe(4))
+    return 0

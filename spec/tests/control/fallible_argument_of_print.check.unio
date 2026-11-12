@@ -1,0 +1,10 @@
+# Hidden behavioural check of fallible_argument_of_print: test blocks that the reference fix passes.
+
+test "factorials and their overflow":
+    let ten = try factorial(10) on Overflow as e:
+        assert_fail("overflow")
+    assert ten == 3628800
+    try:
+        let big = try factorial(30)
+        assert_fail("expected an overflow")
+    on Overflow as e: assert e.value == 30

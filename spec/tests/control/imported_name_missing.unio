@@ -1,0 +1,6 @@
+# expect-error: 3 E0054
+# category: types
+from std.text import join_all
+
+function csv_row(cells as List[Text]) returns Text:
+    return join_all(cells, ",")

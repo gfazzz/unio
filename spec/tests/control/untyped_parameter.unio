@@ -1,0 +1,7 @@
+# expect-error: 3 E0012
+# category: style
+function sum_of_squares(values) returns Int:
+    var total = 0
+    for value in values:
+        total = total + value * value
+    return total

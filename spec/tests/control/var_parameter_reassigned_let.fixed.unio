@@ -1,0 +1,10 @@
+function trim_all(var lines as List[Text]):
+    var trimmed as List[Text] = []
+    for line in lines:
+        trimmed.append(line.trim())
+    lines = trimmed
+
+function cleaned(input as List[Text]) returns List[Text]:
+    var lines = input
+    trim_all(lines)
+    return lines

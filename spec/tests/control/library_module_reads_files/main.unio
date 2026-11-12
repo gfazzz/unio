@@ -1,0 +1,5 @@
+import stats
+
+public function main() returns Int:
+    print("{stats.mean([2, 4, 9])}")
+    return 0

@@ -1,0 +1,5 @@
+# expect-error: 4 E0012
+# category: style
+function lengths(words as List[Text]) returns List[Int]:
+    let result = words.map(word => word.length())
+    return result

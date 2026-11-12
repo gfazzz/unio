@@ -1,0 +1,4 @@
+# Hidden behavioural check of generic_display_constraint: test blocks that the reference fix passes.
+
+test "stops become bullets":
+    assert route([Coordinate(lat = 1.5, lon = 2.0)]) == "* (1.5, 2.0)\n"

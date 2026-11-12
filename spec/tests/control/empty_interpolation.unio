@@ -1,0 +1,4 @@
+# expect-error: 4 E0011
+# category: style
+function template(name as Text) returns Text:
+    return "Dear {},"

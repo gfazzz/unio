@@ -1,0 +1,7 @@
+# Hidden behavioural check of self_changed_without_var: test blocks that the reference fix passes.
+
+test "laps add up":
+    var watch = Stopwatch(laps = [])
+    watch.lap(100)
+    watch.lap(250)
+    assert watch.total() == 350

@@ -1,0 +1,19 @@
+# expect-error: 17 E0075
+# category: errors
+error BadColor:
+    text as Text
+
+function parse_hex_color(text as Text) returns Int fails with BadColor:
+    if not text.starts_with("#") or text.length() != 7: fail BadColor(text = text)
+    var value = 0
+    for character in text.slice(1, 7).to_lower().chars():
+        match "0123456789abcdef".index_of(character):
+            case some(digit): value = value * 16 + digit
+            case none: fail BadColor(text = text)
+    return value
+
+function color_or_black(text as Text) returns Int:
+    var color = 0
+    color = try parse_hex_color(text) on BadColor as e:
+        color = 0
+    return color

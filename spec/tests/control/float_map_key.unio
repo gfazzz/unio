@@ -1,0 +1,8 @@
+# expect-error: 4 E0045
+# category: types
+function histogram(samples as List[Float]) returns Map[OrderedFloat, Int]:
+    var counts as Map[Float, Int] = {}
+    for sample in samples:
+        let key = sample.total_order()
+        counts[key] = (counts.get(key) or 0) + 1
+    return counts

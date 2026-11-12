@@ -1,0 +1,2 @@
+function weekdays() returns List[Text]:
+    return ["mon", "tue", "wed", "thu", "fri"]

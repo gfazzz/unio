@@ -1,0 +1,5 @@
+# Hidden behavioural check of range_length: test blocks that the reference fix passes.
+
+test "the bar fills from the left":
+    assert progress_bar(2, 5) == "[##...] 2/5"
+    assert progress_bar(0, 3) == "[...] 0/3"

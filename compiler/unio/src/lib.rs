@@ -14,6 +14,7 @@ pub mod format;
 pub mod interp;
 pub mod lexer;
 mod lower;
+pub mod lsp;
 pub mod native;
 pub mod outline;
 pub mod parser;

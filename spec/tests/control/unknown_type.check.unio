@@ -1,0 +1,6 @@
+# Hidden behavioural check of unknown_type: test blocks that the reference fix passes.
+
+test "the largest order":
+    let orders = [Order(id = 1, total_cents = 500), Order(id = 2, total_cents = 900)]
+    assert largest(orders)?.id == some(2)
+    assert largest([]) == none

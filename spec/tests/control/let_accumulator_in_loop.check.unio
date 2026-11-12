@@ -1,0 +1,5 @@
+# Hidden behavioural check of let_accumulator_in_loop: test blocks that the reference fix passes.
+
+test "running totals":
+    assert running_totals([1, 2, 3]) == [1, 3, 6]
+    assert running_totals([]) == []

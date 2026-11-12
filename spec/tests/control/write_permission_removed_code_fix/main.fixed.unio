@@ -1,0 +1,15 @@
+import std.args
+import std.files
+
+function summarize(text as Text) returns Text:
+    let lines = text.lines()
+    return "{lines.length()} lines, {text.length()} characters"
+
+public function main() returns Int:
+    let arguments = args.list()
+    if arguments.is_empty(): return 2
+    let text = try files.read_text(Path(arguments[0])) on IoError as e:
+        print_error(e.reason)
+        return 1
+    print(summarize(text))
+    return 0

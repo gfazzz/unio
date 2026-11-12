@@ -1,0 +1,10 @@
+import std.files
+
+function read_or_empty(path as Path) returns Text:
+    var text = ""
+    try:
+        text = try files.read_text(path)
+    on IoError as e:
+        print_error(e.reason)
+        print_error("using an empty text")
+    return text

@@ -1,0 +1,5 @@
+# Hidden behavioural check of interface_method_missing: test blocks that the reference fix passes.
+
+test "areas add up and the shape has a name":
+    assert total_area([Square(side = 1.0), Square(side = 2.0)]) == 5.0
+    assert Square(side = 1.0).name() == "square"

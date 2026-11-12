@@ -1,0 +1,11 @@
+error Empty:
+    field as Text
+
+function first_char(text as Text) returns Text fails with Empty:
+    if text.is_empty(): fail Empty(field = "text")
+    return text.slice(0, 1)
+
+function initial(name as Text) returns Text:
+    let letter = try first_char(name) on Empty as e:
+        return "?"
+    return letter.to_upper()

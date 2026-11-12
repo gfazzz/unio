@@ -1,0 +1,7 @@
+# Hidden behavioural check of display_twice: test blocks that the reference fix passes.
+
+test "money is shown with two decimals":
+    assert receipt([Money(cents = 1999, currency = "EUR"), Money(cents = 5, currency = "USD")]) == [
+        "- 19.99 EUR",
+        "- 0.05 USD",
+    ]

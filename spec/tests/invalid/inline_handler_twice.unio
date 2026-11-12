@@ -1,0 +1,10 @@
+# expect-error: 8
+function g() returns Int fails with IoError:
+    return 1
+
+function f() returns Int:
+    let x = try g() on IoError:
+        return 0
+    on IoError:
+        return 1
+    return x

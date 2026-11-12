@@ -1,0 +1,4 @@
+import stats
+
+public function summary(values as List[Int]) returns Text:
+    return "total {stats.total(values)}, mean {stats.mean(values)}"

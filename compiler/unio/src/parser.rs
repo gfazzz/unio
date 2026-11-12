@@ -120,6 +120,18 @@ impl<'a> Parser<'a> {
     }
 
     fn expected(&mut self, what: Msg) -> Failed {
+        if let Some((end, span)) = self.handler_end {
+            if end == self.pos && self.inline_handlers > 0 {
+                // Something other than the end of the statement follows an inline handler:
+                // inside parentheses, brackets or arguments, for example (E0024).
+                self.report(Diagnostic::error(
+                    "E0024",
+                    span,
+                    catalog::handler_not_last(),
+                ));
+                return Failed;
+            }
+        }
         let token = self.peek();
         let message = catalog::expected(&what, &token.describe());
         let mut diagnostic = Diagnostic::error("E0012", token.span, message);
@@ -741,8 +753,14 @@ impl<'a> Parser<'a> {
         }
         self.bump();
         self.nested(|p| {
+            let reported = p.diagnostics.len();
             let statements = p.members(|p| p.statement());
             if statements.is_empty() {
+                if p.speculating == 0 && p.diagnostics.len() > reported {
+                    // The block had statements, and their error has been reported: one
+                    // mistake gives one message.
+                    return Ok(statements);
+                }
                 return Err(p.expected(catalog::a_statement()));
             }
             Ok(statements)
@@ -931,7 +949,28 @@ impl<'a> Parser<'a> {
                 return Err(self.expected(catalog::end_of_line()));
             }
             self.bump();
+            if *self.kind() != Kind::Newline {
+                // The handled statement keeps a block (grammar section D, E0024).
+                let span = handler_span.unwrap_or(self.peek().span);
+                self.report(Diagnostic::error(
+                    "E0024",
+                    span,
+                    catalog::handler_needs_block(),
+                ));
+                return Err(Failed);
+            }
             let handler = self.block()?;
+            if self.at_kw("on") {
+                // A second handler, as `try:` has them, is a second inline handler of the
+                // statement (E0024); it is skipped with its block.
+                let span = self.peek().span;
+                self.report(Diagnostic::error(
+                    "E0024",
+                    span,
+                    catalog::one_inline_handler(),
+                ));
+                self.sync_line();
+            }
             return Ok(StatementKind::Simple {
                 statement,
                 handler: Some(handler),

@@ -1,0 +1,4 @@
+# Hidden behavioural check of lambda_without_types: test blocks that the reference fix passes.
+
+test "messages are shouted":
+    assert announce(["hi", "stop"]) == ["HI!", "STOP!"]

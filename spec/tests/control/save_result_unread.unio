@@ -1,0 +1,22 @@
+# expect-error: 20 E0043
+# category: errors
+error DiskFull:
+    needed as Int
+
+struct Disk:
+    var free as Int
+    var files as List[Text]
+
+extend Disk:
+    function save(var self, name as Text, size as Int) returns Result[Int, DiskFull]:
+        if size > self.free: return error(DiskFull(needed = size))
+        self.free = self.free - size
+        self.files.append(name)
+        return ok(self.free)
+
+function save_backups(var disk as Disk, names as List[Text], size as Int) returns Int:
+    var saved = 0
+    for name in names:
+        let result = disk.save(name, size)
+        saved = saved + 1
+    return saved

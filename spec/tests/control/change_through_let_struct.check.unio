@@ -1,0 +1,6 @@
+# Hidden behavioural check of change_through_let_struct: test blocks that the reference fix passes.
+
+test "a purchase is added to the spending":
+    let budget = Budget(limit = 100, spent = 20)
+    assert after_purchase(budget, 30).spent == 50
+    assert budget.spent == 20

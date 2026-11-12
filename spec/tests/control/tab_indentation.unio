@@ -1,0 +1,5 @@
+# expect-error: 5 E0001
+# category: style
+function shipping_cost(weight as Int) returns Int:
+    if weight > 10: return 15
+	return 5

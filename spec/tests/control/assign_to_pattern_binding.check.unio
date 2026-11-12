@@ -1,0 +1,6 @@
+# Hidden behavioural check of assign_to_pattern_binding: test blocks that the reference fix passes.
+
+test "negative retries become zero":
+    assert retries_left(some(-2)) == 0
+    assert retries_left(some(5)) == 5
+    assert retries_left(none) == 3

@@ -1,0 +1,5 @@
+# Hidden behavioural check of connection_let_instead_of_using: test blocks that the reference fix passes.
+
+test "the bytes of every message are counted":
+    assert broadcast("example.org", ["hi", "there"]) == 7
+    assert broadcast("example.org", []) == 0
