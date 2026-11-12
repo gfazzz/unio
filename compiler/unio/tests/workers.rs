@@ -388,8 +388,7 @@ fn the_tools_refuse_a_weaker_sandbox_on_windows_unless_the_operator_allows_it() 
         if args[0] == "check" {
             assert_eq!(output.status.code(), Some(1), "{}", all(&output));
             assert!(
-                text(&output.stdout).contains("E0088")
-                    && text(&output.stdout).contains("allow_weaker"),
+                all(&output).contains("E0088") && all(&output).contains("allow_weaker"),
                 "{}",
                 all(&output)
             );
