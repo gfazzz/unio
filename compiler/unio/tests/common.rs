@@ -47,9 +47,20 @@ pub fn allow_weaker_on_windows(command: &mut std::process::Command) {
 /// A policy file that only allows the weaker sandbox.
 #[allow(dead_code)]
 pub fn weaker_policy() -> PathBuf {
-    let policy = std::env::temp_dir().join(format!("unio-weaker-{}.toml", std::process::id()));
-    fs::write(&policy, "allow_weaker = true\n").unwrap();
-    policy
+    // Written once per test process and put in place by a rename: tests run in parallel, and
+    // rewriting the file for each of them let a `unio` started by another test read it while
+    // it was empty, a policy without `allow_weaker` (code 103 on Windows).
+    static POLICY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    POLICY
+        .get_or_init(|| {
+            let dir = std::env::temp_dir();
+            let policy = dir.join(format!("unio-weaker-{}.toml", std::process::id()));
+            let partial = dir.join(format!("unio-weaker-{}.toml.partial", std::process::id()));
+            fs::write(&partial, "allow_weaker = true\n").unwrap();
+            fs::rename(&partial, &policy).unwrap();
+            policy
+        })
+        .clone()
 }
 
 /// The resources of the programs of the reserve for `release` (C-17): `Log` builds 2,000 texts
