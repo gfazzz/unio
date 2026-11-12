@@ -65,7 +65,8 @@ PINS = {
         "xcode": "/Applications/Xcode_26.6.app",
         "xcode_version": "Xcode 26.6; Build version 17F113",
         "sdk": "26.5",
-        "record": "aarch64-apple-macosx11.0.0; clang: Apple clang version *; sdk: macOS 26.5",
+        # Read from CI run 43285316778 (image macos-26-arm64 20261102.0473.1).
+        "record": "aarch64-apple-macosx11.0.0; clang: Apple clang version 21.0.0 (clang-2100.1.1.101); sdk: macOS 26.5",
     },
     "windows-x86_64": {
         "runner": "windows-2025-vs2026",
@@ -73,7 +74,8 @@ PINS = {
         # Visual Studio 2026 on the image as a fixed component, and the Windows SDK 10.0.26100.0.
         "msvc": "14.44",
         "sdk": "10.0.26100.0",
-        "record": "x86_64-pc-windows-msvc; link.exe: MSVC 14.44.*; sdk: Windows 10.0.26100.0",
+        # Read from CI run 43285316778 (image win25-vs2026 20261103.298.1).
+        "record": "x86_64-pc-windows-msvc; link.exe: MSVC 14.44.35207; sdk: Windows 10.0.26100.0",
     },
 }
 
