@@ -1,0 +1,7 @@
+[package]
+name = "control"
+version = "0.1.0"
+
+[permissions]
+files.read = ["$CWD/data/**"]
+files.write = ["$CWD/data/**"]
