@@ -677,4 +677,19 @@ jobs:
           echo "first runner:";  cat first/TOOLCHAIN first/SHA256SUMS
           echo "second runner:"; cat second/TOOLCHAIN second/SHA256SUMS
           diff first/TOOLCHAIN second/TOOLCHAIN
-          diff first/SHA256SUMS second/SHA256SUMS
+          if ! diff first/SHA256SUMS second/SHA256SUMS; then
+            # What differs, so that the source of the difference can be found from the log.
+            for f in bin/unio lib/unio/libunio.a bin/unio.exe; do
+              [ -f "first/$f" ] && [ -f "second/$f" ] || continue
+              cmp -s "first/$f" "second/$f" && continue
+              echo "== $f: $(cmp -l "first/$f" "second/$f" | wc -l) bytes differ"
+              cmp -l "first/$f" "second/$f" | head -5
+              if command -v otool >/dev/null; then
+                diff <(otool -l "first/$f") <(otool -l "second/$f") | head -20
+              fi
+              if command -v strings >/dev/null; then
+                diff <(strings -a "first/$f" | sort -u) <(strings -a "second/$f" | sort -u) | head -40
+              fi
+            done
+            exit 1
+          fi
