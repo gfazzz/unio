@@ -528,6 +528,10 @@ jobs:
           sum256 "bin/unio$x" "lib/unio/$lib" "../probe-second/a/b/wc$x" | sed 's# \.\./probe-second/a/b/# probe/#' > SHA256SUMS
       # Both runners share the home directory and the image, so a path of either that reached
       # the artifacts the same way on both would not show in the comparison: look for them.
+      # One prefix is not of this machine: the compiler_builtins that rustup ships for macOS was
+      # built by the Rust project's CI in /Users/runner/work/rust/rust, which the macos runner's
+      # home happens to begin (run 43415324553). Those strings are the same bytes on every
+      # machine, so they are left out; any other match fails.
       - name: No path of the build machine in unio, the runtime library, or the executable
         run: |
           set -eu
@@ -543,10 +547,10 @@ jobs:
           found=0
           for needle in "$@"; do
             for file in $files; do
-              if grep -a -q -i -F -e "$needle" "$file"; then
+              if LC_ALL=C tr -c '[:print:]' '\n' < "$file" | grep -i -F -e "$needle" | grep -v -F -e /work/rust/rust/ | grep -q .; then
                 echo "::error::$file holds the path $needle"
               # The strings that hold it, so that the source of the path can be found.
-              if command -v strings >/dev/null; then strings -a "$file" | grep -i -F -e "$needle" | sort | uniq -c | sort -rn | head -20; fi
+              if command -v strings >/dev/null; then strings -a "$file" | grep -i -F -e "$needle" | grep -v -F -e /work/rust/rust/ | sort | uniq -c | sort -rn | head -20; fi
                 found=1
               fi
             done
