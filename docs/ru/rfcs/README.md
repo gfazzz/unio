@@ -31,3 +31,4 @@ RFC (request for comments) — способ изменить синтаксис,
 | [0008](0008-checking-the-manifest.md) | `unio check` проверяет манифест (E0088) | accepted (2026-11-12; реализовано) |
 | [0009](0009-clock-and-randomness-as-derived-effects.md) | Часы и случайность как выводимые эффекты | accepted (2026-11-13; реализовано) |
 | [0010](0010-a-hard-heap-limit.md) | Жёсткий лимит кучи на байты, которые запрашивает программа | accepted (2026-11-13; реализовано) |
+| [0011](0011-no-process-creation-below-children-on-macos.md) | В macOS при пределе числа процессов потомки программы не запускают процессов | accepted (2026-11-13; реализовано; тесты macOS ждут CI) |

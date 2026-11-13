@@ -8,9 +8,9 @@
 //! the worker tries each operation with plain system calls after its sandbox applies, past the
 //! compiler, and reports whether it was allowed.
 //!
-//! On Windows the worker has a Job Object only (memory, one process); the file system and the
-//! network are not restricted there yet, so only the limits, the environment, and processes
-//! are tested there.
+//! On Windows the worker runs in an AppContainer of its own (files, no network) and a Job
+//! Object (memory, one process); the tests of links, of the writer process, and of the signals
+//! of Unix are not run there.
 
 // The helpers of the file-system tests are not used on Windows.
 #![cfg_attr(windows, allow(dead_code))]

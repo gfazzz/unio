@@ -125,7 +125,7 @@ test "prefixes are compared by whole names":
     assert not starts_with(Path("/a"), Path("."))
     assert starts_with(Path("link/../x"), Path("link"))
     assert relative_to(Path("a/b"), Path("a/b")) == some(Path("."))
-    assert relative_to(Path("a/b"), Path(".")) == some(Path("a/b"))
+    assert relative_to(Path("a/b"), Path(".")) == some(Path("a").join("b"))
     assert relative_to(Path("/x/y/z"), Path("/x")) == some(Path("y").join("z"))
 
 test "the anchors of each platform are not under the current directory":

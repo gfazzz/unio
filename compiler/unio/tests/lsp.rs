@@ -62,12 +62,7 @@ impl Project {
     }
 
     fn policy(&self, body: &str) -> PathBuf {
-        let weaker = if cfg!(windows) {
-            "allow_weaker = true\n"
-        } else {
-            ""
-        };
-        self.write("policy.toml", &format!("{weaker}{body}"))
+        self.write("policy.toml", body)
     }
 
     /// `unio lsp` in the package, with the home directory of the project.

@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+# R-7a, SB-8, SB-15: a test whose prerequisite is missing (python3, a C compiler, a machine for
+# which native executables are made, rustc) fails here instead of passing without running its
+# body (`missing_prerequisite` in compiler/unio/tests/common.rs). The jobs that run the tests
+# install the prerequisites in the step "Prerequisites of the tests".
+env:
+  UNIO_REQUIRE_PREREQUISITES: "1"
+
 # Plan section 12, release condition 3: every job runs on a named image, not on a -latest label
 # that moves to another system, and the jobs that build or link select the C compiler, linker,
 # and SDK pinned in .github/scripts/expected_toolchain.py (compiler/README.md, "Pinned linkers
@@ -176,6 +183,22 @@ jobs:
         run: |
           python=$(command -v python3 || command -v python)
           "$python" ../.github/scripts/expected_toolchain.py select
+      # The prerequisites of the tests under UNIO_REQUIRE_PREREQUISITES=1: python3 for the
+      # tests of leaving the process group, and the C compiler that the pin selected above
+      # (CC on Linux, the pinned Xcode on macOS, MSVC on Windows) for the C helpers and the link.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Prerequisites of the tests (python3, a C compiler)
+        shell: bash
+        run: |
+          set -eu
+          python=$(command -v python3 || command -v python)
+          "$python" --version
+          if [ "$RUNNER_OS" != Windows ]; then
+            command -v python3
+            "${CC:-cc}" --version
+          fi
       - name: Code generation for every target
         run: cargo test --release -p unio --lib 'native::'
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
@@ -219,6 +242,22 @@ jobs:
         run: |
           python=$(command -v python3 || command -v python)
           "$python" ../.github/scripts/expected_toolchain.py select
+      # The prerequisites of the tests under UNIO_REQUIRE_PREREQUISITES=1: python3 for the
+      # tests of leaving the process group, and the C compiler that the pin selected above
+      # (CC on Linux, the pinned Xcode on macOS, MSVC on Windows) for the C helpers and the link.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Prerequisites of the tests (python3, a C compiler)
+        shell: bash
+        run: |
+          set -eu
+          python=$(command -v python3 || command -v python)
+          "$python" --version
+          if [ "$RUNNER_OS" != Windows ]; then
+            command -v python3
+            "${CC:-cc}" --version
+          fi
       - name: Formatting
         run: cargo fmt --check
       - name: Lints
@@ -233,8 +272,7 @@ jobs:
         run: cargo test
       - name: Formatter speed (T-3, release build)
         run: cargo test --release --test format thousand
-      # Check A of R-10 (plan section 12, condition 2); on Windows the test acts as the operator
-      # that allows the weaker sandbox, as the other tests do (tests/common.rs).
+      # Check A of R-10 (plan section 12, condition 2), with the full sandbox on every system.
       - name: Control set yields the expected diagnostics (R-10)
         run: cargo test --release -p unio --test control
       # Linux x86-64, macOS on AArch64 (macos-26), Windows x86-64 with the pinned MSVC toolset
@@ -258,7 +296,8 @@ jobs:
   release:
     # Plan section 12, release condition 1: the release build in the installed layout of
     # .github/scripts/release_build.sh, kept for the jobs below: `install` runs it where there is
-    # no checkout, and `reproducible` builds it again elsewhere and compares the bytes.
+    # no checkout, and `reproducible` builds it again elsewhere and compares the bytes. Every
+    # platform where 0.1 ships (R-8): Linux x86-64, Linux arm64, macOS arm64, Windows x86-64.
     name: release build
     # R-7a: no release while a test of the sandbox suites SB-8 and SB-15 fails on any of the four
     # platforms (the jobs `compiler` and `native-linux-arm` run them), and R-8: no release while
@@ -267,13 +306,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      # rustup alone, when the image has none (ubuntu-24.04-arm), as in native-linux-arm.
+      - name: Rust toolchain, when the runner image has none
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         run: sh .github/scripts/pinned_toolchain.sh
       - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
@@ -305,30 +351,47 @@ jobs:
           "$unio" key new ci-run --dir "$RUNNER_TEMP/ci-run-key"
           cd "$prefix"
           files=$(find bin lib share -type f | sort)
-          subject="unio-${{ runner.os }}-ci-run-${{ github.run_id }}"
+          subject="unio-${{ runner.os }}-${{ runner.arch }}-ci-run-${{ github.run_id }}"
           "$unio" release sign --key "$RUNNER_TEMP/ci-run-key/ci-run.key" --subject "$subject" --sequence "${{ github.run_number }}" --out RELEASE-CI-TEST $files
           "$unio" release verify RELEASE-CI-TEST --public "$RUNNER_TEMP/ci-run-key/ci-run.pub" --subject "$subject"
           cp "$RUNNER_TEMP/ci-run-key/ci-run.pub" RELEASE-CI-TEST.pub
           rm -rf "$RUNNER_TEMP/ci-run-key"
-      - name: Executable of a reference program and the hashes of the build
-        if: runner.os == 'Linux'
+      # Plan section 12, release condition 2, on Windows: without /Brepro link.exe writes the
+      # link time into unio.exe (.github/scripts/release_build.sh; tests/release_build.rs).
+      - name: The release flags pass /Brepro to link.exe
+        if: runner.os == 'Windows'
         run: |
+          flags=$(sh .github/scripts/release_build.sh --print-rustflags)
+          echo "RUSTFLAGS of the release build: $flags"
+          case " $flags " in
+            *" -C link-arg=-Brepro "*) ;;
+            *) echo "::error::the release build of Windows does not pass /Brepro to link.exe"; exit 1 ;;
+          esac
+      # For the job `reproducible`, on every platform.
+      - name: Executable of a reference program and the hashes of the build
+        run: |
+          # sha256sum of Git Bash marks binary files with *: one format on every system.
+          sum256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi | sed 's/ \*/  /'; }
+          x=; lib=libunio.a
+          if [ "$RUNNER_OS" = Windows ]; then x=.exe; lib=unio.lib; fi
           mkdir -p "$RUNNER_TEMP/probe"
           cp examples/wc.unio "$RUNNER_TEMP/probe/"
           cd "$RUNNER_TEMP/probe"
-          "$RUNNER_TEMP/unio-install/bin/unio" build --release wc.unio -o wc
+          "$RUNNER_TEMP/unio-install/bin/unio" build --release wc.unio -o "wc$x"
           "$RUNNER_TEMP/unio-install/bin/unio" build --print-toolchain > "$RUNNER_TEMP/unio-install/TOOLCHAIN"
           cd "$RUNNER_TEMP/unio-install"
-          sha256sum bin/unio lib/unio/libunio.a ../probe/wc | sed 's# \.\./probe/# probe/#' > SHA256SUMS
+          sum256 "bin/unio$x" "lib/unio/$lib" "../probe/wc$x" | sed 's# \.\./probe/# probe/#' > SHA256SUMS
           cat TOOLCHAIN SHA256SUMS
+      # One artifact per platform: unio-Linux-X64, unio-Linux-ARM64, unio-macOS-ARM64,
+      # unio-Windows-X64.
       - uses: actions/upload-artifact@v4
         with:
-          name: unio-${{ runner.os }}
+          name: unio-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/unio-install
           if-no-files-found: error
-      # The pins for the job `install`, which has no checkout.
+      # The pins for the job `install`, which has no checkout: one copy, from Linux x86-64.
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         with:
           name: toolchain-pins
           path: .github/scripts/expected_toolchain.py
@@ -337,14 +400,14 @@ jobs:
   install:
     # Plan section 12, release condition 1: the installed unio, with no checkout of the
     # repository on the machine and no variable of Unio, checks, formats, runs, tests, and
-    # builds a program written in an empty directory, and the executable runs. On Windows CI
-    # allows the weaker sandbox as the operator, as in the other jobs (SB-5, SB-10).
+    # builds a program written in an empty directory, and the executable runs, under the full
+    # sandbox of every system, on Windows its AppContainer (SB-5, SB-10).
     name: installed unio
     needs: release
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26, windows-2025-vs2026]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -352,7 +415,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: unio-${{ runner.os }}
+          name: unio-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/prefix
       # The pins alone, not a checkout: the same linker and SDK as in the job `release`.
       - uses: actions/download-artifact@v4
@@ -373,11 +436,6 @@ jobs:
           # No checkout: this job never checks the repository out.
           test ! -e "$GITHUB_WORKSPACE/stdlib"
           export PATH="$PWD/prefix/bin:$PATH"
-          if [ "$RUNNER_OS" = Windows ]; then
-            # The operator's policy allows the weaker sandbox, for the tool and the executable.
-            printf 'allow_weaker = true\n' > policy.toml
-            export UNIO_POLICY="$PWD/policy.toml"
-          fi
           mkdir work && cd work
           printf '%s\n' \
             '## The program of the installation check: it greets with a sum.' \
@@ -413,13 +471,20 @@ jobs:
           "$python" "$RUNNER_TEMP/pins/expected_toolchain.py" check "$RUNNER_TEMP/prefix/bin/unio"
 
   reproducible:
-    # Plan section 12, release condition 2: a second runner builds the release again from the
-    # same commit and lock file, in another directory and with another CARGO_HOME, and the
-    # bytes of unio, libunio.a, and an executable of `unio build` are compared with those of the
-    # job `release` on Linux x86-64 (C-4, R-6).
+    # Plan section 12, release condition 2: a second runner of the same image builds the release
+    # again from the same commit and lock file, in another directory and with another
+    # CARGO_HOME, and the bytes of unio, libunio.a, and an executable of `unio build` are
+    # compared with those of the job `release` on the same platform (C-4, R-6), on every
+    # platform where 0.1 ships. On Windows release_build.sh links unio.exe with /Brepro, so
+    # that the PE header and the debug directory hold a hash of the content and not the link
+    # time; the PDB stays in target/ and is not part of the release.
     name: independent reproducible build
     needs: release
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, windows-2025-vs2026]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -429,8 +494,15 @@ jobs:
           path: elsewhere/checkout
       - uses: actions/download-artifact@v4
         with:
-          name: unio-Linux
+          name: unio-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/first
+      # rustup alone, when the image has none (ubuntu-24.04-arm), as in native-linux-arm.
+      - name: Rust toolchain, when the runner image has none
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         run: sh elsewhere/checkout/.github/scripts/pinned_toolchain.sh
       - name: The pinned linker and SDK (.github/scripts/expected_toolchain.py)
@@ -440,15 +512,43 @@ jobs:
           "$python" elsewhere/checkout/.github/scripts/expected_toolchain.py select
       - name: The release built again in another directory, with another CARGO_HOME
         run: |
+          # sha256sum of Git Bash marks binary files with *: one format on every system.
+          sum256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi | sed 's/ \*/  /'; }
+          x=; lib=libunio.a
+          if [ "$RUNNER_OS" = Windows ]; then x=.exe; lib=unio.lib; fi
           mkdir -p "$RUNNER_TEMP/cargo-home"
           CARGO_HOME="$RUNNER_TEMP/cargo-home" sh elsewhere/checkout/.github/scripts/release_build.sh "$RUNNER_TEMP/second"
           mkdir -p "$RUNNER_TEMP/probe-second/a/b"
           cp elsewhere/checkout/examples/wc.unio "$RUNNER_TEMP/probe-second/a/b/"
           cd "$RUNNER_TEMP/probe-second/a/b"
-          "$RUNNER_TEMP/second/bin/unio" build --release wc.unio -o wc
+          "$RUNNER_TEMP/second/bin/unio" build --release wc.unio -o "wc$x"
           "$RUNNER_TEMP/second/bin/unio" build --print-toolchain > "$RUNNER_TEMP/second/TOOLCHAIN"
           cd "$RUNNER_TEMP/second"
-          sha256sum bin/unio lib/unio/libunio.a ../probe-second/a/b/wc | sed 's# \.\./probe-second/a/b/# probe/#' > SHA256SUMS
+          sum256 "bin/unio$x" "lib/unio/$lib" "../probe-second/a/b/wc$x" | sed 's# \.\./probe-second/a/b/# probe/#' > SHA256SUMS
+      # Both runners share the home directory and the image, so a path of either that reached
+      # the artifacts the same way on both would not show in the comparison: look for them.
+      - name: No path of the build machine in unio, the runtime library, or the executable
+        run: |
+          set -eu
+          x=; lib=libunio.a
+          if [ "$RUNNER_OS" = Windows ]; then x=.exe; lib=unio.lib; fi
+          files="$RUNNER_TEMP/second/bin/unio$x $RUNNER_TEMP/second/lib/unio/$lib $RUNNER_TEMP/probe-second/a/b/wc$x"
+          set -- "$HOME" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          if command -v cygpath >/dev/null; then
+            for path in "$HOME" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+              set -- "$@" "$(cygpath -w "$path")" "$(cygpath -m "$path")"
+            done
+          fi
+          found=0
+          for needle in "$@"; do
+            for file in $files; do
+              if grep -a -q -i -F -e "$needle" "$file"; then
+                echo "::error::$file holds the path $needle"
+                found=1
+              fi
+            done
+          done
+          exit "$found"
       - name: Two builds on two runners give the same bytes (unio, libunio.a, an executable)
         run: |
           cd "$RUNNER_TEMP"

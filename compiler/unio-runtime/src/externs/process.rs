@@ -31,7 +31,7 @@ use crate::value::Value;
 use std::io::{ErrorKind, Read};
 use std::process::ExitStatus;
 #[cfg(not(windows))]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -242,8 +242,7 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 /// environment the sandbox grants, standard input empty and both outputs piped.
 #[cfg(not(windows))]
 fn spawn(program: &str, args: &[String]) -> std::io::Result<Child> {
-    let mut command = Command::new(program);
-    crate::sandbox::limit_child(&mut command);
+    let mut command = crate::sandbox::child_command(program)?;
     if let Some(environment) = crate::sandbox::child_environment() {
         command.env_clear().envs(environment);
     }

@@ -1266,6 +1266,13 @@ fn apply_os(
     _stop: &Arc<AtomicBool>,
 ) -> Result<Applied, Refused> {
     working_directory();
+    // RFC 0011: the limit of processes is exact only for a user other than root.
+    if sandbox.limits.processes.is_some() {
+        let (real, effective) = users();
+        if let Some(reason) = root_refusal(real, effective) {
+            return Err(Refused(reason));
+        }
+    }
     macos::apply(process_wide, &sandbox.limits).map_err(Refused)?;
     Ok(Applied {
         missing: Vec::new(),
@@ -1436,20 +1443,64 @@ fn process_cpu_time() -> Duration {
     Duration::ZERO
 }
 
+/// The command that starts a child of `process.run` (Unix): the program with its limits
+/// ([`limit_child`]). On macOS under a limit of processes (RFC 0011) the files a child may
+/// execute are checked first ([`verify_executables`]): a set-user-ID or set-group-ID file fails
+/// the call with `PermissionDenied`; the program is then executed by the path the sandbox
+/// resolved and checked, with its name as written as `argv[0]`, and the child checks the same
+/// files again right before it executes.
+#[cfg(unix)]
+pub fn child_command(program: &str) -> std::io::Result<std::process::Command> {
+    #[cfg(target_os = "macos")]
+    if let Some(a) = active() {
+        if a.sandbox.limits.processes.is_some() {
+            use std::os::unix::process::CommandExt;
+            let files = match macos::executable() {
+                Some(files) => files.to_vec(),
+                None => children::needs(&a.sandbox.permissions.process, &[])
+                    .execute
+                    .into_iter()
+                    .collect(),
+            };
+            let verified = verify_executables(&files).map_err(|reason| {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason)
+            })?;
+            let mut command = match program_paths(program).into_iter().next() {
+                Some(path) => {
+                    let mut command = std::process::Command::new(path);
+                    command.arg0(program);
+                    command
+                }
+                None => std::process::Command::new(program),
+            };
+            limit_child(&mut command, Some(verified));
+            return Ok(command);
+        }
+    }
+    let mut command = std::process::Command::new(program);
+    limit_child(&mut command, None);
+    Ok(command)
+}
+
 /// Applies the limit of CPU time to a child before it runs the program, since a child has its
 /// own CPU time, and gives it back the address space that the backstop of the heap limit took
-/// from the program (RFC 0010).
+/// from the program (RFC 0010). On macOS, under a limit of processes, the child may start no
+/// process (RFC 0011, [`deny_process_creation`]) and checks the `verified` files again before
+/// it executes ([`recheck_executables`]).
 #[cfg(unix)]
-pub fn limit_child(command: &mut std::process::Command) {
+fn limit_child(command: &mut std::process::Command, verified: Option<Vec<Verified>>) {
     use std::os::unix::process::CommandExt;
     let Some(a) = active() else {
         return;
     };
     let cpu = a.sandbox.limits.cpu_seconds;
-    if cpu.is_none() && a.sandbox.limits.heap_bytes.is_none() {
+    let no_creation = cfg!(target_os = "macos") && a.sandbox.limits.processes.is_some();
+    if cpu.is_none() && a.sandbox.limits.heap_bytes.is_none() && !no_creation {
         return;
     }
-    // SAFETY: the closure only calls getrlimit and setrlimit, which are async-signal-safe.
+    // SAFETY: the closure calls only getrlimit, setrlimit, open, fstat, lstat, and close on
+    // memory prepared before the fork, which are async-signal-safe. An error fails the spawn,
+    // so a child whose limits could not be set never runs its program.
     unsafe {
         command.pre_exec(move || {
             // The heap limit is the program's: the child gets its address space back.
@@ -1457,13 +1508,234 @@ pub fn limit_child(command: &mut std::process::Command) {
             if let Some(seconds) = cpu {
                 set_limit(RLIMIT_CPU, seconds)?;
             }
+            if no_creation {
+                deny_process_creation()?;
+                if let Some(files) = &verified {
+                    recheck_executables(files)?;
+                }
+            }
             Ok(())
         });
     }
 }
 
-#[cfg(not(unix))]
-pub fn limit_child(_: &mut std::process::Command) {}
+/// `RLIMIT_NPROC` of macOS.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const RLIMIT_NPROC_MACOS: i32 = 7;
+
+/// In a child of `process.run` on macOS, before it runs its program, under a limit of processes
+/// (RFC 0011, docs/runtime.md 9.5): sets the soft and the hard `RLIMIT_NPROC` to 0, so that the
+/// child and every process it would start can create no process. `fork1` of XNU, which serves
+/// `fork`, `vfork`, and `posix_spawn`, fails with `EAGAIN` when the processes of the real user
+/// of the caller, counting the new one, exceed its soft limit, and a process that is not root
+/// cannot raise its hard limit again. The limit is inherited across `fork` and `exec`. A real
+/// user of 0 is exempt from the check, so a program run as root is refused
+/// ([`root_refusal`]) and no set-user-ID or set-group-ID file may be executed
+/// ([`verify_executables`]). Seatbelt cannot express this: the child runs under the profile of
+/// the program, which must allow `process-fork` for `process.run` itself, and a process under a
+/// profile cannot apply a second one. Async-signal-safe.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn deny_process_creation() -> std::io::Result<()> {
+    let none = RLimit {
+        current: 0,
+        maximum: 0,
+    };
+    // SAFETY: setrlimit reads one struct rlimit.
+    if unsafe { setrlimit(RLIMIT_NPROC_MACOS, &none) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The test hook that makes the runtime treat the program as run by root (RFC 0011): set to
+/// `1`, a program with a limit of processes on macOS is refused as under root. It can only
+/// refuse a start, never permit one.
+pub const TEST_AS_ROOT: &str = "UNIO_TEST_AS_ROOT";
+
+/// RFC 0011: why a program with a limit of processes may not start on macOS under these users,
+/// or `None`. The kernel does not apply `RLIMIT_NPROC` to a real user of 0, and an effective
+/// user of 0 can make its real user 0, so either would make the limit inexact.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn root_refusal(real: u32, effective: u32) -> Option<String> {
+    (real == 0 || effective == 0).then(|| {
+        format!(
+            "the sandbox cannot hold limits.processes for this program: on macOS the limit is \
+             exact only because a child may create no process, which the system does not \
+             enforce for root, and the program runs with real user {real} and effective user \
+             {effective} (RFC 0011). Run it as a user other than root, or without \
+             limits.processes"
+        )
+    })
+}
+
+/// The real and effective users of this process, both 0 under [`TEST_AS_ROOT`].
+#[cfg(target_os = "macos")]
+fn users() -> (u32, u32) {
+    extern "C" {
+        fn getuid() -> u32;
+        fn geteuid() -> u32;
+    }
+    if std::env::var_os(TEST_AS_ROOT).is_some_and(|v| v == "1") {
+        return (0, 0);
+    }
+    // SAFETY: getuid and geteuid have no memory effects.
+    unsafe { (getuid(), geteuid()) }
+}
+
+/// A file a child may execute, as [`verify_executables`] found it: its path, ready for a call
+/// after the fork, and the device and inode of the file that was checked.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct Verified {
+    path: std::ffi::CString,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+const ELOOP_ERRNO: i32 = 40;
+#[cfg(all(unix, not(target_os = "linux")))]
+const ELOOP_ERRNO: i32 = 62;
+
+/// The set-user-ID and set-group-ID bits of a mode.
+#[cfg(unix)]
+const SET_ID: u32 = 0o6000;
+
+/// RFC 0011: checks that no file a child may execute is set-user-ID or set-group-ID, since such
+/// a file could make the child root, whom `RLIMIT_NPROC` does not bind. Each file is opened
+/// without following a link as its last name and checked through the open descriptor
+/// (`fstat`), so the mode is that of the file the path names, not of a file a link leads to;
+/// a file that cannot be opened for reading is checked with `lstat`. The paths are those the
+/// sandbox resolved for the profile, links resolved, so a path that is a link now, or a file
+/// that is not regular, is refused. A file that does not exist is skipped: it cannot be
+/// executed. Returns the files as checked, for [`recheck_executables`].
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn verify_executables(paths: &[PathBuf]) -> Result<Vec<Verified>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const O_NOFOLLOW: i32 = 0o400000;
+    #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+    const O_NOFOLLOW: i32 = 0o100000;
+    #[cfg(not(target_os = "linux"))]
+    const O_NOFOLLOW: i32 = 0x100;
+    let mut verified = Vec::new();
+    for path in paths {
+        let shown = path.display();
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path);
+        let metadata = match opened {
+            Ok(file) => file.metadata(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.raw_os_error() == Some(ELOOP_ERRNO) => {
+                return Err(format!(
+                    "denied by the sandbox: {shown}, which a child may execute, is now a link, \
+                     not the file the sandbox resolved (RFC 0011)"
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::fs::symlink_metadata(path)
+            }
+            Err(e) => Err(e),
+        }
+        .map_err(|e| {
+            format!(
+                "denied by the sandbox: {shown}, which a child may execute, cannot be checked: {e}"
+            )
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "denied by the sandbox: {shown}, which a child may execute, is not a regular \
+                 file (RFC 0011)"
+            ));
+        }
+        if metadata.mode() & SET_ID != 0 {
+            return Err(format!(
+                "denied by the sandbox: under a limit of processes on macOS a child may not \
+                 execute the set-user-ID or set-group-ID file {shown} (RFC 0011)"
+            ));
+        }
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| format!("denied by the sandbox: {shown} contains a zero byte"))?;
+        verified.push(Verified {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        });
+    }
+    Ok(verified)
+}
+
+/// In the child, right before it executes (RFC 0011): each verified file must still be the
+/// same file (device and inode) and still not set-user-ID or set-group-ID; otherwise the spawn
+/// fails with `EPERM`. Async-signal-safe: no allocation, only open, fstat, lstat, and close.
+#[cfg(target_os = "macos")]
+fn recheck_executables(files: &[Verified]) -> std::io::Result<()> {
+    use std::os::raw::{c_char, c_int};
+    extern "C" {
+        fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        #[cfg_attr(target_arch = "x86_64", link_name = "fstat$INODE64")]
+        fn fstat(fd: c_int, buf: *mut u8) -> c_int;
+        #[cfg_attr(target_arch = "x86_64", link_name = "lstat$INODE64")]
+        fn lstat(path: *const c_char, buf: *mut u8) -> c_int;
+        fn __error() -> *mut c_int;
+    }
+    const O_NOFOLLOW: c_int = 0x100;
+    const O_CLOEXEC: c_int = 0x0100_0000;
+    const EACCES: c_int = 13;
+    const EPERM: i32 = 1;
+    const S_IFMT: u16 = 0o170000;
+    const S_IFREG: u16 = 0o100000;
+    for file in files {
+        // struct stat (64-bit inodes) is 144 bytes: st_dev (i32) at 0, st_mode (u16) at 4,
+        // st_ino (u64) at 8.
+        let mut buffer = [0u64; 32];
+        let out = buffer.as_mut_ptr() as *mut u8;
+        // SAFETY: the path ends with 0; the buffer is larger than struct stat; the descriptor
+        // is closed once.
+        let result = unsafe {
+            let fd = open(file.path.as_ptr(), O_NOFOLLOW | O_CLOEXEC);
+            if fd >= 0 {
+                let r = fstat(fd, out);
+                close(fd);
+                r
+            } else if *__error() == EACCES {
+                lstat(file.path.as_ptr(), out)
+            } else {
+                -1
+            }
+        };
+        if result != 0 {
+            return Err(std::io::Error::from_raw_os_error(EPERM));
+        }
+        // SAFETY: the offsets are inside the buffer.
+        let (device, mode, inode) = unsafe {
+            (
+                std::ptr::read_unaligned(out as *const i32),
+                std::ptr::read_unaligned(out.add(4) as *const u16),
+                std::ptr::read_unaligned(out.add(8) as *const u64),
+            )
+        };
+        let same = device as u64 == file.device && inode == file.inode;
+        if !same || mode & S_IFMT != S_IFREG || u32::from(mode) & SET_ID != 0 {
+            return Err(std::io::Error::from_raw_os_error(EPERM));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn recheck_executables(_: &[Verified]) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Keeps every descendant of a child in the process group the child leads (docs/runtime.md
 /// 9.5): on Linux the child installs a seccomp filter without `setsid` and `setpgid` before it
@@ -2071,5 +2343,127 @@ mod tests {
         assert!(!tree.covers(&resolve(&dir.join("in/link"))));
         assert!(tree.covers(&resolve(&dir.join("in/new/file"))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RFC 0011: a program with a limit of processes is refused when its real or effective
+    /// user is root; the reason names both users and the way out.
+    #[cfg(unix)]
+    #[test]
+    fn root_is_refused_a_limit_of_processes() {
+        assert_eq!(root_refusal(501, 501), None);
+        for (real, effective) in [(0, 501), (501, 0), (0, 0)] {
+            let reason = root_refusal(real, effective).expect("root is refused");
+            assert!(
+                reason.contains(&format!("real user {real} and effective user {effective}"))
+                    && reason.contains("RFC 0011")
+                    && reason.contains("without limits.processes"),
+                "{reason}"
+            );
+        }
+    }
+
+    /// RFC 0011: the files a child may execute are checked through an open descriptor: a
+    /// set-user-ID or set-group-ID file, a path that is now a link, and a directory are refused;
+    /// a missing file is skipped; a plain executable passes with its device and inode.
+    #[cfg(unix)]
+    #[test]
+    fn set_id_files_links_and_directories_are_refused_to_children() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("unio-sandbox-setid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let plain = dir.join("plain");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let verified = verify_executables(&[plain.clone(), dir.join("missing")]).unwrap();
+        assert_eq!(verified.len(), 1, "a missing file is skipped");
+        let metadata = std::fs::metadata(&plain).unwrap();
+        assert_eq!(
+            (verified[0].device, verified[0].inode),
+            (metadata.dev(), metadata.ino())
+        );
+        for (name, mode, words) in [
+            ("setuid", 0o4755, "set-user-ID or set-group-ID"),
+            ("setgid", 0o2755, "set-user-ID or set-group-ID"),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, "x").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let mode_set = std::fs::metadata(&path).unwrap().mode() & 0o7777;
+            assert_eq!(mode_set, mode, "the file system keeps the mode of {name}");
+            let reason = verify_executables(&[plain.clone(), path.clone()]).unwrap_err();
+            assert!(reason.contains(words) && reason.contains(name), "{reason}");
+        }
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&plain, &link).unwrap();
+        let reason = verify_executables(&[link]).unwrap_err();
+        assert!(reason.contains("is now a link"), "{reason}");
+        let reason = verify_executables(std::slice::from_ref(&dir)).unwrap_err();
+        assert!(reason.contains("not a regular file"), "{reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RFC 0011: a child whose `RLIMIT_NPROC` was set by [`deny_process_creation`] can start no
+    /// process. The child tries `fork` inside the closure that runs before its program, and
+    /// reports the result as the error of the spawn: `EAGAIN` when the fork was refused. The
+    /// real user of 0 is exempt from the limit, so the test fails under root instead of
+    /// passing without checking anything.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_child_without_process_creation_cannot_fork() {
+        use std::os::unix::process::CommandExt;
+        extern "C" {
+            fn fork() -> i32;
+            fn getuid() -> u32;
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            fn _exit(code: i32) -> !;
+        }
+        const EAGAIN: i32 = 35;
+        // SAFETY: getuid has no memory effects.
+        let user = unsafe { getuid() };
+        assert_ne!(
+            user, 0,
+            "the test needs a user other than root, whom RLIMIT_NPROC does not bind"
+        );
+        let mut command = std::process::Command::new("/usr/bin/true");
+        // SAFETY: the closure calls setrlimit, fork, waitpid and _exit, which are
+        // async-signal-safe; the grandchild, if any, ends at once.
+        unsafe {
+            command.pre_exec(|| {
+                deny_process_creation()?;
+                let pid = fork();
+                if pid == 0 {
+                    _exit(0);
+                }
+                if pid > 0 {
+                    waitpid(pid, std::ptr::null_mut(), 0);
+                    return Err(std::io::Error::other("BREACH: fork succeeded"));
+                }
+                Err(std::io::Error::last_os_error())
+            });
+        }
+        let error = command
+            .spawn()
+            .expect_err("the closure always fails the spawn");
+        assert_eq!(error.raw_os_error(), Some(EAGAIN), "{error}");
+        // Without the limit the same closure forks, so the refusal above is the limit's.
+        let mut control = std::process::Command::new("/usr/bin/true");
+        // SAFETY: as above.
+        unsafe {
+            control.pre_exec(|| {
+                let pid = fork();
+                if pid == 0 {
+                    _exit(0);
+                }
+                if pid > 0 {
+                    waitpid(pid, std::ptr::null_mut(), 0);
+                    return Ok(());
+                }
+                Err(std::io::Error::last_os_error())
+            });
+        }
+        let status = control.status().expect("a child without the limit forks");
+        assert!(status.success());
     }
 }

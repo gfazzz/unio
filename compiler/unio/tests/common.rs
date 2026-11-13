@@ -4,11 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The root of the repository: compiler/unio/../..
+#[allow(dead_code)]
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
 /// Every `.unio` file below the directory, sorted.
+#[allow(dead_code)]
 pub fn unio_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -29,15 +31,32 @@ pub fn unio_files(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+#[allow(dead_code)]
 pub fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// Windows has the sandbox of the operating system now (AppContainers, docs/runtime.md 9.4), so
-/// the operator no longer allows a weaker one for the tests there; this does nothing and stays
-/// for the callers that still name it.
+/// The variable that makes a missing prerequisite of a test a failure: CI sets it to `1` on
+/// every job (`.github/workflows/ci.yml`), so that a test whose body did not run cannot count
+/// as release evidence (R-7a, SB-8, SB-15).
 #[allow(dead_code)]
-pub fn allow_weaker_on_windows(_: &mut std::process::Command) {}
+pub const REQUIRE_PREREQUISITES: &str = "UNIO_REQUIRE_PREREQUISITES";
+
+/// A prerequisite of a test is missing here: a program such as python3 or a C compiler, or a
+/// machine for which no native executables are made. With UNIO_REQUIRE_PREREQUISITES=1 the
+/// test fails with `what`; otherwise, on a developer's machine, it notes the skip and the
+/// caller returns. `cargo test` hides that note, so only the variable makes a skip visible.
+#[allow(dead_code)]
+#[track_caller]
+pub fn missing_prerequisite(what: &str) {
+    if std::env::var_os(REQUIRE_PREREQUISITES).is_some_and(|v| v == "1") {
+        panic!(
+            "a prerequisite of this test is missing: {what}; with \
+             {REQUIRE_PREREQUISITES}=1 a skipped test is a failure"
+        );
+    }
+    eprintln!("skipped: {what} (set {REQUIRE_PREREQUISITES}=1 to make this a failure)");
+}
 
 /// The resources of the programs of the reserve for `release` (C-17): `Log` builds 2,000 texts
 /// in its `release`, more than a full heap allows, so that it can only run from the reserve;

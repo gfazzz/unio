@@ -69,6 +69,21 @@ The workspace has two crates: `unio` (this front end, the interpreter, and the c
 
 `UNIO_FUZZ_ITERATIONS=100000 cargo test --release --test fuzz` runs a longer mutation run.
 
+Some tests need a program besides Rust: `python3` (the tests of leaving the process group in
+`tests/sandbox.rs` and `unio-runtime/tests/process.rs`), a C compiler (`cc`, or `CC`, for the C
+helper of `tests/sandbox.rs` and for linking in `tests/native.rs` and `tests/install.rs`), and
+`rustc`; the native tests also need a machine for which executables are made. Without one a
+test notes `skipped:` on standard error, which `cargo test` hides, and passes. With
+`UNIO_REQUIRE_PREREQUISITES=1`, which CI sets on every job, such a test fails instead, so a
+release check cannot pass without running its body (R-7a, SB-8, SB-15). No test and no CI job
+allows the weaker sandbox (`allow_weaker`, `--allow-weaker-sandbox`): Linux, macOS, and Windows
+have every mechanism, and `tests/sandbox.rs` (`release_checks_refuse_the_weaker_sandbox`)
+checks it.
+
+```sh
+UNIO_REQUIRE_PREREQUISITES=1 cargo test   # as CI runs it: a missing prerequisite is a failure
+```
+
 
 ### The linker on Windows
 
@@ -266,11 +281,13 @@ before `main` or the first test:
 |---|---|---|
 | Linux | `no_new_privs`; Landlock (ABI 1 to 7: files, TCP from ABI 4, signals and abstract sockets from ABI 6); seccomp-bpf: no sockets at all, no `ptrace`, `process_vm_*`, `mount`, `unshare`, `setns`, namespace flags of `clone`, `io_uring`, `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `open_by_handle_at`, `kexec`, modules, `TIOCSTI`; `RLIMIT_CORE` 0, `RLIMIT_FSIZE` | Landlock grants a scope of one written file on its directory, because the atomic commit creates a temporary file next to the target; scope roots that do not exist at the start grant nothing; with a `process` permission, children may start with `execve` only the listed programs, the interpreters of listed scripts and the dynamic loader, and read the library directories (`/lib*`, `/usr/lib*`, `/usr/local/lib`), the libraries the listed programs need, `/etc/ld.so.cache` and `/etc/localtime`; through the loader a child can run any ELF program it can read, and a listed interpreter runs any script it can read (docs/runtime.md 9.5); `stat` is not restricted by Landlock |
 | macOS | a Seatbelt profile (`sandbox_init`, deny by default) and the same resource limits | Seatbelt applies to the whole process once, so `unio test` grants the union of its files' permissions plus reading their sources and the standard library; the runtime still keeps each file to its own; children may start only the listed programs and the interpreters of listed scripts, and a listed interpreter runs any script it can read |
-| Windows | none yet: AppContainer and the restrictions of a Job Object are not implemented (a Job Object only holds the process tree of a child and the limits of a tool worker) | `unio run` and `unio test` stop with 103 unless the operator allows the weaker sandbox, which keeps only the runtime layer and the limits |
+| Windows | two AppContainers of their own for each run, fresh profiles without capabilities, so no network, not even the loopback, deleted when the program ends (`unio-runtime/src/sandbox/windows.rs`): the reader holds grants on exactly the read scopes, the files of the listed programs and the working directory, the thread of the program impersonates its token, and every child is created in it; the writer holds the write grants and its token is taken only for a write of the runtime, after the runtime's checks. A Job Object holds the memory backstop of `limits.heap_bytes`; each child joins, while still suspended, a Job Object of its own with kill-on-close, no breakaway, and the process limit (docs/runtime.md 9.4, 9.5) | reading is wider than the scopes by what every application package may read (the system directories, `Program Files`), and a child can run every program there; a process of an AppContainer can always write the folder of its own profile, which is private to the run and deleted with it; the thread of the program could return to the token of the process with `RevertToSelf`, which no Unio program can call (docs/runtime.md 9.4) |
 
-A missing mechanism (no Landlock or seccomp in the kernel, Landlock below ABI 3, Windows) stops
-the start with 103; with `--allow-weaker-sandbox` or `allow_weaker = true` the program runs and
-the missing restrictions are printed (SB-5). The program itself cannot lift any of this.
+A missing mechanism (no Landlock or seccomp in the kernel, Landlock below ABI 3) stops the start
+with 103; with `--allow-weaker-sandbox` or `allow_weaker = true` the program runs and the missing
+restrictions are printed (SB-5). On macOS and Windows nothing is missing: an AppContainer that
+cannot be set up stops the start with 103 whatever the operator allows. The program itself
+cannot lift any of this.
 
 A child of `process.run` gets only the variables granted under `env` and `PATH` (on Windows also
 `SystemRoot`); it runs in a process group of its own on Unix, which no descendant can leave on
@@ -660,17 +677,17 @@ The tests were written before the code (concept, section 1.2):
   file to open; a module is renamed with its file, not by the server. Completion and hover in a
   document with syntax errors blank the lines of the errors first, so names on those lines are
   not known; rename needs every module of the package to parse.
-- Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows a worker has only a
-  Job Object (memory, one process) and its files and network are not restricted, so the tools
-  refuse there with 103 unless the operator allows the weaker sandbox; `stat` is not
-  restricted anywhere; the link step of `build` runs the system linker, whose memory depends on
+- Known limits of the workers of the tools (docs/runtime.md 9.7): on Windows the tool creates
+  each worker in an AppContainer of its own with grants on exactly its scopes and no network,
+  and the worker joins a Job Object (memory, CPU, one active process); a worker that is not in
+  an AppContainer stops with 103 whatever the operator allows; `stat` is not restricted
+  anywhere; the link step of `build` runs the system linker, whose memory depends on
   the toolchain and on `libunio.a` (about 130 MiB of address space with the library of a release
   build, about 530 MiB with the 290 MB library of a debug build, on Linux x86-64), so a
   `compile.memory_bytes` above the minimum can still be too small for it; the tool still reads the manifest and the policy itself for the sandboxes
   of `run` and `test`; the language server (SB-13), the package operations (SB-12) and the
   archives of SB-15 do not exist yet.
-- The sandbox of the operating system on Windows (AppContainer, the limits of a Job Object for
-  programs), the rest of S6 (cross-compilation, `--target`, docs/runtime.md 8.6), and the other
+- The rest of S6 (cross-compilation, `--target`, docs/runtime.md 8.6), and the other
   commands of requirement 6.1. Packages, signatures, the language server, the R-10 control set
   and the cryptography policy are requirements only; none is implemented
   ([docs/status.md](../docs/status.md)).

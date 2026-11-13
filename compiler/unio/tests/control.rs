@@ -28,7 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{allow_weaker_on_windows, repo_root};
+use common::repo_root;
 
 const CATEGORIES: [&str; 4] = ["types", "errors", "resources", "style"];
 
@@ -197,7 +197,6 @@ fn check_file(program: &Program) -> PathBuf {
 fn unio(dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
     command.current_dir(dir);
-    allow_weaker_on_windows(&mut command);
     command
 }
 

@@ -17,12 +17,30 @@ extern "C" {
 
 static APPLIED: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// The files the applied profile lets a child execute (`process-exec`), as `profile` lists them.
+static EXECUTABLE: OnceLock<Vec<std::path::PathBuf>> = OnceLock::new();
+
+/// The files a child may execute under the profile of this process, once it is applied; the
+/// runtime checks them under a limit of processes (RFC 0011, `verify_executables`).
+pub fn executable() -> Option<&'static [std::path::PathBuf]> {
+    EXECUTABLE.get().map(Vec::as_slice)
+}
+
 /// Applies the profile once per process; later calls report the result of the first.
 pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
     APPLIED
         .get_or_init(|| {
             apply_rlimits(limits)?;
+            let execute = if permissions.process.is_empty() {
+                Vec::new()
+            } else {
+                children::needs(&permissions.process, &[])
+                    .execute
+                    .into_iter()
+                    .collect()
+            };
             init(&profile(permissions))?;
+            let _ = EXECUTABLE.set(execute);
             if !permissions.process.is_empty() {
                 super::tree::set_marked();
             }

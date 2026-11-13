@@ -6,6 +6,8 @@
 //! Every program runs in its own package in a temporary directory, with `open/` granted by its
 //! manifest and `closed/` holding a file the program must never see.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -536,7 +538,7 @@ fn a_descendant_that_leaves_the_process_group_is_stopped_at_the_timeout() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipped: python3 is not available");
+        common::missing_prerequisite("python3 is not available");
         return;
     }
     let marker = format!("unio-escape-marker-{}", std::process::id());
@@ -629,7 +631,7 @@ fn a_double_fork_into_a_new_session_is_stopped_with_the_tree() {
         .is_ok_and(|o| o.status.success())
     {
         let _ = fs::remove_dir_all(&dir);
-        eprintln!("skipped: no C compiler {cc}");
+        common::missing_prerequisite(&format!("no C compiler {cc} that builds the helper"));
         return;
     }
     let helper_text = helper.to_string_lossy().into_owned();
@@ -793,9 +795,10 @@ fn the_limits_of_a_policy_end_the_program_or_fail_the_operation() {
 /// Audit item A11: `limits.processes` holds for the whole tree of a child, not only for the
 /// calls of `process.run` (docs/runtime.md 9.5). The child starts five processes that compute
 /// for a while; under a limit of three (the child and two more) the third start fails on Linux
-/// (the shell cannot fork), and on macOS and Windows the tree is stopped and the call fails;
-/// under a limit of ten every process runs. On Unix the processes are subshells of a listed
-/// `sh`, on Windows `cmd` instances of a listed `cmd`.
+/// (the shell cannot fork), and on Windows the tree is stopped and the call fails; under a
+/// limit of ten every process runs. On macOS a child under any limit may start no process
+/// (RFC 0011), so the first start fails under both limits. On Unix the processes are subshells
+/// of a listed `sh`, on Windows `cmd` instances of a listed `cmd`.
 #[test]
 fn a_child_that_starts_more_processes_than_the_limit_is_stopped_or_its_starts_fail() {
     let (program, arguments, manifest) = if cfg!(windows) {
@@ -821,7 +824,7 @@ fn a_child_that_starts_more_processes_than_the_limit_is_stopped_or_its_starts_fa
     print(output.stderr)
 "
     );
-    for (limit, all_run) in [(3, false), (10, true)] {
+    for (limit, all_run) in [(3, false), (10, !cfg!(target_os = "macos"))] {
         let dir = package(&format!("tree-limit-{limit}"), manifest, &source);
         let file = policy(&dir, &format!("[limits]\nprocesses = {limit}\n"));
         let output = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
@@ -840,7 +843,7 @@ fn a_child_that_starts_more_processes_than_the_limit_is_stopped_or_its_starts_fa
                 !finished,
                 "the tree went past the limit of {limit}:\n{out}{err}"
             );
-            if cfg!(target_os = "linux") {
+            if cfg!(any(target_os = "linux", target_os = "macos")) {
                 assert!(
                     out.contains("fork"),
                     "the shell reports the failed fork:\n{out}{err}"
@@ -853,6 +856,220 @@ fn a_child_that_starts_more_processes_than_the_limit_is_stopped_or_its_starts_fa
             }
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// RFC 0011: on macOS, under a limit of processes, a child of `process.run` may start no
+/// process, so the limit is exact. The child is a small C program that tries `fork` five times
+/// and `posix_spawn` of itself once and prints what happened; under `processes = 2` both calls
+/// of `process.run` run it, every creation in it fails with `EAGAIN`, and the third call is
+/// denied before it starts: the program has started two processes in all, never more. Without
+/// a limit the same child forks and spawns, so the refusal is the limit's. A missing C compiler
+/// or a run as root (whom `RLIMIT_NPROC` does not bind) fails the test. Runs only on macOS (CI).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_child_under_a_process_limit_cannot_start_a_grandchild_on_macos() {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: getuid has no memory effects.
+    let user = unsafe { getuid() };
+    assert_ne!(
+        user, 0,
+        "the test needs a user other than root, whom RLIMIT_NPROC does not bind"
+    );
+    let program = format!(
+        "{PROGRAM_HEAD}function start(n as Int):
+    let output = try process.run(\"$HELPER\", [\"probe\"], timeout_seconds = 60) on ProcessError as e:
+        print(\"call {{n}} stopped {{e.kind == ProcessErrorKind.PermissionDenied}}: {{e.reason}}\")
+        return
+    print(\"call {{n}} status {{output.status}}: {{output.stdout}}\")
+
+public function main():
+    start(1)
+    start(2)
+    start(3)
+"
+    );
+    let dir = package("grandchild-limit", "[permissions]\n", &program);
+    let source = dir.join("helper.c");
+    fs::write(
+        &source,
+        "#include <errno.h>\n\
+         #include <spawn.h>\n\
+         #include <stdio.h>\n\
+         #include <string.h>\n\
+         #include <sys/wait.h>\n\
+         #include <unistd.h>\n\
+         extern char **environ;\n\
+         int main(int argc, char **argv) {\n\
+         \x20   if (argc > 1 && strcmp(argv[1], \"spawned\") == 0) return 0;\n\
+         \x20   int forked = 0, refused = 0, other = 0;\n\
+         \x20   for (int i = 0; i < 5; i++) {\n\
+         \x20       pid_t pid = fork();\n\
+         \x20       if (pid == 0) _exit(0);\n\
+         \x20       if (pid > 0) { forked++; waitpid(pid, 0, 0); }\n\
+         \x20       else if (errno == EAGAIN) refused++;\n\
+         \x20       else other++;\n\
+         \x20   }\n\
+         \x20   pid_t pid;\n\
+         \x20   char *args[] = { argv[0], \"spawned\", 0 };\n\
+         \x20   int spawn = posix_spawn(&pid, argv[0], 0, 0, args, environ);\n\
+         \x20   if (spawn == 0) waitpid(pid, 0, 0);\n\
+         \x20   printf(\"forked %d refused %d other %d spawn %s\\n\", forked, refused, other,\n\
+         \x20          spawn == 0 ? \"ok\" : spawn == EAGAIN ? \"refused\" : strerror(spawn));\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+    let helper = dir.join("helper");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let built = Command::new(&cc)
+        .arg("-o")
+        .arg(&helper)
+        .arg(&source)
+        .output();
+    assert!(
+        built.as_ref().is_ok_and(|o| o.status.success()),
+        "a prerequisite of this test is missing: a C compiler {cc} that builds the helper: \
+         {built:?}"
+    );
+    let helper_text = helper.to_string_lossy().into_owned();
+    fs::write(
+        dir.join("main.unio"),
+        program.replace("$HELPER", &helper_text),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("unio.toml"),
+        with_decoys(&format!("[permissions]\nprocess = [\"{helper_text}\"]\n")),
+    )
+    .unwrap();
+    let unlimited = run(&dir, &[], &[]);
+    let file = policy(&dir, "[limits]\nprocesses = 2\n");
+    let limited = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+    let _ = fs::remove_dir_all(&dir);
+    let out = text(&unlimited.stdout);
+    let err = text(&unlimited.stderr);
+    assert_eq!(unlimited.status.code(), Some(0), "{out}{err}");
+    for n in 1..=3 {
+        assert!(
+            out.contains(&format!(
+                "call {n} status 0: forked 5 refused 0 other 0 spawn ok"
+            )),
+            "without a limit the child forks and spawns:\n{out}{err}"
+        );
+    }
+    let out = text(&limited.stdout);
+    let err = text(&limited.stderr);
+    assert_eq!(limited.status.code(), Some(0), "{out}{err}");
+    for n in 1..=2 {
+        assert!(
+            out.contains(&format!(
+                "call {n} status 0: forked 0 refused 5 other 0 spawn refused"
+            )),
+            "under the limit every creation of the child fails with EAGAIN:\n{out}{err}"
+        );
+    }
+    assert!(
+        out.contains(
+            "call 3 stopped true: denied by the sandbox: the policy limits the program to 2 \
+             processes"
+        ),
+        "the third call is denied before it starts:\n{out}{err}"
+    );
+    assert!(!out.contains("BREACH"), "{out}{err}");
+}
+
+/// RFC 0011: on macOS a program with a limit of processes does not start under root, since
+/// the kernel does not apply `RLIMIT_NPROC` to a real user of 0; it ends with code 103 before
+/// `main`. Root is simulated by the hook `UNIO_TEST_AS_ROOT`, which can only refuse; without a
+/// limit the same program runs under the hook. Runs only on macOS (CI).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_program_with_a_process_limit_is_refused_under_root_on_macos() {
+    let program = "public function main():\n    print(\"ran\")\n";
+    let dir = package("root-limit", "[permissions]\n", program);
+    let file = policy(&dir, "[limits]\nprocesses = 1\n");
+    let file = file.to_string_lossy().into_owned();
+    let refused = run(&dir, &["--policy", &file], &[("UNIO_TEST_AS_ROOT", "1")]);
+    let free = run(&dir, &[], &[("UNIO_TEST_AS_ROOT", "1")]);
+    let limited = run(&dir, &["--policy", &file], &[]);
+    let _ = fs::remove_dir_all(&dir);
+    let err = text(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(103), "{err}");
+    assert!(
+        err.contains("real user 0 and effective user 0") && err.contains("RFC 0011"),
+        "{err}"
+    );
+    assert!(!text(&refused.stdout).contains("ran"));
+    assert_eq!(free.status.code(), Some(0), "{}", text(&free.stderr));
+    assert!(text(&free.stdout).contains("ran"));
+    assert_eq!(limited.status.code(), Some(0), "{}", text(&limited.stderr));
+    assert!(text(&limited.stdout).contains("ran"));
+}
+
+/// RFC 0011: on macOS, under a limit of processes, a child may not execute a set-user-ID or
+/// set-group-ID file, since it could make the child root, whom `RLIMIT_NPROC` does not bind.
+/// A copy of `/usr/bin/true` with the bit set is listed: calling it is refused with
+/// `PermissionDenied` before the child starts, and so is calling a listed `sh`, which could
+/// execute the copy; without a limit both run. Runs only on macOS (CI).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_set_id_file_is_not_executed_under_a_process_limit_on_macos() {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, mode) in [("setuid", 0o4755), ("setgid", 0o2755)] {
+        let program = format!(
+            "{PROGRAM_HEAD}function start(program as Text):
+    let output = try process.run(program, [], timeout_seconds = 30) on ProcessError as e:
+        print(\"{{program}} stopped {{e.kind == ProcessErrorKind.PermissionDenied}}: {{e.reason}}\")
+        return
+    print(\"{{program}} status {{output.status}}\")
+
+public function main():
+    start(\"$TOOL\")
+    start(\"sh\")
+"
+        );
+        let dir = package(&format!("set-id-{name}"), "[permissions]\n", &program);
+        let tool = dir.join(name);
+        fs::copy("/usr/bin/true", &tool).expect("a prerequisite of this test: /usr/bin/true");
+        fs::set_permissions(&tool, fs::Permissions::from_mode(mode)).unwrap();
+        let kept = fs::metadata(&tool).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(kept, mode, "the file system must keep the mode of {name}");
+        let tool_text = tool.to_string_lossy().into_owned();
+        fs::write(dir.join("main.unio"), program.replace("$TOOL", &tool_text)).unwrap();
+        fs::write(
+            dir.join("unio.toml"),
+            with_decoys(&format!(
+                "[permissions]\nprocess = [\"{tool_text}\", \"sh\"]\n"
+            )),
+        )
+        .unwrap();
+        let free = run(&dir, &[], &[]);
+        let file = policy(&dir, "[limits]\nprocesses = 5\n");
+        let limited = run(&dir, &["--policy", &file.to_string_lossy()], &[]);
+        let _ = fs::remove_dir_all(&dir);
+        let out = text(&free.stdout);
+        let err = text(&free.stderr);
+        assert_eq!(free.status.code(), Some(0), "{out}{err}");
+        assert!(
+            out.contains(&format!("{tool_text} status 0")) && out.contains("sh status 0"),
+            "without a limit both run:\n{out}{err}"
+        );
+        let out = text(&limited.stdout);
+        let err = text(&limited.stderr);
+        assert_eq!(limited.status.code(), Some(0), "{out}{err}");
+        for called in [tool_text.as_str(), "sh"] {
+            assert!(
+                out.contains(&format!(
+                    "{called} stopped true: denied by the sandbox: under a limit of processes \
+                     on macOS a child may not execute the set-user-ID or set-group-ID file \
+                     {tool_text}"
+                )),
+                "{called} is refused under the limit:\n{out}{err}"
+            );
+        }
     }
 }
 
@@ -1360,6 +1577,80 @@ public function main():
             "the writer outlived its program"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Release checks run with the full sandbox of the system (R-7a, SB-5): Linux, macOS, and
+/// Windows have every mechanism, so no CI job and no test of the sandbox suites or the tools
+/// allows the weaker sandbox, and a program and a worker run without its warning, with no policy
+/// and even under a policy that would allow it. The texts are checked first: a job or a test
+/// that allowed it would keep passing on a runner where a mechanism is missing.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn release_checks_refuse_the_weaker_sandbox() {
+    let root = common::repo_root();
+    let key = concat!("allow", "_weaker");
+    let flag = concat!("--allow", "-weaker-sandbox");
+    let ci = common::read(&root.join(".github/workflows/ci.yml"));
+    for needle in [key, flag] {
+        assert!(
+            !ci.contains(needle),
+            ".github/workflows/ci.yml names {needle}: a release check may not allow the weaker \
+             sandbox"
+        );
+    }
+    let mut offending = Vec::new();
+    for dir in ["compiler/unio/tests", "compiler/unio-runtime/tests"] {
+        let mut files: Vec<PathBuf> = fs::read_dir(root.join(dir))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        files.sort();
+        for file in files {
+            for (n, line) in common::read(&file).lines().enumerate() {
+                // A grant in a policy or a flag on a command line; a manifest that tries the key
+                // is refused (`workers.rs`), and an assertion may name the flag in a message.
+                let grants = line.contains(&format!("{key} = true")) && !line.contains("[package]");
+                let passes = line.contains(&format!("\"{flag}\"")) && !line.contains("contains(");
+                if grants || passes {
+                    offending.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offending.is_empty(),
+        "tests allow the weaker sandbox:\n{}",
+        offending.join("\n")
+    );
+    let dir = package(
+        "full-sandbox",
+        "[package]\nname = \"x\"\n",
+        "public function main():\n    print(\"ran\")\n",
+    );
+    let weaker = policy(&dir, &format!("{key} = true\n"));
+    let weaker = weaker.to_string_lossy().into_owned();
+    for envs in [vec![], vec![("UNIO_POLICY", weaker.as_str())]] {
+        let output = run(&dir, &[], &envs);
+        assert_eq!(lines_of(&output), ["ran"]);
+        let check = Command::new(env!("CARGO_BIN_EXE_unio"))
+            .current_dir(&dir)
+            .env_remove("UNIO_POLICY")
+            .envs(envs.iter().copied())
+            .args(["check", "main.unio"])
+            .output()
+            .unwrap();
+        assert_eq!(check.status.code(), Some(0), "{}", text(&check.stderr));
+        for stderr in [&output.stderr, &check.stderr] {
+            assert!(
+                !text(stderr).contains("weaker sandbox"),
+                "the weaker sandbox was in effect:\n{}",
+                text(stderr)
+            );
+        }
     }
     let _ = fs::remove_dir_all(&dir);
 }

@@ -17,15 +17,10 @@ fn unio() -> Command {
     command
 }
 
-/// Standard error of a program without the warnings that the operator allowed a weaker
-/// sandbox, which a system without a mechanism of SB-4 prints before every program and every
-/// worker of the tools.
+/// Standard error of a program, unfiltered: every system has its full sandbox, so a warning
+/// that the operator allowed a weaker one fails the comparison (SB-5, R-7a).
 fn program_err(output: &std::process::Output) -> String {
     text(&output.stderr)
-        .lines()
-        .filter(|l| !l.starts_with("unio: warning: the operator allowed a weaker sandbox"))
-        .map(|l| format!("{l}\n"))
-        .collect()
 }
 
 fn text(bytes: &[u8]) -> String {

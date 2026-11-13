@@ -11,8 +11,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use common::allow_weaker_on_windows;
-
 /// A package in a temporary directory with the manifest and `main.unio`.
 struct Package {
     dir: PathBuf,
@@ -235,7 +233,6 @@ fn unio_check_reports_the_manifest_line_and_fails() {
     let run = |args: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
         command.current_dir(&package.dir).args(args);
-        allow_weaker_on_windows(&mut command);
         command.output().unwrap()
     };
     let text = run(&["check", "main.unio"]);

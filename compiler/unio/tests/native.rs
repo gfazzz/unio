@@ -29,7 +29,7 @@ fn supported() -> bool {
         runtime_library();
         return true;
     }
-    eprintln!("skipped: no native executables are made for this machine");
+    common::missing_prerequisite("no native executables are made for this machine");
     false
 }
 
@@ -39,12 +39,10 @@ fn operator(command: &mut Command) -> &mut Command {
     command
 }
 
-/// Standard error without the warnings that the operator allowed a weaker sandbox (Windows).
+/// Standard error, unfiltered: every system has its full sandbox, so a warning that the
+/// operator allowed a weaker one is a difference that fails the test (SB-5, R-7a).
 fn errors(output: &Output) -> String {
     text(&output.stderr)
-        .split_inclusive('\n')
-        .filter(|l| !l.starts_with("unio: warning: the operator allowed a weaker sandbox"))
-        .collect()
 }
 
 /// The file name of an executable on this system.
@@ -200,8 +198,6 @@ fn compare(cases: &[Case], dir: &Path) -> Vec<String> {
             text(&expected.stderr)
         );
         let found = native(&exe, c);
-        // Without the warnings of the weaker sandbox (Windows): `unio run` also warns for the
-        // worker that compiles the program, which an executable does not have.
         if expected.status.code() != found.status.code()
             || expected.stdout != found.stdout
             || errors(&expected) != errors(&found)
@@ -644,7 +640,7 @@ fn the_random_source_of_the_system_links_and_runs() {
 #[test]
 fn the_linked_system_libraries_are_those_rustc_reports() {
     let Some(target) = unio::native::Target::host() else {
-        eprintln!("skipped: no native executables are made for this machine");
+        common::missing_prerequisite("no native executables are made for this machine");
         return;
     };
     let deps = std::env::current_exe()
@@ -691,8 +687,8 @@ fn the_linked_system_libraries_are_those_rustc_reports() {
     let output = match output {
         Ok(output) => output,
         Err(e) => {
-            eprintln!("skipped: rustc cannot be run ({e})");
             let _ = fs::remove_dir_all(&dir);
+            common::missing_prerequisite(&format!("rustc cannot be run ({e})"));
             return;
         }
     };
@@ -1081,10 +1077,24 @@ fn an_incompatible_image_is_refused() {
                 .unwrap();
             assert!(signed.status.success(), "{}", text(&signed.stderr));
         }
-        operator(&mut Command::new(&path))
-            .current_dir(&dir)
-            .output()
-            .unwrap()
+        // Another test thread may fork while this file is still open for writing; the child
+        // holds the descriptor until its exec, and running the file meanwhile fails with
+        // ETXTBSY. The descriptor is gone once that child has started, so the run is retried.
+        let mut tries = 0;
+        loop {
+            match operator(&mut Command::new(&path))
+                .current_dir(&dir)
+                .output()
+            {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 =>
+                {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.unwrap(),
+            }
+        }
     };
     let fine = run(&bytes, "fine");
     assert_eq!(text(&fine.stdout), "hello\n");

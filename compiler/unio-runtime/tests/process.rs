@@ -187,11 +187,24 @@ fn the_output_on_its_way_counts_against_the_heap_limit() {
 }
 
 /// Whether python3 can run here; the tests of leaving the process group need `os.setsid`.
+/// Without it the test fails under UNIO_REQUIRE_PREREQUISITES=1, which CI sets on every job,
+/// and is skipped with a note elsewhere (as `missing_prerequisite` of `compiler/unio/tests`).
 fn python() -> bool {
-    std::process::Command::new("python3")
+    let found = std::process::Command::new("python3")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    if !found {
+        let what = "python3 is not available";
+        if std::env::var_os("UNIO_REQUIRE_PREREQUISITES").is_some_and(|v| v == "1") {
+            panic!(
+                "a prerequisite of this test is missing: {what}; with \
+                 UNIO_REQUIRE_PREREQUISITES=1 a skipped test is a failure"
+            );
+        }
+        eprintln!("skipped: {what} (set UNIO_REQUIRE_PREREQUISITES=1 to make this a failure)");
+    }
+    found
 }
 
 /// A descendant that calls `setsid` to leave the process group of the child is still stopped at
@@ -200,7 +213,6 @@ fn python() -> bool {
 #[test]
 fn a_descendant_that_calls_setsid_is_stopped_at_the_timeout() {
     if !python() {
-        eprintln!("skipped: python3 is not available");
         return;
     }
     let dir = std::env::temp_dir().join(format!("unio-process-setsid-{}", std::process::id()));
@@ -240,7 +252,6 @@ time.sleep(60)
 #[test]
 fn a_double_fork_into_a_new_session_does_not_escape_the_tree() {
     if !python() {
-        eprintln!("skipped: python3 is not available");
         return;
     }
     let dir = std::env::temp_dir().join(format!("unio-process-daemon-{}", std::process::id()));

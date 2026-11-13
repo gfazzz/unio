@@ -305,7 +305,7 @@ pub fn system_libraries(target: Target) -> &'static [&'static str] {
             "-ldl",
             "-lc",
         ],
-        Target::MacosAarch64 => &["-lSystem", "-lc", "-lm"],
+        Target::MacosAarch64 => &["-lSystem", "-lc", "-lm", "-liconv"],
         Target::WindowsX86_64 => &[
             // The random source of the system (`BCryptGenRandom`, externs/clock.rs).
             "bcrypt.lib",

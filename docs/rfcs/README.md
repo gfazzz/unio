@@ -31,3 +31,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 | [0008](0008-checking-the-manifest.md) | `unio check` checks the manifest (E0088) | accepted (2026-11-12; implemented) |
 | [0009](0009-clock-and-randomness-as-derived-effects.md) | The clock and randomness as derived effects | accepted (2026-11-13; implemented) |
 | [0010](0010-a-hard-heap-limit.md) | A hard heap limit on the bytes a program requests | accepted (2026-11-13; implemented) |
+| [0011](0011-no-process-creation-below-children-on-macos.md) | On macOS, under a process limit, the children of a program start no processes | accepted (2026-11-13; implemented; the macOS tests pending in CI) |

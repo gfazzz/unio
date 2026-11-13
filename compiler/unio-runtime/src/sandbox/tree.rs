@@ -23,8 +23,9 @@
 //! of its children (docs/runtime.md 9.5): on Linux a seccomp filter of the program makes each
 //! creation wait for the runtime, which fails it past the limit (`linux.rs`); on Windows the
 //! job holds at most the processes left and reports each new one, and a tree that started more
-//! is stopped; on macOS the tree is searched for new processes while the call waits, and a
-//! tree found over the limit is stopped.
+//! is stopped; on macOS a child under the limit may create no process (`RLIMIT_NPROC` of 0,
+//! `sandbox::limit_child`, RFC 0011): a program run as root is refused, and no set-user-ID or
+//! set-group-ID file may be executed, since the kernel exempts a real user of 0.
 
 #[cfg(windows)]
 pub use super::windows::Child;
@@ -157,8 +158,8 @@ impl Tree {
     }
 
     /// Whether the tree has started more processes than the limit of the program allows; such
-    /// a tree is stopped (Windows, macOS). On Linux a creation past the limit fails instead, so
-    /// a tree is never over it.
+    /// a tree is stopped (Windows). On Linux a creation past the limit fails instead, and on
+    /// macOS a child under a limit can create no process (RFC 0011), so a tree is never over it.
     pub fn over_limit(&mut self) -> bool {
         self.imp.over_limit()
     }
@@ -243,18 +244,13 @@ mod imp {
         live: bool,
         #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
         marker: Option<Marker>,
-        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-        budget: super::Budget,
-        /// The processes of the tree found so far (macOS).
-        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-        seen: Vec<i32>,
     }
 
     impl Tree {
         pub fn start(
             child: &mut Child,
             marker: Option<Marker>,
-            budget: super::Budget,
+            _budget: super::Budget,
         ) -> std::io::Result<Tree> {
             let group = i32::try_from(child.id()).unwrap_or(0);
             if group <= 0 {
@@ -265,8 +261,6 @@ mod imp {
                 group,
                 live: true,
                 marker,
-                budget,
-                seen: vec![group],
             })
         }
 
@@ -278,52 +272,12 @@ mod imp {
             }
         }
 
-        /// Linux: the filter of the program fails every creation past the limit.
-        #[cfg(not(target_os = "macos"))]
+        /// Linux: the filter of the program fails every creation past the limit. macOS: under
+        /// a limit a child can create no process (RFC 0011, `sandbox::limit_child`), and the
+        /// program is refused under root and a set-user-ID or set-group-ID file is never
+        /// executed, so nothing past the calls of `process.run`, which are counted before each
+        /// child starts, is created. A tree is never over the limit.
         pub fn over_limit(&mut self) -> bool {
-            false
-        }
-
-        /// macOS: the descendants are searched through their parents and the marker, and each
-        /// process not seen before counts; a tree over the limit is stopped. A process that
-        /// starts and ends between two searches is not seen.
-        #[cfg(target_os = "macos")]
-        pub fn over_limit(&mut self) -> bool {
-            use std::sync::atomic::Ordering;
-            let Some((limit, counted)) = &self.budget else {
-                return false;
-            };
-            if !self.live {
-                return false;
-            }
-            let own = std::process::id() as i32;
-            let mut next = 0;
-            while next < self.seen.len() && self.seen.len() < 4096 {
-                let parent = self.seen[next];
-                next += 1;
-                for pid in macos::children_of(parent) {
-                    if pid > 0 && pid != own && !self.seen.contains(&pid) {
-                        self.seen.push(pid);
-                        counted.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-            }
-            if let Some(marker) = &self.marker {
-                for pid in macos::all_pids() {
-                    if pid > 1
-                        && pid != own
-                        && !self.seen.contains(&pid)
-                        && macos::carries(pid, marker)
-                    {
-                        self.seen.push(pid);
-                        counted.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-            }
-            if counted.load(Ordering::SeqCst) > *limit {
-                self.stop();
-                return true;
-            }
             false
         }
     }

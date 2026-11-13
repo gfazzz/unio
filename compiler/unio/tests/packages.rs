@@ -5,6 +5,8 @@
 //! the download worker that cannot reach any other host; the review of T-9, which grants
 //! nothing; and no code of a package run during installation or a check.
 
+mod common;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -274,11 +276,6 @@ impl Project {
             .env("HOME", self.path("home"))
             .stdin(Stdio::null())
             .args(args);
-        if cfg!(windows) {
-            let policy = self.path("weaker.toml");
-            fs::write(&policy, "allow_weaker = true\n").unwrap();
-            command.env("UNIO_POLICY", policy);
-        }
         command
     }
 
@@ -660,26 +657,55 @@ fn hostile_archives_are_refused_by_the_unpack_worker() {
     assert_eq!(fs::read_dir(p.path("cache/staging")).unwrap().count(), 0);
 }
 
+/// A path dependency that holds a link out of its directory is refused, and nothing of the
+/// target is installed. On Unix the link is a symbolic link to a file; on Windows it is a
+/// directory junction, which needs no privilege and is a link like a symbolic link (a
+/// name-surrogate reparse point, which `symlink_metadata` reports as one). Where the link
+/// cannot be made the test fails under UNIO_REQUIRE_PREREQUISITES=1, as in CI. The Windows run
+/// is on CI only.
 #[test]
 fn a_path_dependency_with_a_link_out_of_it_is_refused() {
     let p = Project::new("pathlink");
     p.util("util", "1.0.0");
-    p.write("secret.txt", "SECRET");
+    p.write("outside/secret.unio", "SECRET");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(p.path("secret.txt"), p.path("util/leak.unio")).unwrap();
-    #[cfg(unix)]
-    refused(
-        &p.unio(&["add", "util", "--path", "../util"]),
-        "symbolic link",
-    );
+    std::os::unix::fs::symlink(p.path("outside/secret.unio"), p.path("util/leak.unio")).unwrap();
+    #[cfg(windows)]
+    {
+        // `mklink` does not take the verbatim prefix that `canonicalize` gives.
+        let plain = |path: PathBuf| {
+            let text = path.display().to_string();
+            text.strip_prefix(r"\\?\").map(String::from).unwrap_or(text)
+        };
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(plain(p.path("util/leak")))
+            .arg(plain(p.path("outside")))
+            .output();
+        let made = made.is_ok_and(|o| o.status.success());
+        if !made || !fs::symlink_metadata(p.path("util/leak")).is_ok_and(|m| m.is_symlink()) {
+            common::missing_prerequisite("a directory junction cannot be made with mklink /J");
+            return;
+        }
+    }
+    #[cfg(any(unix, windows))]
+    {
+        let out = p.unio(&["add", "util", "--path", "../util"]);
+        refused(&out, "symbolic link");
+        assert!(!all(&out).contains("SECRET"), "{}", all(&out));
+        assert_eq!(p.cache_entries(), 0, "{}", all(&out));
+        assert!(!p.read("app/unio.toml").contains("util"));
+    }
 }
 
 // ---------------------------------------------------------------- the download worker
 
 /// The download worker can open no connection itself: the tool connects to the configured
 /// registry and passes the connection, and the probe of another port on the same host is
-/// denied by the operating system while the download goes on (SB-12).
-#[cfg(unix)]
+/// denied by the operating system while the download goes on (SB-12). On Linux and macOS the
+/// worker's seccomp filter or Seatbelt profile denies it; on Windows its AppContainer has no
+/// network capability, so it reaches no address, not even the loopback, and the tool passes
+/// the socket it connected (docs/runtime.md 9.7). The Windows run is on CI only.
 #[test]
 fn the_download_worker_reaches_only_the_configured_registry() {
     let server = Server::start();
@@ -921,18 +947,29 @@ fn two_origins_with_one_name_do_not_share_types() {
 
 /// The unpack worker reads only the package it unpacks and writes only the staging directory
 /// of its cache entry: the probes past the code of the worker are denied by the system (SB-12).
-#[cfg(unix)]
+/// On Linux and macOS by Landlock and seccomp or by Seatbelt; on Windows by the AppContainer,
+/// which holds grants on exactly the scopes of the worker, and by its Job Object, which allows
+/// one active process, so the worker starts none (docs/runtime.md 9.7). The Windows run is on
+/// CI only.
 #[test]
 fn the_unpack_worker_writes_only_its_cache_entry() {
     let p = Project::new("unpackprobe");
     p.util("util", "1.0.0");
     p.write("home/secret.txt", "SECRET");
+    // A program that exists on the system, so that only the sandbox can deny its start.
+    let shell = if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        PathBuf::from(root).join("System32").join("cmd.exe")
+    } else {
+        PathBuf::from("/bin/sh")
+    };
+    assert!(shell.is_file(), "{} is missing", shell.display());
     let probes = [
         format!("write={}", p.path("cache/packages/planted").display()),
         format!("write={}", p.path("app/planted").display()),
         format!("read={}", p.path("home/secret.txt").display()),
         format!("read={}", p.path("app/unio.toml").display()),
-        "exec=/bin/sh".to_string(),
+        format!("exec={}", shell.display()),
     ];
     let out = p
         .command(&["add", "util", "--path", "../util"])
