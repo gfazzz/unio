@@ -907,3 +907,82 @@ fn a_mistake_of_the_manifest_is_a_diagnostic_of_the_package() {
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     c.finish();
 }
+
+#[test]
+fn fixes_are_bound_to_the_revision_of_their_diagnostics() {
+    let p = Project::new("fixes");
+    let text = "enum C:\n    List\n    Show\n\nfunction f() returns C:\n    return List\n\nfunction g() returns Int:\n    return \"a\"\n";
+    let main = p.write("pkg/main.unio", text);
+    let uri = path_to_uri(&main);
+    let mut c = p.server(None, &[]);
+    let init = c.initialize(&p.path("pkg"));
+    assert!(
+        init.at(&["capabilities", "codeActionProvider"]).is_some(),
+        "{init}"
+    );
+    c.open(&uri, text);
+    let diagnostics = c.diagnostics(&uri, Duration::from_secs(60));
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    let variant = diagnostics
+        .iter()
+        .find(|d| d.get("code").and_then(Json::as_str) == Some("E0072"))
+        .unwrap();
+    // Each diagnostic names the revision it was made for; a type mismatch the expected type.
+    assert_eq!(
+        variant.at(&["data", "revision"]).and_then(Json::as_i64),
+        Some(1)
+    );
+    let mismatch = diagnostics
+        .iter()
+        .find(|d| d.get("code").and_then(Json::as_str) == Some("E0061"))
+        .unwrap();
+    assert_eq!(
+        mismatch.at(&["data", "expected"]).and_then(Json::as_str),
+        Some("Int"),
+        "{mismatch}"
+    );
+    let ask = |d: &Json| {
+        Json::object(vec![
+            (
+                "textDocument",
+                Json::object(vec![("uri", Json::str(uri.clone()))]),
+            ),
+            ("range", d.get("range").unwrap().clone()),
+            (
+                "context",
+                Json::object(vec![("diagnostics", Json::Array(vec![d.clone()]))]),
+            ),
+        ])
+    };
+    let actions = c.call("textDocument/codeAction", ask(variant));
+    let actions = actions.as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let change = &actions[0]
+        .at(&["edit", "documentChanges"])
+        .unwrap()
+        .as_array()
+        .unwrap()[0];
+    assert_eq!(
+        change
+            .at(&["textDocument", "version"])
+            .and_then(Json::as_i64),
+        Some(1),
+        "{change}"
+    );
+    let edit = &change.get("edits").unwrap().as_array().unwrap()[0];
+    assert_eq!(edit.get("newText").and_then(Json::as_str), Some("C.List"));
+    assert_eq!(line_of(edit.get("range").unwrap()), 5);
+    // After a change the old diagnostic offers nothing until the checks ran again.
+    let changed = text.replace("return \"a\"", "return 1");
+    c.change(&uri, 2, &changed);
+    let stale = c.call("textDocument/codeAction", ask(variant));
+    assert_eq!(stale.as_array().map(|a| a.len()), Some(0), "{stale}");
+    let again = c.diagnostics(&uri, Duration::from_secs(60));
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(
+        again[0].at(&["data", "revision"]).and_then(Json::as_i64),
+        Some(2)
+    );
+    let fresh = c.call("textDocument/codeAction", ask(&again[0]));
+    assert_eq!(fresh.as_array().map(|a| a.len()), Some(1), "{fresh}");
+}

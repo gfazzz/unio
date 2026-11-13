@@ -1,8 +1,8 @@
 {
   "name": "unio",
   "displayName": "Unio",
-  "description": "Unio for VS Code and Cursor: highlighting of .unio files and of ```unio blocks of Markdown, and the language server unio lsp (diagnostics, go to definition, hover with types, completion, formatting, rename).",
-  "version": "0.2.0",
+  "description": "Unio for VS Code and Cursor: highlighting of .unio files and of ```unio blocks of Markdown, the language server unio lsp (diagnostics, go to definition, hover with types, completion, formatting, rename, quick fixes), and the tests of .unio files in the Testing view.",
+  "version": "0.3.0",
   "publisher": "unio",
   "license": "SEE LICENSE IN README.md",
   "repository": {
@@ -15,7 +15,8 @@
   "categories": [
     "Programming Languages",
     "Linters",
-    "Formatters"
+    "Formatters",
+    "Testing"
   ],
   "main": "./extension.js",
   "activationEvents": [
@@ -87,7 +88,7 @@
     ]
   },
   "scripts": {
-    "test": "node --test test/grammar.test.mjs test/client.test.mjs"
+    "test": "node --test test/grammar.test.mjs test/client.test.mjs test/testing.test.mjs"
   },
   "devDependencies": {
     "vscode-oniguruma": "2.0.1",

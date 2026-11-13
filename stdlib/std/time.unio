@@ -1,0 +1,592 @@
+## Time (requirement S-1): durations, the monotonic clock for measuring, the wall clock for
+## timestamps, and sleeping.
+##
+## Reading the current time - now, monotonic and sleep - has the derived effect clock
+## (docs/semantics.md 8.2, RFC 0009): unio symbol shows it for every function that reads the time,
+## through calls and function values, and it needs no permission of the manifest. Operations on a
+## given duration, instant, timestamp or date have no effect: arithmetic, comparison, the calendar,
+## RFC 3339 text and ManualClock are pure. Code that must be tested at a fixed time takes a Clock
+## value, and the test passes a ManualClock; nothing changes global state (language contracts,
+## T-12). A call of now() on a Clock value whose type is not known at the call has the effect
+## clock, since SystemClock is among its implementations (8.4).
+##
+## Duration, Instant and Timestamp count nanoseconds in an Int, so a Timestamp lies between the
+## years 1677 and 2262, and arithmetic that leaves that range is a fault, as for Int.
+unsafe module
+
+from std.math import floor_divide, modulo
+from std.text import join
+
+let NANOS_PER_SECOND as Int = 1000000000
+
+let NANOS_PER_DAY as Int = 86400000000000
+
+let DIGITS as Text = "0123456789"
+
+## A signed length of time with nanosecond resolution.
+public struct Duration:
+    nanos as Int
+
+## A reading of the monotonic clock. Only the difference of two readings of one run means anything:
+## the clock never goes back, and it does not follow changes of the system time.
+public struct Instant:
+    nanos as Int
+
+## A point in time on the wall clock (UTC), in nanoseconds since 1970-01-01T00:00:00Z, without leap
+## seconds, as the operating system counts it. The text form is RFC 3339 in UTC.
+public struct Timestamp:
+    nanos as Int
+
+## The fields of a Timestamp in the UTC calendar (the proleptic Gregorian calendar).
+public struct DateTime:
+    public year as Int
+    public month as Int
+    public day as Int
+    public hour as Int = 0
+    public minute as Int = 0
+    public second as Int = 0
+    public nanosecond as Int = 0
+
+## A text that is not a timestamp of RFC 3339, or fields that are not a date and time.
+public error TimeError:
+    text as Text
+    message as Text
+
+## A duration of n nanoseconds.
+## Example:
+##     assert nanoseconds(1500).total_nanoseconds() == 1500
+public function nanoseconds(n as Int) returns Duration:
+    return Duration(nanos = n)
+
+## A duration of n microseconds; one that does not fit in Int nanoseconds is a fault.
+## Example:
+##     assert microseconds(2).total_nanoseconds() == 2000
+public function microseconds(n as Int) returns Duration:
+    return Duration(nanos = n * 1000)
+
+## A duration of n milliseconds.
+## Example:
+##     assert milliseconds(1500) == seconds(1) + milliseconds(500)
+public function milliseconds(n as Int) returns Duration:
+    return Duration(nanos = n * 1000000)
+
+## A duration of n seconds.
+## Example:
+##     assert seconds(90) == minutes(1) + seconds(30)
+public function seconds(n as Int) returns Duration:
+    return Duration(nanos = n * NANOS_PER_SECOND)
+
+## A duration of n minutes.
+## Example:
+##     assert minutes(60) == hours(1)
+public function minutes(n as Int) returns Duration:
+    return Duration(nanos = n * 60 * NANOS_PER_SECOND)
+
+## A duration of n hours.
+## Example:
+##     assert hours(24).total_seconds() == 86400
+public function hours(n as Int) returns Duration:
+    return Duration(nanos = n * 3600 * NANOS_PER_SECOND)
+
+extend Duration:
+    ## The length in nanoseconds.
+    ## Example:
+    ##     assert milliseconds(3).total_nanoseconds() == 3000000
+    public function total_nanoseconds(self) returns Int:
+        return self.nanos
+
+    ## The length in whole milliseconds, truncated toward zero.
+    ## Example:
+    ##     assert microseconds(2500).total_milliseconds() == 2
+    public function total_milliseconds(self) returns Int:
+        return self.nanos / 1000000
+
+    ## The length in whole seconds, truncated toward zero.
+    ## Example:
+    ##     assert milliseconds(-1500).total_seconds() == -1
+    public function total_seconds(self) returns Int:
+        return self.nanos / NANOS_PER_SECOND
+
+    ## The length in seconds as a Float, for display and rates.
+    ## Example:
+    ##     assert milliseconds(250).as_seconds() == 0.25
+    public function as_seconds(self) returns Float:
+        let whole = self.nanos / NANOS_PER_SECOND
+        let rest = self.nanos % NANOS_PER_SECOND
+        return whole.to_float() + rest.to_float() / NANOS_PER_SECOND.to_float()
+
+    ## Whether the duration is below zero.
+    ## Example:
+    ##     assert (seconds(1) - seconds(2)).is_negative()
+    public function is_negative(self) returns Bool:
+        return self.nanos < 0
+
+extend Duration with Add:
+    ## The sum; a fault on overflow.
+    function add(self, other as Self) returns Self:
+        return Duration(nanos = self.nanos + other.nanos)
+
+extend Duration with Subtract:
+    ## The difference; a fault on overflow.
+    function subtract(self, other as Self) returns Self:
+        return Duration(nanos = self.nanos - other.nanos)
+
+extend Duration with Order:
+    function compare(self, other as Self) returns Int:
+        return compare_ints(self.nanos, other.nanos)
+
+extend Duration with Hash:
+    function hash(self) returns Int:
+        return self.nanos
+
+extend Duration with Display:
+    ## Seconds with the fraction that is needed and an "s": "1.5s", "0s", "-0.000001s".
+    function to_text(self) returns Text:
+        return seconds_text(self.nanos) + "s"
+
+extend Instant:
+    ## The time from earlier to this reading; negative when earlier is later.
+    ## Example:
+    ##     assert monotonic().since(monotonic()) <= seconds(0)
+    public function since(self, earlier as Instant) returns Duration:
+        return Duration(nanos = self.nanos - earlier.nanos)
+
+    ## The reading the duration after this one.
+    ## Example:
+    ##     let start = monotonic()
+    ##     assert start.plus(seconds(1)) > start
+    public function plus(self, duration as Duration) returns Instant:
+        return Instant(nanos = self.nanos + duration.nanos)
+
+extend Instant with Order:
+    function compare(self, other as Self) returns Int:
+        return compare_ints(self.nanos, other.nanos)
+
+extend Timestamp:
+    ## Nanoseconds since 1970-01-01T00:00:00Z; negative before it.
+    ## Example:
+    ##     assert from_unix_seconds(2).unix_nanoseconds() == 2000000000
+    public function unix_nanoseconds(self) returns Int:
+        return self.nanos
+
+    ## Whole seconds since 1970-01-01T00:00:00Z, rounded toward negative infinity.
+    ## Example:
+    ##     assert from_unix_nanoseconds(-1).unix_seconds() == -1
+    public function unix_seconds(self) returns Int:
+        return floor_divide(self.nanos, NANOS_PER_SECOND)
+
+    ## The time from earlier to this timestamp; negative when earlier is later.
+    ## Example:
+    ##     assert from_unix_seconds(60).since(from_unix_seconds(0)) == minutes(1)
+    public function since(self, earlier as Timestamp) returns Duration:
+        return Duration(nanos = self.nanos - earlier.nanos)
+
+    ## The timestamp the duration after this one; a negative duration goes back.
+    ## Example:
+    ##     assert from_unix_seconds(0).plus(hours(1)).unix_seconds() == 3600
+    public function plus(self, duration as Duration) returns Timestamp:
+        return Timestamp(nanos = self.nanos + duration.nanos)
+
+    ## The calendar fields in UTC.
+    ## Example:
+    ##     assert from_unix_seconds(86400).to_utc() == DateTime(year = 1970, month = 1, day = 2)
+    public function to_utc(self) returns DateTime:
+        let days = floor_divide(self.nanos, NANOS_PER_DAY)
+        let within = modulo(self.nanos, NANOS_PER_DAY)
+        let date = civil_from_days(days)
+        let second_of_day = within / NANOS_PER_SECOND
+        return DateTime(
+            year = date.year,
+            month = date.month,
+            day = date.day,
+            hour = second_of_day / 3600,
+            minute = second_of_day % 3600 / 60,
+            second = second_of_day % 60,
+            nanosecond = within % NANOS_PER_SECOND,
+        )
+
+extend Timestamp with Order:
+    function compare(self, other as Self) returns Int:
+        return compare_ints(self.nanos, other.nanos)
+
+extend Timestamp with Hash:
+    function hash(self) returns Int:
+        return self.nanos
+
+extend Timestamp with Display:
+    ## RFC 3339 in UTC with the fraction that is needed: "2026-11-12T08:30:00Z",
+    ## "1969-12-31T23:59:59.5Z". parse_timestamp reads it back.
+    function to_text(self) returns Text:
+        let fields = self.to_utc()
+        var text = "{padded(fields.year, 4)}-{padded(fields.month, 2)}-{padded(fields.day, 2)}"
+        text = text + "T{padded(fields.hour, 2)}:{padded(fields.minute, 2)}:{padded(fields.second, 2)}"
+        if fields.nanosecond != 0: text = text + "." + fraction_digits(fields.nanosecond)
+        return text + "Z"
+
+## The timestamp n seconds after 1970-01-01T00:00:00Z.
+## Example:
+##     assert "{from_unix_seconds(0)}" == "1970-01-01T00:00:00Z"
+public function from_unix_seconds(n as Int) returns Timestamp:
+    return Timestamp(nanos = n * NANOS_PER_SECOND)
+
+## The timestamp n nanoseconds after 1970-01-01T00:00:00Z.
+## Example:
+##     assert "{from_unix_nanoseconds(1500000000)}" == "1970-01-01T00:00:01.5Z"
+public function from_unix_nanoseconds(n as Int) returns Timestamp:
+    return Timestamp(nanos = n)
+
+## The timestamp of calendar fields in UTC; fields that are not a valid date and time, or a time
+## outside the years 1677 to 2262, fail with TimeError.
+## Example:
+##     let leap_day = try from_utc(DateTime(year = 2000, month = 2, day = 29)) on TimeError as e:
+##         assert_fail(e.message)
+##     assert "{leap_day}" == "2000-02-29T00:00:00Z"
+public function from_utc(fields as DateTime) returns Timestamp fails with TimeError:
+    let label = "{fields.year}-{fields.month}-{fields.day} {fields.hour}:{fields.minute}:{fields.second}"
+    if fields.month < 1 or fields.month > 12:
+        fail TimeError(text = label, message = "the month is not 1 to 12")
+    if fields.day < 1 or fields.day > days_in_month(fields.year, fields.month):
+        fail TimeError(text = label, message = "the day is not in the month")
+    if fields.hour < 0 or fields.hour > 23 or fields.minute < 0 or fields.minute > 59:
+        fail TimeError(text = label, message = "the hour or the minute is out of range")
+    if fields.second < 0 or fields.second > 59:
+        fail TimeError(
+            text = label,
+            message = "the second is not 0 to 59; leap seconds are not counted",
+        )
+    if fields.nanosecond < 0 or fields.nanosecond >= NANOS_PER_SECOND:
+        fail TimeError(text = label, message = "the nanosecond is not 0 to 999999999")
+    if fields.year < 1677 or fields.year > 2262:
+        fail TimeError(text = label, message = "the year is outside 1677 to 2262")
+    let days = days_from_civil(fields.year, fields.month, fields.day)
+    let seconds = (fields.hour * 60 + fields.minute) * 60 + fields.second
+    let within = seconds * NANOS_PER_SECOND + fields.nanosecond
+    match days.checked_multiply(NANOS_PER_DAY):
+        case some(day_start):
+            match day_start.checked_add(within):
+                case some(total): return Timestamp(nanos = total)
+                case none: pass
+        case none: pass
+    fail TimeError(text = label, message = "the time does not fit in a Timestamp")
+
+## Reads an RFC 3339 timestamp: date, "T", time with an optional fraction of up to nine digits, and
+## "Z" or an offset such as "+02:00". The result is the same instant in UTC.
+## Example:
+##     let parsed = try parse_timestamp("2026-11-12T10:30:00+02:00") on TimeError as e:
+##         assert_fail(e.message)
+##     assert "{parsed}" == "2026-11-12T08:30:00Z"
+public function parse_timestamp(text as Text) returns Timestamp fails with TimeError:
+    let characters = text.chars()
+    if characters.length() < 20:
+        fail TimeError(text = text, message = "too short for an RFC 3339 timestamp")
+    for index in [4, 7]:
+        if characters[index] != "-": fail TimeError(text = text, message = "expected - in the date")
+    if characters[10] != "T" and characters[10] != "t":
+        fail TimeError(text = text, message = "expected T between the date and the time")
+    if characters[13] != ":" or characters[16] != ":":
+        fail TimeError(text = text, message = "expected : in the time")
+    let year = try number_at(text, characters, 0, 4)
+    let month = try number_at(text, characters, 5, 2)
+    let day = try number_at(text, characters, 8, 2)
+    let hour = try number_at(text, characters, 11, 2)
+    let minute = try number_at(text, characters, 14, 2)
+    let second = try number_at(text, characters, 17, 2)
+    var position = 19
+    var nanosecond = 0
+    if characters[position] == ".":
+        position = position + 1
+        var digits = 0
+        while position < characters.length() and characters[position] in DIGITS:
+            if digits == 9:
+                fail TimeError(text = text, message = "more than nine digits of a fraction")
+            nanosecond = nanosecond * 10 + (DIGITS.index_of(characters[position]) or 0)
+            digits = digits + 1
+            position = position + 1
+        if digits == 0: fail TimeError(text = text, message = "expected digits after .")
+        for _ in range(digits, 9):
+            nanosecond = nanosecond * 10
+    if position >= characters.length():
+        fail TimeError(text = text, message = "expected Z or an offset")
+    var offset_minutes = 0
+    let zone = characters[position]
+    if zone == "Z" or zone == "z": position = position + 1
+    else if zone == "+" or zone == "-":
+        if characters.length() != position + 6 or characters[position + 3] != ":":
+            fail TimeError(text = text, message = "expected an offset such as +02:00")
+        let offset_hours = try number_at(text, characters, position + 1, 2)
+        let offset_rest = try number_at(text, characters, position + 4, 2)
+        if offset_hours > 23 or offset_rest > 59:
+            fail TimeError(text = text, message = "the offset is out of range")
+        offset_minutes = offset_hours * 60 + offset_rest
+        if zone == "-": offset_minutes = -offset_minutes
+        position = position + 6
+    else: fail TimeError(text = text, message = "expected Z or an offset")
+    if position != characters.length():
+        fail TimeError(text = text, message = "unexpected text after the timestamp")
+    let local = try from_utc(
+        DateTime(
+            year = year,
+            month = month,
+            day = day,
+            hour = hour,
+            minute = minute,
+            second = second,
+            nanosecond = nanosecond,
+        ),
+    ) on TimeError as e:
+        fail TimeError(text = text, message = e.message)
+    return local.plus(minutes(-offset_minutes))
+
+## A source of the current time. Functions that need the time take a Clock, so that a test can pass
+## a ManualClock instead of SystemClock.
+public interface Clock:
+    ## The current time of the wall clock.
+    function now(self) returns Timestamp
+
+    ## The current reading of the monotonic clock.
+    function monotonic(self) returns Instant
+
+## The clocks of the operating system: now() and monotonic() of this module.
+## Example:
+##     assert SystemClock().now() > from_unix_seconds(0)
+public struct SystemClock
+
+extend SystemClock with Clock:
+    function now(self) returns Timestamp:
+        return now()
+
+    function monotonic(self) returns Instant:
+        return monotonic()
+
+## A clock for tests: it stands still until advance moves both of its times. Made by manual_clock.
+## Example:
+##     var clock = manual_clock(from_unix_seconds(0))
+##     clock.advance(seconds(5))
+##     assert clock.now().unix_seconds() == 5
+public struct ManualClock:
+    var at as Timestamp
+    var reading as Instant = Instant(nanos = 0)
+
+## A ManualClock at the wall time, with its monotonic reading at 0.
+## Example:
+##     assert manual_clock(from_unix_seconds(7)).now() == from_unix_seconds(7)
+public function manual_clock(at as Timestamp) returns ManualClock:
+    return ManualClock(at = at)
+
+extend ManualClock:
+    ## Moves the wall time and the monotonic reading forward by the duration; a negative duration is
+    ## a fault, since a monotonic clock never goes back.
+    ## Example:
+    ##     var clock = manual_clock(from_unix_seconds(0))
+    ##     let start = clock.monotonic()
+    ##     clock.advance(minutes(1))
+    ##     assert clock.monotonic().since(start) == minutes(1)
+    public function advance(var self, duration as Duration):
+        if duration.is_negative(): assert_fail("ManualClock.advance: a negative duration")
+        self.at = self.at.plus(duration)
+        self.reading = self.reading.plus(duration)
+
+    ## Sets the wall time, forward or back, as when the system time is changed; the monotonic reading
+    ## stays.
+    ## Example:
+    ##     var clock = manual_clock(from_unix_seconds(0))
+    ##     clock.set(from_unix_seconds(-5))
+    ##     assert clock.now().unix_seconds() == -5
+    public function set(var self, at as Timestamp):
+        self.at = at
+
+extend ManualClock with Clock:
+    function now(self) returns Timestamp:
+        return self.at
+
+    function monotonic(self) returns Instant:
+        return self.reading
+
+## The current time of the wall clock of the system. It can jump when the system time is set; use
+## monotonic() to measure.
+## Example:
+##     assert now() > from_unix_seconds(1577836800)
+public function now() returns Timestamp:
+    return Timestamp(nanos = wall_nanoseconds())
+
+## The current reading of the monotonic clock.
+## Example:
+##     let start = monotonic()
+##     assert not monotonic().since(start).is_negative()
+public function monotonic() returns Instant:
+    return Instant(nanos = monotonic_nanoseconds())
+
+## Suspends the program for at least the duration; zero or a negative duration returns at once.
+## Example:
+##     let start = monotonic()
+##     sleep(milliseconds(2))
+##     assert monotonic().since(start) >= milliseconds(2)
+public function sleep(duration as Duration):
+    sleep_nanoseconds(duration.nanos)
+
+external function monotonic_nanoseconds() returns Int
+
+external function wall_nanoseconds() returns Int
+
+external function sleep_nanoseconds(nanoseconds as Int)
+
+function compare_ints(a as Int, b as Int) returns Int:
+    if a < b: return -1
+    return 0 if a == b else 1
+
+## A nonnegative number with at least width digits.
+function padded(value as Int, width as Int) returns Text:
+    let digits = "{value}"
+    return "0".repeat(width - digits.length()) + digits if digits.length() < width else digits
+
+## The digits of a fraction of a second, without trailing zeros.
+function fraction_digits(nanos as Int) returns Text:
+    var digits = padded(nanos, 9)
+    while digits.ends_with("0"):
+        digits = digits.slice(0, digits.length() - 1)
+    return digits
+
+function seconds_text(nanos as Int) returns Text:
+    let whole = nanos / NANOS_PER_SECOND
+    let rest = nanos % NANOS_PER_SECOND
+    let sign = "-" if nanos < 0 else ""
+    let magnitude = "{-whole if whole < 0 else whole}"
+    if rest == 0: return sign + magnitude
+    return sign + magnitude + "." + fraction_digits(-rest if rest < 0 else rest)
+
+struct CivilDate:
+    year as Int
+    month as Int
+    day as Int
+
+## The date of a day number counted from 1970-01-01 (H. Hinnant, "chrono-compatible low-level date
+## algorithms").
+function civil_from_days(days as Int) returns CivilDate:
+    let shifted = days + 719468
+    let era = floor_divide(shifted, 146097)
+    let day_of_era = shifted - era * 146097
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100)
+    let shifted_month = (5 * day_of_year + 2) / 153
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1
+    let month = shifted_month + 3 if shifted_month < 10 else shifted_month - 9
+    let year = year_of_era + era * 400 + (1 if month <= 2 else 0)
+    return CivilDate(year = year, month = month, day = day)
+
+## The day number counted from 1970-01-01 of a date.
+function days_from_civil(year as Int, month as Int, day as Int) returns Int:
+    let shifted_year = year - 1 if month <= 2 else year
+    let era = floor_divide(shifted_year, 400)
+    let year_of_era = shifted_year - era * 400
+    let day_of_year = (153 * (month - 3 if month > 2 else month + 9) + 2) / 5 + day - 1
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year
+    return era * 146097 + day_of_era - 719468
+
+function is_leap_year(year as Int) returns Bool:
+    return modulo(year, 4) == 0 and (modulo(year, 100) != 0 or modulo(year, 400) == 0)
+
+function days_in_month(year as Int, month as Int) returns Int:
+    if month == 2: return 29 if is_leap_year(year) else 28
+    return 30 if month in [4, 6, 9, 11] else 31
+
+## The decimal number of exactly count digits at start.
+function number_at(
+    text as Text,
+    characters as List[Text],
+    start as Int,
+    count as Int,
+) returns Int fails with TimeError:
+    var value = 0
+    for index in range(start, start + count):
+        match DIGITS.index_of(characters[index]):
+            case some(digit):
+                if characters[index].length() != 1:
+                    fail TimeError(text = text, message = "expected a digit")
+                value = value * 10 + digit
+            case none: fail TimeError(text = text, message = "expected a digit at {index}")
+    return value
+
+test "durations add, compare and print":
+    assert seconds(1) + milliseconds(500) == milliseconds(1500)
+    assert "{milliseconds(1500)}" == "1.5s"
+    assert "{nanoseconds(0)}" == "0s"
+    assert "{nanoseconds(-1)}" == "-0.000000001s"
+    assert "{seconds(-90)}" == "-90s"
+    assert "{nanoseconds(MINIMUM_INT)}" == "-9223372036.854775808s"
+    assert milliseconds(1) < seconds(1)
+    assert [seconds(2), seconds(1)].sorted() == [seconds(1), seconds(2)]
+    assert nanoseconds(-1999999999).total_seconds() == -1
+
+test "timestamps convert to and from the calendar":
+    assert "{from_unix_seconds(0)}" == "1970-01-01T00:00:00Z"
+    assert "{from_unix_nanoseconds(-500000000)}" == "1969-12-31T23:59:59.5Z"
+    assert "{from_unix_seconds(951782400)}" == "2000-02-29T00:00:00Z"
+    assert "{from_unix_seconds(4102444800)}" == "2100-01-01T00:00:00Z"
+    assert "{from_unix_nanoseconds(MAXIMUM_INT)}" == "2262-04-11T23:47:16.854775807Z"
+    assert "{from_unix_nanoseconds(MINIMUM_INT)}" == "1677-09-21T00:12:43.145224192Z"
+    for day in range(-800000, 800000):
+        if day % 997 != 0: continue
+        let date = civil_from_days(day)
+        assert days_from_civil(date.year, date.month, date.day) == day
+
+test "RFC 3339 text reads back":
+    for text in [
+        "1970-01-01T00:00:00Z",
+        "2026-11-12T08:30:00.123456789Z",
+        "1969-12-31T23:59:59.5Z",
+        "2024-02-29T12:00:00Z",
+    ]:
+        let parsed = try parse_timestamp(text) on TimeError as e:
+            assert_fail(e.message)
+        assert "{parsed}" == text
+    let shifted = try parse_timestamp("2026-01-01T01:00:00.5-01:30") on TimeError as e:
+        assert_fail(e.message)
+    assert "{shifted}" == "2026-01-01T02:30:00.5Z"
+    let lower = try parse_timestamp("2026-01-01t00:00:00z") on TimeError as e:
+        assert_fail(e.message)
+    assert lower == from_unix_seconds(1767225600)
+
+test "malformed timestamps fail with TimeError":
+    for text in [
+        "",
+        "2026-11-12",
+        "2026-11-12 08:30:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-02-29T00:00:00Z",
+        "2026-11-12T24:00:00Z",
+        "2026-11-12T23:59:60Z",
+        "2026-11-12T08:30:00",
+        "2026-11-12T08:30:00.Z",
+        "2026-11-12T08:30:00.1234567891Z",
+        "2026-11-12T08:30:00+2:00",
+        "2026-11-12T08:30:00Zjunk",
+        "2026-1a-12T08:30:00Z",
+        "2263-01-01T00:00:00Z",
+    ]:
+        try:
+            let _ = try parse_timestamp(text)
+            assert_fail("accepted {text}")
+        on TimeError: pass
+
+test "a manual clock stands still until it is advanced":
+    var clock = manual_clock(from_unix_seconds(100))
+    let start = clock.monotonic()
+    assert clock.now() == from_unix_seconds(100)
+    clock.advance(seconds(5))
+    assert clock.now() == from_unix_seconds(105)
+    assert clock.monotonic().since(start) == seconds(5)
+    clock.set(from_unix_seconds(0))
+    assert clock.now() == from_unix_seconds(0)
+    assert clock.monotonic().since(start) == seconds(5)
+    assert stamp(clock) == "1970-01-01T00:00:00Z"
+
+function stamp(clock as Clock) returns Text:
+    return "{clock.now()}"
+
+test "the system clocks move forward":
+    let start = monotonic()
+    let wall = now()
+    sleep(milliseconds(1))
+    assert monotonic().since(start) >= milliseconds(1)
+    assert wall > from_unix_seconds(1577836800)
+    assert SystemClock().monotonic() >= start

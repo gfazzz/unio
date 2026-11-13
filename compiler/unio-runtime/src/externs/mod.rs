@@ -13,12 +13,17 @@
 //! place it came from. The documentation comment of each declaration is its specification.
 
 pub mod alloc;
+pub mod clock;
 pub mod core;
 pub mod durability;
 pub mod files;
 pub mod float_text;
+pub mod math;
 pub mod process;
 pub mod system;
+pub mod unicode;
+#[rustfmt::skip]
+pub mod unicode_tables;
 
 use crate::fault::{FaultKind, Outcome, Unwind};
 use crate::runtime::Runtime;
@@ -34,8 +39,10 @@ pub fn bindings() -> BTreeMap<&'static str, ExternFn> {
     let mut table: BTreeMap<&'static str, ExternFn> = BTreeMap::new();
     for (name, function) in core::BINDINGS
         .iter()
+        .chain(math::BINDINGS)
         .chain(alloc::BINDINGS)
         .chain(system::BINDINGS)
+        .chain(clock::BINDINGS)
         .chain(files::BINDINGS)
         .chain(process::BINDINGS)
     {
@@ -207,7 +214,7 @@ pub(crate) fn reserve(
     additional: usize,
 ) -> Result<(), Unwind> {
     runtime.reserve_heap(additional)?;
-    data.try_reserve_exact(additional)
+    crate::reserve::fallible(|| data.try_reserve_exact(additional))
         .map_err(|_| Unwind::Exhausted(crate::fault::Exhaustion::Heap))
 }
 

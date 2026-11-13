@@ -1,10 +1,18 @@
 ## Methods of Option[T]. The operator or gives a default value; ?. passes none along a chain.
 
 extend[T] Option[T]:
+    ## Whether a value is present.
+    ## Example:
+    ##     let missing as Option[Int] = none
+    ##     assert some(1).is_some() and not missing.is_some()
     public function is_some(self) returns Bool:
         match self:
             case some(_): return true
             case none: return false
 
+    ## Whether the value is absent.
+    ## Example:
+    ##     let missing as Option[Int] = none
+    ##     assert missing.is_none()
     public function is_none(self) returns Bool:
         return not self.is_some()

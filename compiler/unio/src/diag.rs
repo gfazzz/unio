@@ -107,6 +107,9 @@ pub struct Diagnostic {
     pub span: Span,
     pub label: Option<Msg>,
     pub fixes: Vec<Fix>,
+    /// The type the place expects, for a value of another type: the language server gives it
+    /// to the editor with the diagnostic (T-13). Not part of the text or JSON of `unio check`.
+    pub expected: Option<String>,
 }
 
 impl Diagnostic {
@@ -118,6 +121,7 @@ impl Diagnostic {
             span,
             label: None,
             fixes: Vec::new(),
+            expected: None,
         }
     }
 

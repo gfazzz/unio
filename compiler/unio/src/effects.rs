@@ -259,14 +259,18 @@ pub enum Step {
 }
 
 /// The derived effects, in the order `unio symbol` prints them. `files.read` and `files.write`
-/// are the scopes of the manifest of the same names (T-6).
-pub const EFFECTS: [&str; 6] = [
+/// are the scopes of the manifest of the same names (T-6). `allocates`, `clock` and `random`
+/// need no permission: they show what a function depends on, not what it may reach
+/// (semantics 8.2).
+pub const EFFECTS: [&str; 8] = [
     "files.read",
     "files.write",
     "network",
     "process",
     "env",
     "allocates",
+    "clock",
+    "random",
 ];
 const FILES_READ: usize = 0;
 const FILES_WRITE: usize = 1;
@@ -1228,6 +1232,8 @@ fn external_effects(p: &Program, f: FnId) -> u8 {
         "std.net" => "network",
         "std.process" => "process",
         "std.env" => "env",
+        "std.time" => "clock",
+        "std.random" => "random",
         _ => return 0,
     };
     EFFECTS
@@ -1263,6 +1269,12 @@ fn file_scopes(source: &str, line: usize) -> u8 {
 }
 
 const ALLOCATES: usize = 5;
+
+/// Whether the manifest has nothing to say about the effect: allocation, the clock and
+/// randomness are derived and shown, never permitted (semantics 8.2, 8.3).
+fn needs_no_permission(effect: usize) -> bool {
+    matches!(EFFECTS[effect], "allocates" | "clock" | "random")
+}
 
 /// The implementations of an interface method: the method of the same name in every
 /// `extend ... with` of its interface in the program. A type implements an interface only in
@@ -1430,7 +1442,7 @@ pub fn report(p: &mut Program, profile: Profile) {
             };
             let mut acc = None;
             for (e, effect) in EFFECTS.iter().enumerate() {
-                if e == ALLOCATES || permitted.contains(effect) {
+                if needs_no_permission(e) || permitted.contains(effect) {
                     continue;
                 }
                 if reported_effects.contains(&(u.module, e)) {

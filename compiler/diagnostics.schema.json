@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unio:diagnostics:1",
+  "title": "Unio diagnostics, version 1",
+  "description": "The output of `--diagnostics=json` (requirement C-8): one array per checked file. A change that removes or retypes a field, or adds a required one, is a new version with a new $id; optional additions keep the version. Checked against the output by compiler/unio/tests/diagnostics.rs.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/diagnostic" },
+  "$defs": {
+    "position": {
+      "type": "object",
+      "required": ["line", "column", "offset"],
+      "additionalProperties": false,
+      "properties": {
+        "line": { "type": "integer", "minimum": 1, "description": "1-based line" },
+        "column": { "type": "integer", "minimum": 1, "description": "1-based column, in characters" },
+        "offset": { "type": "integer", "minimum": 0, "description": "0-based byte offset in the file" }
+      }
+    },
+    "span": {
+      "type": "object",
+      "required": ["file", "start", "end", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string" },
+        "start": { "$ref": "#/$defs/position" },
+        "end": { "$ref": "#/$defs/position" },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "fix": {
+      "type": "object",
+      "required": ["file", "range", "new_text", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string" },
+        "range": {
+          "type": "object",
+          "required": ["start", "end"],
+          "additionalProperties": false,
+          "properties": {
+            "start": { "$ref": "#/$defs/position" },
+            "end": { "$ref": "#/$defs/position" }
+          }
+        },
+        "new_text": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "related": {
+      "type": "object",
+      "required": ["message", "span"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": { "type": ["string", "null"], "description": "the full name of the symbol, when the location is a declaration" },
+        "message": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["code", "severity", "message", "explanation", "spans", "fixes", "related"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "pattern": "^E[0-9]{4}$" },
+        "severity": { "enum": ["error", "warning", "hint"] },
+        "message": { "type": "string" },
+        "explanation": { "type": "string" },
+        "spans": { "type": "array", "items": { "$ref": "#/$defs/span" } },
+        "fixes": { "type": "array", "items": { "$ref": "#/$defs/fix" } },
+        "related": { "type": "array", "items": { "$ref": "#/$defs/related" } }
+      }
+    }
+  }
+}

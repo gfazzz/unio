@@ -1,0 +1,58 @@
+## Step 2 of the guide (docs/guide.md, chapter 4): commands from the arguments, and errors.
+##
+## Usage:
+##     unio run todo_2_commands.unio -- add buy bread
+##     unio run todo_2_commands.unio -- done 1
+
+import std.args
+from std.text import join
+
+enum Command:
+    Add(title as Text)
+    Done(id as Int)
+    Show
+    Help
+
+error UsageError:
+    message as Text
+
+## The command the arguments name; a mistake in them is an error, not a fault.
+function parse_command(arguments as List[Text]) returns Command fails with UsageError:
+    match arguments:
+        case ["add", rest...] if not rest.is_empty(): return Add(title = join(rest, " "))
+        case ["done", id_text]:
+            if id_text.to_int() is some(id): return Done(id = id)
+            fail UsageError(message = "task number must be an integer: {id_text}")
+        case ["list"]: return Show
+        case ["help"] | []: return Help
+        case _: fail UsageError(message = "unknown command: {join(arguments, " ")}")
+
+function describe(command as Command) returns Text:
+    match command:
+        case Add(title): return "add \"{title}\""
+        case Done(id): return "mark task {id} as done"
+        case Show: return "list the tasks"
+        case Help: return "show the help"
+
+public function main() returns Int:
+    let command = try parse_command(args.list()) on UsageError as e:
+        print_error("Error: {e.message}")
+        return 2
+    print("Would {describe(command)}")
+    return 0
+
+test "add takes the rest of the line as the title":
+    let command = try parse_command(["add", "buy", "bread"]) on UsageError as e:
+        assert_fail(e.message)
+    assert command == Add(title = "buy bread")
+
+test "no arguments ask for help":
+    let command = try parse_command([]) on UsageError as e:
+        assert_fail(e.message)
+    assert command == Help
+
+test "a number that is not a number is a usage error":
+    try:
+        parse_command(["done", "first"])
+        assert_fail("expected an error")
+    on UsageError as e: assert e.message.contains("must be an integer")

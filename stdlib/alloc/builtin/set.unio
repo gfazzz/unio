@@ -3,38 +3,69 @@
 unsafe module
 
 ## An empty set: Set[Text]().
+## Example:
+##     var names = Set[Text]()
+##     names.insert("ana")
+##     assert names.length() == 1
 public external function Set[T with Hash and Equal]() returns Set[T]
 
 extend[T with Hash and Equal] Set[T]:
+    ## The number of elements.
+    ## Example:
+    ##     assert [1, 2, 2].to_set().length() == 2
     public external function length(self) returns Int
 
     ## Used by "item in set".
+    ## Example:
+    ##     assert 2 in [1, 2].to_set() and 3 not in [1, 2].to_set()
     public external function contains(self, item as T) returns Bool
 
     ## Adds the item; an item already present keeps its position.
+    ## Example:
+    ##     var seen = [3].to_set()
+    ##     seen.insert(1)
+    ##     seen.insert(3)
+    ##     assert seen.items() == [3, 1]
     public external function insert(var self, item as T)
 
     ## Removes the item and tells whether it was present.
+    ## Example:
+    ##     var seen = [1, 2].to_set()
+    ##     assert seen.remove(1) and not seen.remove(1)
     public external function remove(var self, item as T) returns Bool
 
     ## The elements in insertion order.
+    ## Example:
+    ##     assert ["b", "a", "b"].to_set().items() == ["b", "a"]
     public external function items(self) returns List[T]
 
+    ## Whether the set has no elements.
+    ## Example:
+    ##     assert Set[Int]().is_empty()
     public function is_empty(self) returns Bool:
         return self.length() == 0
 
+    ## The elements of both sets: these first, then the new ones of other, each in insertion order.
+    ## Example:
+    ##     assert [1, 2].to_set().union([2, 3].to_set()).items() == [1, 2, 3]
     public function union(self, other as Set[T]) returns Set[T]:
         var result = self
         for item in other.items():
             result.insert(item)
         return result
 
+    ## The elements of this set that are also in other, in the order of this set.
+    ## Example:
+    ##     assert [1, 2, 3].to_set().intersection([3, 1].to_set()).items() == [1, 3]
     public function intersection(self, other as Set[T]) returns Set[T]:
         var result = Set[T]()
         for item in self.items():
             if item in other: result.insert(item)
         return result
 
+    ## The elements of this set that are not in other, in the order of this set.
+    ## Example:
+    ##     assert [1, 2, 3].to_set().difference([2].to_set()).items() == [1, 3]
     public function difference(self, other as Set[T]) returns Set[T]:
         var result = Set[T]()
         for item in self.items():
@@ -43,6 +74,8 @@ extend[T with Hash and Equal] Set[T]:
 
 extend[T with Hash and Equal] List[T]:
     ## The distinct items of the list, in the order of their first occurrence.
+    ## Example:
+    ##     assert [3, 1, 3].to_set().items() == [3, 1]
     public function to_set(self) returns Set[T]:
         var result = Set[T]()
         for item in self:

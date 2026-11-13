@@ -1,0 +1,268 @@
+## Collections beyond the built-in List, Map and Set (requirement S-1): a double-ended queue, a
+## priority queue, and counting. They are values like List: assigning one copies it, and methods
+## with var self change only the place they are called on. The built-in collections and their
+## methods are in the prelude (builtin/list.unio, map.unio, set.unio).
+
+## A double-ended queue: adding and removing at either end take amortized constant time.
+public struct Deque[T]:
+    var front as List[T] = []
+    var back as List[T] = []
+
+## An empty deque.
+## Example:
+##     var queue = deque[Int]()
+##     queue.push_back(1)
+##     assert queue.length() == 1
+public function deque[T]() returns Deque[T]:
+    return Deque[T]()
+
+## A deque of the items, the first item at the front.
+## Example:
+##     assert deque_of([1, 2, 3]).peek_front() == some(1)
+public function deque_of[T](items as List[T]) returns Deque[T]:
+    return Deque[T](back = items)
+
+extend[T] Deque[T]:
+    ## The number of items.
+    ## Example:
+    ##     assert deque_of(["a", "b"]).length() == 2
+    public function length(self) returns Int:
+        return self.front.length() + self.back.length()
+
+    ## Whether the deque has no items.
+    ## Example:
+    ##     assert deque[Text]().is_empty()
+    public function is_empty(self) returns Bool:
+        return self.length() == 0
+
+    ## Adds the item at the back.
+    ## Example:
+    ##     var queue = deque_of([1])
+    ##     queue.push_back(2)
+    ##     assert queue.to_list() == [1, 2]
+    public function push_back(var self, item as T):
+        self.back.append(item)
+
+    ## Adds the item at the front.
+    ## Example:
+    ##     var queue = deque_of([1])
+    ##     queue.push_front(0)
+    ##     assert queue.to_list() == [0, 1]
+    public function push_front(var self, item as T):
+        self.front.append(item)
+
+    ## Removes and returns the item at the front; none when the deque is empty.
+    ## Example:
+    ##     var queue = deque_of([1, 2])
+    ##     assert queue.pop_front() == some(1) and queue.to_list() == [2]
+    public function pop_front(var self) returns Option[T]:
+        if self.front.is_empty(): self.rebalance(true)
+        return self.front.remove_last()
+
+    ## Removes and returns the item at the back; none when the deque is empty.
+    ## Example:
+    ##     var queue = deque_of([1, 2])
+    ##     assert queue.pop_back() == some(2) and queue.to_list() == [1]
+    public function pop_back(var self) returns Option[T]:
+        if self.back.is_empty(): self.rebalance(false)
+        return self.back.remove_last()
+
+    ## The item at the front without removing it.
+    ## Example:
+    ##     assert deque_of([4, 5]).peek_front() == some(4)
+    public function peek_front(self) returns Option[T]:
+        if not self.front.is_empty(): return self.front.last()
+        return self.back.first()
+
+    ## The item at the back without removing it.
+    ## Example:
+    ##     assert deque_of([4, 5]).peek_back() == some(5)
+    public function peek_back(self) returns Option[T]:
+        if not self.back.is_empty(): return self.back.last()
+        return self.front.first()
+
+    ## The items from the front to the back.
+    ## Example:
+    ##     var queue = deque[Int]()
+    ##     queue.push_front(2)
+    ##     queue.push_back(3)
+    ##     queue.push_front(1)
+    ##     assert queue.to_list() == [1, 2, 3]
+    public function to_list(self) returns List[T]:
+        var items as List[T] = []
+        var index = self.front.length() - 1
+        while index >= 0:
+            items.append(self.front[index])
+            index = index - 1
+        items.append_all(self.back)
+        return items
+
+    ## Moves half of the items to the empty side, so that removals alternating between the ends
+    ## stay amortized constant time.
+    function rebalance(var self, to_front as Bool):
+        let items = self.to_list()
+        let middle = (items.length() + 1) / 2 if to_front else items.length() / 2
+        var front as List[T] = []
+        var index = middle - 1
+        while index >= 0:
+            front.append(items[index])
+            index = index - 1
+        self.front = front
+        self.back = items.slice(middle, items.length())
+
+## A priority queue: pop returns the smallest item by Order first; equal items come out in no
+## particular order. Adding and removing take O(log n) time (a binary heap).
+public struct PriorityQueue[T with Order]:
+    var heap as List[T] = []
+
+## An empty priority queue.
+## Example:
+##     var queue = priority_queue[Int]()
+##     queue.push(3)
+##     queue.push(1)
+##     assert queue.pop() == some(1)
+public function priority_queue[T with Order]() returns PriorityQueue[T]:
+    return PriorityQueue[T]()
+
+## A priority queue of the items.
+## Example:
+##     assert priority_queue_of([5, 2, 8]).peek() == some(2)
+public function priority_queue_of[T with Order](items as List[T]) returns PriorityQueue[T]:
+    var queue = PriorityQueue[T]()
+    for item in items:
+        queue.push(item)
+    return queue
+
+extend[T with Order] PriorityQueue[T]:
+    ## The number of items.
+    ## Example:
+    ##     assert priority_queue_of([1, 1]).length() == 2
+    public function length(self) returns Int:
+        return self.heap.length()
+
+    ## Whether the queue has no items.
+    ## Example:
+    ##     assert priority_queue[Text]().is_empty()
+    public function is_empty(self) returns Bool:
+        return self.heap.is_empty()
+
+    ## The smallest item without removing it; none when the queue is empty.
+    ## Example:
+    ##     assert priority_queue_of(["b", "a"]).peek() == some("a")
+    public function peek(self) returns Option[T]:
+        return self.heap.first()
+
+    ## Adds the item.
+    ## Example:
+    ##     var queue = priority_queue[Int]()
+    ##     queue.push(7)
+    ##     assert queue.peek() == some(7)
+    public function push(var self, item as T):
+        self.heap.append(item)
+        var child = self.heap.length() - 1
+        while child > 0:
+            let parent = (child - 1) / 2
+            if not (self.heap[child] < self.heap[parent]): break
+            let moved = self.heap[parent]
+            self.heap[parent] = self.heap[child]
+            self.heap[child] = moved
+            child = parent
+
+    ## Removes and returns the smallest item; none when the queue is empty.
+    ## Example:
+    ##     var queue = priority_queue_of([3, 1, 2])
+    ##     assert [queue.pop(), queue.pop(), queue.pop(), queue.pop()] == [some(1), some(2), some(3), none]
+    public function pop(var self) returns Option[T]:
+        match self.heap.remove_last():
+            case none: return none
+            case some(last):
+                if self.heap.is_empty(): return some(last)
+                let top = self.heap[0]
+                self.heap[0] = last
+                var parent = 0
+                let count = self.heap.length()
+                while true:
+                    let left = parent * 2 + 1
+                    if left >= count: break
+                    var smallest = left
+                    if left + 1 < count and self.heap[left + 1] < self.heap[left]:
+                        smallest = left + 1
+                    if not (self.heap[smallest] < self.heap[parent]): break
+                    let moved = self.heap[parent]
+                    self.heap[parent] = self.heap[smallest]
+                    self.heap[smallest] = moved
+                    parent = smallest
+                return some(top)
+
+    ## The items from the smallest to the largest; the queue is not changed.
+    ## Example:
+    ##     assert priority_queue_of([3, 1, 2]).to_sorted_list() == [1, 2, 3]
+    public function to_sorted_list(self) returns List[T]:
+        return self.heap.sorted()
+
+## How many times each distinct item occurs, in the order of first occurrence.
+## Example:
+##     assert counts(["a", "b", "a"]) == {"a": 2, "b": 1}
+public function counts[T with Hash and Equal](items as List[T]) returns Map[T, Int]:
+    var result as Map[T, Int] = {}
+    for item in items:
+        result.put(item, (result.get(item) or 0) + 1)
+    return result
+
+## The n items that occur most often with their counts, the most frequent first; items with the
+## same count keep the order of first occurrence. A negative n is treated as 0.
+## Example:
+##     assert most_common(["x", "y", "y", "z", "y", "x"], 2) == [("y", 3), ("x", 2)]
+public function most_common[T with Hash and Equal](
+    items as List[T],
+    n as Int,
+) returns List[Tuple[T, Int]]:
+    let ordered = counts(items).entries().sorted_by(negated_count)
+    if n <= 0: return []
+    return ordered.slice(0, min(n, ordered.length()))
+
+function negated_count[T](entry as Tuple[T, Int]) returns Int:
+    match entry:
+        case (_, count): return -count
+
+test "a deque works from both ends in any order":
+    var queue = deque[Int]()
+    for value in range(0, 10):
+        if value % 2 == 0: queue.push_back(value)
+        else: queue.push_front(value)
+    assert queue.to_list() == [9, 7, 5, 3, 1, 0, 2, 4, 6, 8]
+    assert queue.pop_back() == some(8)
+    assert queue.pop_front() == some(9)
+    var drained as List[Int] = []
+    while not queue.is_empty():
+        match queue.pop_back():
+            case some(value): drained.append(value)
+            case none: assert_fail("a nonempty deque gave none")
+    assert drained == [6, 4, 2, 0, 1, 3, 5, 7]
+    assert queue.pop_front() == none and queue.peek_back() == none
+
+test "a deque copied by assignment is independent":
+    var first = deque_of([1, 2])
+    var second = first
+    second.push_back(3)
+    assert first.to_list() == [1, 2] and second.to_list() == [1, 2, 3]
+    assert first.pop_back() == some(2)
+    assert second.peek_back() == some(3)
+
+test "a priority queue gives its items in order":
+    var queue = priority_queue_of([5, 3, 9, 1, 7, 3, 0, 8])
+    var out as List[Int] = []
+    while true:
+        match queue.pop():
+            case some(value): out.append(value)
+            case none: break
+    assert out == [0, 1, 3, 3, 5, 7, 8, 9]
+    var words = priority_queue_of(["pear", "apple", "fig"])
+    assert words.pop() == some("apple") and words.length() == 2
+
+test "counting keeps first-occurrence order":
+    assert counts([3, 1, 3, 3]).entries() == [(3, 3), (1, 1)]
+    let nothing as List[Int] = []
+    assert counts(nothing).is_empty()
+    assert most_common(["a", "b"], 5) == [("a", 1), ("b", 1)]
+    assert most_common(["a"], -1) == []

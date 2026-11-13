@@ -412,6 +412,24 @@ impl<'a> Lowering<'a> {
 
     // ---------------------------------------------------------------- statements
 
+    /// Lowers the statements of a block in the current scope and keeps their names bound: the
+    /// statements of a REPL input, whose top-level bindings the session keeps (T-13). Nothing
+    /// is cleared when they end.
+    pub fn statements(&mut self, block: &crate::ast::Block) -> (Block, Vec<(String, Slot)>) {
+        let (bound, _) = self.mark();
+        let stmts = block.iter().map(|s| self.stmt(s)).collect();
+        let frame = self.frames.last().expect("a frame");
+        let names = frame.scope[bound..].to_vec();
+        let end = frame.slots;
+        (
+            Block {
+                stmts,
+                clear: (end, end),
+            },
+            names,
+        )
+    }
+
     pub fn block(&mut self, block: &crate::ast::Block) -> Block {
         let mark = self.mark();
         let stmts = block.iter().map(|s| self.stmt(s)).collect();
@@ -770,12 +788,12 @@ impl<'a> Lowering<'a> {
                 );
                 Node::Try(Box::new(self.expr(operand)), is_value)
             }
-            ExprKind::Call { callee, arguments } => self.call(callee, &[], arguments),
+            ExprKind::Call { callee, arguments } => self.call(callee, &[], arguments, expr.span),
             ExprKind::GenericCall {
                 callee,
                 types,
                 arguments,
-            } => self.call(callee, types, arguments),
+            } => self.call(callee, types, arguments, expr.span),
             ExprKind::Index { target, index } => {
                 let t = self.expr(target);
                 Node::Index(Box::new(t), Box::new(self.expr(index)))
@@ -823,12 +841,18 @@ impl<'a> Lowering<'a> {
         Node::Field(Box::new(t), self.interp.shared(name), Cell::new(0))
     }
 
-    fn call(&mut self, callee: &Expr, types: &[Type], arguments: &[Argument]) -> Node {
+    fn call(
+        &mut self,
+        callee: &Expr,
+        types: &[Type],
+        arguments: &[Argument],
+        span: crate::diag::Span,
+    ) -> Node {
         match &callee.kind {
             ExprKind::Name(n) if self.local(n).is_none() => {
                 match self.interp.global(self.module, n) {
                     Global::Variant(d) => self.construct(d, Some(n), arguments),
-                    Global::Func(f) => self.call_fn(f, types, arguments),
+                    Global::Func(f) => self.call_fn(f, types, arguments, span),
                     Global::Def(d) => self.construct(d, None, arguments),
                     Global::Const(c) => Node::CallValue(
                         Box::new(Node::Const(c)),
@@ -843,7 +867,9 @@ impl<'a> Lowering<'a> {
                         let program = &self.interp.program;
                         if let Some(m) = program.module_alias(self.module, n) {
                             return match program.lookup(m, &name.text) {
-                                Some((_, Symbol::Func(f))) => self.call_fn(f, types, arguments),
+                                Some((_, Symbol::Func(f))) => {
+                                    self.call_fn(f, types, arguments, span)
+                                }
                                 Some((_, Symbol::Def(d))) => self.construct(d, None, arguments),
                                 _ => Node::Fault(format!("internal: unknown {n}.{}", name.text)),
                             };
@@ -855,7 +881,7 @@ impl<'a> Lowering<'a> {
                         return self.construct(d, Some(&name.text), arguments);
                     }
                     return match self.interp.method(&self.interp.def_names[d], &name.text) {
-                        Some(f) => self.call_fn(f, &[], arguments),
+                        Some(f) => self.call_fn(f, &[], arguments, span),
                         None => Node::Fault(format!(
                             "internal: no function {}.{}",
                             self.interp.program.defs[d].name, name.text
@@ -901,7 +927,13 @@ impl<'a> Lowering<'a> {
     }
 
     /// A call of a known function: each argument is matched to its parameter here.
-    fn call_fn(&mut self, f: usize, types: &[Type], arguments: &[Argument]) -> Node {
+    fn call_fn(
+        &mut self,
+        f: usize,
+        types: &[Type],
+        arguments: &[Argument],
+        span: crate::diag::Span,
+    ) -> Node {
         let def = &self.interp.program.funcs[f];
         let offset = usize::from(def.self_param.is_some());
         let count = offset + def.params.len();
@@ -936,7 +968,11 @@ impl<'a> Lowering<'a> {
         Node::Call(Box::new(CallCode {
             f,
             args,
-            types: types.iter().map(|t| self.type_code(t)).collect(),
+            types: if types.is_empty() {
+                self.inferred_types(f, span)
+            } else {
+                types.iter().map(|t| self.type_code(t)).collect()
+            },
             count,
         }))
     }
@@ -1006,6 +1042,76 @@ impl<'a> Lowering<'a> {
             return *slot;
         }
         self.bind(name)
+    }
+
+    /// The type arguments the check inferred for a call that writes none, when a type
+    /// parameter of the function reaches a JSON conversion (`conversion_params`): decoding
+    /// needs its target type at run time, whether it is written, as in `decode[List[Task]](v)`,
+    /// or inferred from the expected type (semantics 3.3). Other calls need no types.
+    fn inferred_types(&self, f: usize, span: crate::diag::Span) -> Vec<TypeCode> {
+        let program = &self.interp.program;
+        let generics = &program.funcs[f].generics;
+        if !generics
+            .iter()
+            .any(|g| program.conversion_params.contains(g))
+        {
+            return Vec::new();
+        }
+        let Some(call) = program.generic_calls.iter().find(|c| {
+            c.module == self.module
+                && c.span.start.offset == span.start.offset
+                && c.span.end.offset == span.end.offset
+        }) else {
+            return Vec::new();
+        };
+        generics
+            .iter()
+            .map(|g| match call.types.get(g) {
+                Some(t) => self.ty_code(t),
+                None => unknown_type(),
+            })
+            .collect()
+    }
+
+    /// A type of the check as a type argument of a call; a type parameter of the caller is
+    /// resolved at the call by its name, as a written one is.
+    fn ty_code(&self, ty: &crate::types::Ty) -> TypeCode {
+        use crate::types::{Prim, Ty};
+        let plain = |base: TypeBase, args: Vec<TypeCode>| TypeCode {
+            generic: None,
+            base,
+            args,
+        };
+        match ty {
+            Ty::Prim(p) => plain(
+                match p {
+                    Prim::Int => TypeBase::Int,
+                    Prim::Float => TypeBase::Float,
+                    Prim::Bool => TypeBase::Bool,
+                    Prim::Text => TypeBase::Text,
+                    Prim::Bytes => TypeBase::Bytes,
+                    Prim::Path => TypeBase::Path,
+                },
+                Vec::new(),
+            ),
+            Ty::List(t) => plain(TypeBase::List, vec![self.ty_code(t)]),
+            Ty::Set(t) => plain(TypeBase::Set, vec![self.ty_code(t)]),
+            Ty::Map(k, v) => plain(TypeBase::Map, vec![self.ty_code(k), self.ty_code(v)]),
+            Ty::Tuple(ts) => plain(
+                TypeBase::Tuple,
+                ts.iter().map(|t| self.ty_code(t)).collect(),
+            ),
+            Ty::Named(d, args) => plain(
+                TypeBase::Def(*d),
+                args.iter().map(|t| self.ty_code(t)).collect(),
+            ),
+            Ty::Param(p) => TypeCode {
+                generic: Some(self.interp.program.params[*p].name.clone()),
+                base: TypeBase::Unknown,
+                args: Vec::new(),
+            },
+            _ => unknown_type(),
+        }
     }
 
     /// A type argument as the call resolves it (`Interp::rt_type`): the names of the module
@@ -1339,4 +1445,12 @@ fn constant_items(
         })
         .collect();
     Node::Value(value(values))
+}
+
+fn unknown_type() -> TypeCode {
+    TypeCode {
+        generic: None,
+        base: TypeBase::Unknown,
+        args: Vec::new(),
+    }
 }

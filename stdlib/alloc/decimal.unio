@@ -1,0 +1,777 @@
+## Exact decimal numbers (requirements S-1, S-1a). A Decimal is an integer of any size divided by
+## a power of ten: 12.5 is 125 / 10^1. Addition, subtraction and multiplication are always exact;
+## division is exact when the quotient has a finite decimal expansion, and otherwise rounds only
+## where the program says how (divide_rounded). Nothing overflows: the size is limited by memory,
+## like a List.
+##
+## Decimal implements Add, Subtract, Multiply and Divide, so + - * / work, and Equal, Order, Hash
+## and Display. A Decimal is kept in its shortest form, without zeros at the end of the fraction,
+## so 1.50 and 1.5 are the same value: equal, with equal hashes, and the same key of a Map. The
+## text is that shortest form ("1.5"); to_fixed writes a given number of places ("1.50"). A
+## Decimal is made from text (parse) and Int (from_int); from Float only by from_float, which
+## names the places and the rounding, since a Float such as 0.1 is not a decimal number exactly.
+
+## A decimal number; see the module documentation.
+public struct Decimal:
+    negative as Bool
+    limbs as List[Int]
+    scale as Int
+
+## How to round a result that lies between two numbers with the wanted places.
+public enum Rounding:
+    ## To the nearer one; a tie to the one whose last digit is even (banker's rounding).
+    HalfEven
+    ## To the nearer one; a tie away from zero (commercial rounding).
+    HalfUp
+    ## To the nearer one; a tie toward zero.
+    HalfDown
+    ## Away from zero.
+    Up
+    ## Toward zero (truncation).
+    Down
+    ## Toward positive infinity.
+    Ceiling
+    ## Toward negative infinity.
+    Floor
+
+## A text that is not a decimal number, a Float that is not finite, or an exponent out of range.
+public error DecimalError:
+    text as Text
+    message as Text
+
+let BASE as Int = 1000000000
+
+let BASE_DIGITS as Int = 9
+
+## Exponents of parse are limited, so that "1e999999999" cannot ask for a billion digits.
+let MAXIMUM_EXPONENT as Int = 100000
+
+let DIGITS as Text = "0123456789"
+
+## The decimal number of an Int, with scale 0.
+## Example:
+##     assert "{from_int(-42)}" == "-42"
+public function from_int(value as Int) returns Decimal:
+    var limbs as List[Int] = []
+    var rest = value
+    while rest != 0:
+        let limb = rest % BASE
+        limbs.append(-limb if limb < 0 else limb)
+        rest = rest / BASE
+    return make(value < 0, limbs, 0)
+
+## Reads a decimal number: an optional sign, digits with an optional point and fraction, and an
+## optional exponent "e" or "E" with an optional sign, up to 100000 in size: "1.50", "-.5",
+## "1.5e1" (15) and "2E-3" (0.002). No spaces, no "_", no NaN or infinity.
+## Example:
+##     let price = try parse("19.90") on DecimalError as e:
+##         assert_fail(e.message)
+##     assert "{price}" == "19.9"
+public function parse(text as Text) returns Decimal fails with DecimalError:
+    let characters = text.chars()
+    var position = 0
+    var negative = false
+    if position < characters.length() and characters[position] in ["+", "-"]:
+        negative = characters[position] == "-"
+        position = position + 1
+    var digits as List[Int] = []
+    var fraction_digits = 0
+    var seen_point = false
+    while position < characters.length():
+        let character = characters[position]
+        if character == ".":
+            if seen_point: fail DecimalError(text = text, message = "a second decimal point")
+            seen_point = true
+        else:
+            match digit_of(character):
+                case some(digit):
+                    digits.append(digit)
+                    if seen_point: fraction_digits = fraction_digits + 1
+                case none: break
+        position = position + 1
+    if digits.is_empty(): fail DecimalError(text = text, message = "expected digits")
+    var exponent = 0
+    if position < characters.length() and characters[position] in ["e", "E"]:
+        position = position + 1
+        var exponent_negative = false
+        if position < characters.length() and characters[position] in ["+", "-"]:
+            exponent_negative = characters[position] == "-"
+            position = position + 1
+        var exponent_digits = 0
+        while position < characters.length():
+            match digit_of(characters[position]):
+                case some(digit):
+                    exponent = exponent * 10 + digit
+                    exponent_digits = exponent_digits + 1
+                    if exponent > MAXIMUM_EXPONENT:
+                        fail DecimalError(text = text, message = "the exponent is out of range")
+                case none: break
+            position = position + 1
+        if exponent_digits == 0:
+            fail DecimalError(text = text, message = "expected digits of the exponent")
+        if exponent_negative: exponent = -exponent
+    if position != characters.length():
+        fail DecimalError(text = text, message = "unexpected character {characters[position]}")
+    var limbs = limbs_of_digits(digits)
+    var scale = fraction_digits - exponent
+    if scale < 0:
+        limbs = times_power_of_ten(limbs, -scale)
+        scale = 0
+    return make(negative, limbs, scale)
+
+## The Float rounded to at most the given number of places after the point with the given
+## rounding. The exact binary value of the Float is rounded, so from_float(0.1, 20,
+## Rounding.HalfEven) is 0.10000000000000000555. NaN, infinities and negative places fail with
+## DecimalError.
+## Example:
+##     let tenth = try from_float(0.1, 2, Rounding.HalfEven) on DecimalError as e:
+##         assert_fail(e.message)
+##     assert "{tenth}" == "0.1"
+public function from_float(
+    value as Float,
+    places as Int,
+    rounding as Rounding,
+) returns Decimal fails with DecimalError:
+    if not value.is_finite():
+        fail DecimalError(text = "{value}", message = "the Float is not finite")
+    if places < 0: fail DecimalError(text = "{value}", message = "places must not be negative")
+    let bits = value.to_bits()
+    let negative = bits < 0
+    let magnitude = bits - MINIMUM_INT if negative else bits
+    let biased_exponent = magnitude / 4503599627370496
+    var mantissa = magnitude % 4503599627370496
+    var exponent = -1074
+    if biased_exponent != 0:
+        mantissa = mantissa + 4503599627370496
+        exponent = biased_exponent - 1075
+    var exact = from_int(mantissa)
+    if exponent >= 0:
+        exact = Decimal(negative = false, limbs = times_power(exact.limbs, 2, exponent), scale = 0)
+    else:
+        exact = Decimal(
+            negative = false,
+            limbs = times_power(exact.limbs, 5, -exponent),
+            scale = -exponent,
+        )
+    let rounded = exact.round(places, rounding)
+    return rounded.negate() if negative else rounded
+
+extend Decimal:
+    ## The number of digits after the decimal point of the shortest form.
+    ## Example:
+    ##     let value = try parse("1.250") on DecimalError as e:
+    ##         assert_fail(e.message)
+    ##     assert value.scale() == 2
+    public function scale(self) returns Int:
+        return self.scale
+
+    ## Whether the value is zero, whatever the scale.
+    ## Example:
+    ##     assert from_int(0).is_zero()
+    public function is_zero(self) returns Bool:
+        return self.limbs.is_empty()
+
+    ## Whether the value is below zero.
+    ## Example:
+    ##     assert from_int(-1).is_negative() and not from_int(0).is_negative()
+    public function is_negative(self) returns Bool:
+        return self.negative
+
+    ## The value with the opposite sign and the same scale.
+    ## Example:
+    ##     assert from_int(5).negate() == from_int(-5)
+    public function negate(self) returns Decimal:
+        return make(not self.negative, self.limbs, self.scale)
+
+    ## The value without its sign.
+    ## Example:
+    ##     assert from_int(-5).abs() == from_int(5)
+    public function abs(self) returns Decimal:
+        return make(false, self.limbs, self.scale)
+
+    ## The value rounded to at most places digits after the point with the given rounding.
+    ## Negative places is a fault.
+    ## Example:
+    ##     let amount = try parse("2.675") on DecimalError as e:
+    ##         assert_fail(e.message)
+    ##     assert "{amount.round(2, Rounding.HalfEven)}" == "2.68"
+    ##     assert "{amount.round(2, Rounding.Down)}" == "2.67"
+    public function round(self, places as Int, rounding as Rounding) returns Decimal:
+        if places < 0: assert_fail("Decimal.round: places must not be negative")
+        if places >= self.scale: return self
+        let division = divide_limbs(self.limbs, power_of_ten(self.scale - places))
+        let quotient = rounded_quotient(
+            division,
+            power_of_ten(self.scale - places),
+            self.negative,
+            rounding,
+        )
+        return make(self.negative, quotient, places)
+
+    ## The quotient rounded to at most places digits after the point with the given rounding; a
+    ## zero divisor or negative places is a fault.
+    ## Example:
+    ##     let third = from_int(1).divide_rounded(from_int(3), 4, Rounding.HalfEven)
+    ##     assert "{third}" == "0.3333"
+    public function divide_rounded(
+        self,
+        other as Decimal,
+        places as Int,
+        rounding as Rounding,
+    ) returns Decimal:
+        if other.is_zero(): assert_fail("Decimal.divide_rounded: division by zero")
+        if places < 0: assert_fail("Decimal.divide_rounded: places must not be negative")
+        # self / other = (a / 10^sa) / (b / 10^sb); with places p the result is
+        # a * 10^(sb + p - sa) / b when that exponent is not negative, else a / (b * 10^(sa - sb - p)).
+        let shift = other.scale + places - self.scale
+        var numerator = self.limbs
+        var denominator = other.limbs
+        if shift >= 0: numerator = times_power_of_ten(numerator, shift)
+        else: denominator = times_power_of_ten(denominator, -shift)
+        let negative = self.negative != other.negative
+        let division = divide_limbs(numerator, denominator)
+        return make(negative, rounded_quotient(division, denominator, negative, rounding), places)
+
+    ## The exact quotient, or none for a zero divisor or a quotient without a finite decimal
+    ## expansion, such as 1 / 3.
+    ## Example:
+    ##     let eighth = try parse("0.125") on DecimalError as e:
+    ##         assert_fail(e.message)
+    ##     assert from_int(1).checked_divide(from_int(8)) == some(eighth)
+    ##     assert from_int(1).checked_divide(from_int(3)) == none
+    public function checked_divide(self, other as Decimal) returns Option[Decimal]:
+        if other.is_zero(): return none
+        # self / other = a * 10^sb / (b * 10^sa) = N / D. D = 2^twos * 5^fives * rest with rest
+        # prime to 10, and N / D has a finite expansion exactly when rest divides N.
+        let numerator = times_power_of_ten(self.limbs, other.scale)
+        let denominator = times_power_of_ten(other.limbs, self.scale)
+        var rest = denominator
+        var twos = 0
+        while true:
+            let halved = divide_small(rest, 2)
+            if halved.remainder != 0: break
+            rest = halved.quotient
+            twos = twos + 1
+        var fives = 0
+        while true:
+            let fifth = divide_small(rest, 5)
+            if fifth.remainder != 0: break
+            rest = fifth.quotient
+            fives = fives + 1
+        let reduced = divide_limbs(numerator, rest)
+        if not reduced.remainder.is_empty(): return none
+        # N / D = (N / rest) * 2^(k - twos) * 5^(k - fives) / 10^k with k = max(twos, fives).
+        let places = max(twos, fives)
+        let quotient = times_power(
+            times_power(reduced.quotient, 2, places - twos),
+            5,
+            places - fives,
+        )
+        return some(make(self.negative != other.negative, quotient, places))
+
+    ## The value as an Int; none when it has a nonzero fraction or does not fit.
+    ## Example:
+    ##     assert from_int(12).to_int() == some(12)
+    ##     assert from_int(1).divide_rounded(from_int(2), 1, Rounding.Down).to_int() == none
+    public function to_int(self) returns Option[Int]:
+        let whole = divide_limbs(self.limbs, power_of_ten(self.scale))
+        if not whole.remainder.is_empty(): return none
+        var value = 0
+        var index = whole.quotient.length() - 1
+        while index >= 0:
+            let limb = whole.quotient[index]
+            match value.checked_multiply(BASE):
+                case some(shifted):
+                    let next = shifted.checked_subtract(
+                        limb,
+                    ) if self.negative else shifted.checked_add(
+                        limb,
+                    )
+                    match next:
+                        case some(updated): value = updated
+                        case none: return none
+                case none: return none
+            index = index - 1
+        return some(value)
+
+    ## The nearest Float, rounding half to even; a value beyond the range of Float gives an
+    ## infinity. The conversion is explicit because it may lose digits.
+    ## Example:
+    ##     assert (from_int(1) / from_int(8)).to_float() == 0.125
+    public function to_float(self) returns Float:
+        return "{self}".to_float() or 0.0
+
+    ## The text with exactly places digits after the point, rounded with the given rounding when
+    ## the value has more: for amounts of money and tables. Negative places is a fault.
+    ## Example:
+    ##     let price = try parse("19.9") on DecimalError as e:
+    ##         assert_fail(e.message)
+    ##     assert price.to_fixed(2, Rounding.HalfEven) == "19.90"
+    ##     assert from_int(-1).divide_rounded(from_int(3), 4, Rounding.HalfEven).to_fixed(2, Rounding.HalfEven) == "-0.33"
+    public function to_fixed(self, places as Int, rounding as Rounding) returns Text:
+        let rounded = self.round(places, rounding)
+        let text = "{rounded}"
+        if places == 0: return text
+        if rounded.scale == 0: return text + "." + "0".repeat(places)
+        return text + "0".repeat(places - rounded.scale)
+
+extend Decimal with Add:
+    ## The exact sum, with the larger scale.
+    function add(self, other as Self) returns Self:
+        let scale = max(self.scale, other.scale)
+        let left = times_power_of_ten(self.limbs, scale - self.scale)
+        let right = times_power_of_ten(other.limbs, scale - other.scale)
+        if self.negative == other.negative:
+            return make(self.negative, add_limbs(left, right), scale)
+        if compare_limbs(left, right) >= 0:
+            return make(self.negative, subtract_limbs(left, right), scale)
+        return make(other.negative, subtract_limbs(right, left), scale)
+
+extend Decimal with Subtract:
+    ## The exact difference, with the larger scale.
+    function subtract(self, other as Self) returns Self:
+        return self + other.negate()
+
+extend Decimal with Multiply:
+    ## The exact product, with the sum of the scales.
+    function multiply(self, other as Self) returns Self:
+        return make(
+            self.negative != other.negative,
+            multiply_limbs(self.limbs, other.limbs),
+            self.scale + other.scale,
+        )
+
+extend Decimal with Divide:
+    ## The exact quotient. A zero divisor, or a quotient without a finite decimal expansion such as
+    ## 1 / 3, is a fault; checked_divide is the safe form and divide_rounded rounds.
+    function divide(self, other as Self) returns Self:
+        if other.is_zero(): assert_fail("Decimal division by zero")
+        match self.checked_divide(other):
+            case some(quotient): return quotient
+            case none:
+                assert_fail("the decimal quotient has no finite expansion; use divide_rounded")
+
+extend Decimal with Equal:
+    ## Equal values; the shortest form makes this the same as equal fields.
+    function equals(self, other as Self) returns Bool:
+        return self.negative == other.negative and self.scale == other.scale and self.limbs == other.limbs
+
+extend Decimal with Order:
+    function compare(self, other as Self) returns Int:
+        if self.negative != other.negative: return -1 if self.negative else 1
+        let scale = max(self.scale, other.scale)
+        let magnitude = compare_limbs(
+            times_power_of_ten(self.limbs, scale - self.scale),
+            times_power_of_ten(other.limbs, scale - other.scale),
+        )
+        return -magnitude if self.negative else magnitude
+
+extend Decimal with Hash:
+    function hash(self) returns Int:
+        var result = self.scale + (1000003 if self.negative else 0)
+        for limb in self.limbs:
+            result = (result * 1000003 + limb) % 2147483647
+        return result
+
+extend Decimal with Display:
+    ## Plain decimal notation of the shortest form: "-0.05", "1200", "0".
+    function to_text(self) returns Text:
+        var digits = digits_of_limbs(self.limbs)
+        if digits.length() <= self.scale:
+            digits = "0".repeat(self.scale - digits.length() + 1) + digits
+        let sign = "-" if self.negative else ""
+        if self.scale == 0: return sign + digits
+        let point = digits.length() - self.scale
+        return sign + digits.slice(0, point) + "." + digits.slice(point, digits.length())
+
+## The shortest form of a value: no zeros at the end of the fraction, and zero without a sign.
+function make(negative as Bool, limbs as List[Int], scale as Int) returns Decimal:
+    var digits = limbs
+    var places = scale
+    if digits.is_empty(): places = 0
+    while places > 0:
+        let division = divide_small(digits, 10)
+        if division.remainder != 0: break
+        digits = division.quotient
+        places = places - 1
+    return Decimal(negative = negative and not digits.is_empty(), limbs = digits, scale = places)
+
+function digit_of(character as Text) returns Option[Int]:
+    if character.length() != 1: return none
+    return DIGITS.index_of(character)
+
+# Magnitudes are lists of limbs in base 10^9, least significant first, without zero limbs at the
+# most significant end; zero is the empty list.
+
+struct LimbDivision:
+    quotient as List[Int]
+    remainder as List[Int]
+
+struct SmallDivision:
+    quotient as List[Int]
+    remainder as Int
+
+function trimmed(limbs as List[Int]) returns List[Int]:
+    var result = limbs
+    while true:
+        match result.last():
+            case some(0): let _ = result.remove_last()
+            case _: return result
+    return result
+
+function limbs_of_digits(digits as List[Int]) returns List[Int]:
+    var limbs as List[Int] = []
+    var end = digits.length()
+    while end > 0:
+        let start = max(0, end - BASE_DIGITS)
+        var limb = 0
+        for index in range(start, end):
+            limb = limb * 10 + digits[index]
+        limbs.append(limb)
+        end = start
+    return trimmed(limbs)
+
+function digits_of_limbs(limbs as List[Int]) returns Text:
+    if limbs.is_empty(): return "0"
+    var parts = ["{limbs[limbs.length() - 1]}"]
+    var index = limbs.length() - 2
+    while index >= 0:
+        let text = "{limbs[index]}"
+        parts.append("0".repeat(BASE_DIGITS - text.length()) + text)
+        index = index - 1
+    var result = ""
+    for part in parts:
+        result = result + part
+    return result
+
+function compare_limbs(a as List[Int], b as List[Int]) returns Int:
+    if a.length() != b.length(): return -1 if a.length() < b.length() else 1
+    var index = a.length() - 1
+    while index >= 0:
+        if a[index] != b[index]: return -1 if a[index] < b[index] else 1
+        index = index - 1
+    return 0
+
+function add_limbs(a as List[Int], b as List[Int]) returns List[Int]:
+    var result as List[Int] = []
+    var carry = 0
+    for index in range(0, max(a.length(), b.length())):
+        let sum = (a.get(index) or 0) + (b.get(index) or 0) + carry
+        result.append(sum % BASE)
+        carry = sum / BASE
+    if carry > 0: result.append(carry)
+    return result
+
+## a - b for a >= b.
+function subtract_limbs(a as List[Int], b as List[Int]) returns List[Int]:
+    var result as List[Int] = []
+    var borrow = 0
+    for index in range(0, a.length()):
+        var difference = a[index] - (b.get(index) or 0) - borrow
+        borrow = 0
+        if difference < 0:
+            difference = difference + BASE
+            borrow = 1
+        result.append(difference)
+    return trimmed(result)
+
+## a * factor for 0 <= factor <= BASE.
+function multiply_small(a as List[Int], factor as Int) returns List[Int]:
+    if factor == 0: return []
+    var result as List[Int] = []
+    var carry = 0
+    for limb in a:
+        let product = limb * factor + carry
+        result.append(product % BASE)
+        carry = product / BASE
+    while carry > 0:
+        result.append(carry % BASE)
+        carry = carry / BASE
+    return result
+
+function multiply_limbs(a as List[Int], b as List[Int]) returns List[Int]:
+    if a.is_empty() or b.is_empty(): return []
+    var result = [0 for _ in range(0, a.length() + b.length())]
+    for i in range(0, a.length()):
+        var carry = 0
+        for j in range(0, b.length()):
+            let total = result[i + j] + a[i] * b[j] + carry
+            result[i + j] = total % BASE
+            carry = total / BASE
+        var position = i + b.length()
+        while carry > 0:
+            let total = result[position] + carry
+            result[position] = total % BASE
+            carry = total / BASE
+            position = position + 1
+    return trimmed(result)
+
+## a / divisor for 1 <= divisor <= BASE.
+function divide_small(a as List[Int], divisor as Int) returns SmallDivision:
+    var quotient = [0 for _ in range(0, a.length())]
+    var remainder = 0
+    var index = a.length() - 1
+    while index >= 0:
+        let current = remainder * BASE + a[index]
+        quotient[index] = current / divisor
+        remainder = current % divisor
+        index = index - 1
+    return SmallDivision(quotient = trimmed(quotient), remainder = remainder)
+
+## Long division in base 10^9; each digit of the quotient is found by bisection. The divisor is
+## not zero.
+function divide_limbs(a as List[Int], divisor as List[Int]) returns LimbDivision:
+    if compare_limbs(a, divisor) < 0: return LimbDivision(quotient = [], remainder = a)
+    if divisor.length() == 1:
+        let small = divide_small(a, divisor[0])
+        return LimbDivision(quotient = small.quotient, remainder = trimmed([small.remainder]))
+    var quotient = [0 for _ in range(0, a.length())]
+    var remainder as List[Int] = []
+    var index = a.length() - 1
+    while index >= 0:
+        # remainder = remainder * BASE + a[index]
+        var shifted = [a[index]]
+        shifted.append_all(remainder)
+        remainder = trimmed(shifted)
+        var low = 0
+        var high = BASE - 1
+        while low < high:
+            let middle = (low + high + 1) / 2
+            if compare_limbs(multiply_small(divisor, middle), remainder) <= 0: low = middle
+            else: high = middle - 1
+        quotient[index] = low
+        if low > 0: remainder = subtract_limbs(remainder, multiply_small(divisor, low))
+        index = index - 1
+    return LimbDivision(quotient = trimmed(quotient), remainder = remainder)
+
+function power_of_ten(exponent as Int) returns List[Int]:
+    return times_power_of_ten([1], exponent)
+
+function times_power_of_ten(a as List[Int], exponent as Int) returns List[Int]:
+    if a.is_empty() or exponent == 0: return a
+    var result as List[Int] = [0 for _ in range(0, exponent / BASE_DIGITS)]
+    result.append_all(a)
+    var factor = 1
+    for _ in range(0, exponent % BASE_DIGITS):
+        factor = factor * 10
+    return multiply_small(result, factor)
+
+## a * base^exponent for a small base.
+function times_power(a as List[Int], base as Int, exponent as Int) returns List[Int]:
+    var result = a
+    var rest = exponent
+    # Multiply by base^13 at a time, which stays below BASE for base 2 and 5.
+    var chunk = 1
+    for _ in range(0, 12):
+        chunk = chunk * base
+    while rest >= 12:
+        result = multiply_small(result, chunk)
+        rest = rest - 12
+    for _ in range(0, rest):
+        result = multiply_small(result, base)
+    return result
+
+## The quotient of the division rounded by the remainder: divisor is what was divided by, negative
+## the sign of the result.
+function rounded_quotient(
+    division as LimbDivision,
+    divisor as List[Int],
+    negative as Bool,
+    rounding as Rounding,
+) returns List[Int]:
+    if division.remainder.is_empty(): return division.quotient
+    let half = compare_limbs(multiply_small(division.remainder, 2), divisor)
+    let odd = (division.quotient.first() or 0) % 2 == 1
+    var away = false
+    match rounding:
+        case Rounding.HalfEven: away = half > 0 or (half == 0 and odd)
+        case Rounding.HalfUp: away = half >= 0
+        case Rounding.HalfDown: away = half > 0
+        case Rounding.Up: away = true
+        case Rounding.Down: away = false
+        case Rounding.Ceiling: away = not negative
+        case Rounding.Floor: away = negative
+    if away: return add_limbs(division.quotient, [1])
+    return division.quotient
+
+function decimal(text as Text) returns Decimal:
+    return try parse(text) on DecimalError as e:
+        assert_fail("{e.text}: {e.message}")
+
+test "parsing and text keep the scale":
+    for text in [
+        "0",
+        "1",
+        "-1",
+        "1.5",
+        "-0.05",
+        "123456789012345678901234567890.123456789",
+        "0.000000001",
+    ]:
+        assert "{decimal(text)}" == text
+    assert "{decimal("1.500")}" == "1.5" and "{decimal("100.00")}" == "100"
+    assert "{decimal("+7")}" == "7"
+    assert "{decimal("-0")}" == "0"
+    assert "{decimal(".5")}" == "0.5"
+    assert "{decimal("5.")}" == "5"
+    assert "{decimal("1.5e1")}" == "15"
+    assert "{decimal("2e3")}" == "2000"
+    assert "{decimal("15E-3")}" == "0.015"
+    assert "{decimal("1000000000")}" == "1000000000"
+    for text in [
+        "",
+        "-",
+        ".",
+        "1..2",
+        "1.2.3",
+        "1e",
+        "1e+",
+        "abc",
+        "1 ",
+        " 1",
+        "1_000",
+        "NaN",
+        "inf",
+        "1e100001",
+    ]:
+        try:
+            let _ = try parse(text)
+            assert_fail("accepted {text}")
+        on DecimalError: pass
+
+test "integers convert both ways":
+    for value in [0, 1, -1, 999999999, 1000000000, MAXIMUM_INT, MINIMUM_INT]:
+        assert "{from_int(value)}" == "{value}"
+        assert from_int(value).to_int() == some(value)
+    assert decimal("9223372036854775808").to_int() == none
+    assert decimal("-9223372036854775809").to_int() == none
+    assert decimal("-9223372036854775808.000").to_int() == some(MINIMUM_INT)
+
+test "arithmetic is exact":
+    assert decimal("0.1") + decimal("0.2") == decimal("0.3")
+    assert "{decimal("0.1") + decimal("0.2")}" == "0.3"
+    assert "{decimal("1.10") + decimal("2.205")}" == "3.305"
+    assert "{decimal("1") - decimal("1.000")}" == "0"
+    assert "{decimal("-5.5") + decimal("2.25")}" == "-3.25"
+    assert "{decimal("1.10") * decimal("1.10")}" == "1.21"
+    assert "{decimal("-2") * decimal("0.5")}" == "-1"
+    let big = decimal("123456789123456789123456789")
+    assert "{big * big}" == "15241578780673678546105778281054720515622620750190521"
+    assert big * big / big == big
+    assert "{decimal("99999999999999999999") + decimal("1")}" == "100000000000000000000"
+    assert decimal("100000000000000000000") - decimal("1") == decimal("99999999999999999999")
+
+test "exact division and its scale":
+    assert "{decimal("10") / decimal("2")}" == "5"
+    assert "{decimal("1.00") / decimal("2")}" == "0.5"
+    assert "{decimal("1") / decimal("8")}" == "0.125"
+    assert "{decimal("-3") / decimal("0.4")}" == "-7.5"
+    assert "{decimal("1") / decimal("1024")}" == "0.0009765625"
+    assert "{decimal("6") / decimal("0.03")}" == "200"
+    assert decimal("1").checked_divide(decimal("3")) == none
+    assert decimal("1").checked_divide(decimal("0")) == none
+    assert decimal("7").checked_divide(decimal("0.7")) == some(decimal("10"))
+    expect_fault(divide_by_three)
+    expect_fault(divide_by_zero)
+
+function divide_by_three():
+    let _ = decimal("1") / decimal("3")
+
+function divide_by_zero():
+    let _ = decimal("1") / decimal("0.0")
+
+test "rounding modes":
+    let cases = [
+        ("2.5", "2", "3", "2", "3", "2", "3", "2"),
+        ("3.5", "4", "4", "3", "4", "3", "4", "3"),
+        ("-2.5", "-2", "-3", "-2", "-3", "-2", "-2", "-3"),
+        ("2.51", "3", "3", "3", "3", "2", "3", "2"),
+        ("-2.49", "-2", "-2", "-2", "-3", "-2", "-2", "-3"),
+        ("7", "7", "7", "7", "7", "7", "7", "7"),
+    ]
+    for value, half_even, half_up, half_down, up, down, ceiling, floor in cases:
+        let number = decimal(value)
+        assert "{number.round(0, Rounding.HalfEven)}" == half_even
+        assert "{number.round(0, Rounding.HalfUp)}" == half_up
+        assert "{number.round(0, Rounding.HalfDown)}" == half_down
+        assert "{number.round(0, Rounding.Up)}" == up
+        assert "{number.round(0, Rounding.Down)}" == down
+        assert "{number.round(0, Rounding.Ceiling)}" == ceiling
+        assert "{number.round(0, Rounding.Floor)}" == floor
+    assert "{decimal("0.004").round(2, Rounding.HalfUp)}" == "0"
+    assert "{decimal("-0.004").round(2, Rounding.Floor)}" == "-0.01"
+    assert "{decimal("999.995").round(2, Rounding.HalfUp)}" == "1000"
+    assert decimal("999.995").to_fixed(2, Rounding.HalfUp) == "1000.00"
+    assert decimal("1.005").to_fixed(0, Rounding.HalfUp) == "1"
+    assert decimal("-0.001").to_fixed(2, Rounding.HalfEven) == "0.00"
+    assert decimal("2.5").to_fixed(3, Rounding.HalfEven) == "2.500"
+
+test "rounded division":
+    assert "{decimal("2").divide_rounded(decimal("3"), 3, Rounding.HalfUp)}" == "0.667"
+    assert "{decimal("-2").divide_rounded(decimal("3"), 3, Rounding.Down)}" == "-0.666"
+    assert "{decimal("10").divide_rounded(decimal("4"), 0, Rounding.HalfEven)}" == "2"
+    assert "{decimal("1.000").divide_rounded(decimal("0.3"), 1, Rounding.Ceiling)}" == "3.4"
+    let long = decimal("1").divide_rounded(decimal("7"), 30, Rounding.HalfEven)
+    assert "{long}" == "0.142857142857142857142857142857"
+    let big = decimal("1234567890123456789012345678901234567890")
+    assert big.divide_rounded(decimal("12345678901234567890.5"), 10, Rounding.HalfEven) == decimal(
+        "99999999999999999996.9499999635",
+    )
+
+test "equality, order and hashing compare values":
+    assert decimal("1.5") == decimal("1.50") and decimal("1.50").scale() == 1
+    assert decimal("1.5").hash() == decimal("1.50").hash()
+    assert decimal("0").hash() == decimal("-0.000").hash()
+    assert decimal("-1") < decimal("0.5") and decimal("0.5") < decimal("0.51")
+    assert decimal("-2") < decimal("-1.5")
+    assert [decimal("3"), decimal("-1"), decimal("2.5")].sorted() == [
+        decimal("-1"),
+        decimal("2.5"),
+        decimal("3"),
+    ]
+    var prices = Set[Decimal]()
+    prices.insert(decimal("2.0"))
+    prices.insert(decimal("2.00"))
+    assert prices.length() == 1
+
+test "Float converts only with stated places and rounding":
+    let tenth = try from_float(0.1, 20, Rounding.HalfEven) on DecimalError as e:
+        assert_fail(e.message)
+    assert "{tenth}" == "0.10000000000000000555"
+    let half = try from_float(-2.5, 0, Rounding.HalfEven) on DecimalError as e:
+        assert_fail(e.message)
+    assert "{half}" == "-2"
+    let large = try from_float(1e20, 0, Rounding.Down) on DecimalError as e:
+        assert_fail(e.message)
+    assert "{large}" == "100000000000000000000"
+    let tiny = try from_float(5e-324, 3, Rounding.Up) on DecimalError as e:
+        assert_fail(e.message)
+    assert "{tiny}" == "0.001"
+    let zero = try from_float(-0.0, 1, Rounding.HalfEven) on DecimalError as e:
+        assert_fail(e.message)
+    assert "{zero}" == "0"
+    for bad in [1e308 * 10.0, 0.0 * (1e308 * 10.0)]:
+        try:
+            let _ = try from_float(bad, 2, Rounding.HalfEven)
+            assert_fail("converted a non-finite Float")
+        on DecimalError: pass
+    assert decimal("0.1").to_float() == 0.1
+    assert decimal("-1e400").to_float() < -1e308
+
+test "decimal arithmetic agrees with Int arithmetic where both are exact":
+    var state = 12345
+    for _ in range(0, 300):
+        state = (state * 48271) % 2147483647
+        let a = state - 1073741823
+        state = (state * 48271) % 2147483647
+        let b = state % 100000 - 50000
+        assert from_int(a) + from_int(b) == from_int(a + b)
+        assert from_int(a) - from_int(b) == from_int(a - b)
+        assert from_int(a) * from_int(b) == from_int(a * b)
+        assert (from_int(a) < from_int(b)) == (a < b)
+        if b != 0:
+            assert (from_int(a) * from_int(b)) / from_int(b) == from_int(a)
+            let quotient = from_int(a).divide_rounded(from_int(b), 0, Rounding.Down)
+            assert quotient.to_int() == some(a / b)
+            let floor = from_int(a).divide_rounded(from_int(b), 0, Rounding.Floor)
+            assert floor <= from_int(a).divide_rounded(from_int(b), 6, Rounding.HalfEven)

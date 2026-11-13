@@ -48,6 +48,10 @@ jobs:
         run: compiler/target/release/unio run tools/check_api.unio
       - name: Unio test blocks (stdlib, examples, tools)
         run: compiler/target/release/unio test docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+      # D-1, D-3: docs/stdlib-reference.md and its Russian twin are generated from the documentation
+      # comments of stdlib/, and docs/reference.md names every grammar rule and catalog code.
+      - name: Generated references are up to date
+        run: compiler/target/release/unio run tools/reference.unio -- --check
       # Plan section 12, release condition 4: the notices list the crates of Cargo.lock that
       # the shipped unio and libunio.a contain. The list is the same on every system.
       - name: Third-party notices are up to date
@@ -145,9 +149,10 @@ jobs:
           path: editors/vscode/*.vsix
 
   native-linux-arm:
-    # The fourth target of `unio build` (docs/runtime.md 8.4, R-8): the code generation tests
-    # of every target and the native suite, run on an AArch64 runner.
-    name: native executables on Linux AArch64
+    # The fourth platform (docs/runtime.md 8.4, R-8): the code generation tests of every target,
+    # the native suite, the sandbox suites SB-8 and SB-15 (R-7a), every test of both crates, and
+    # every Unio test block, run on an AArch64 runner.
+    name: native executables and all tests on Linux AArch64
     runs-on: ubuntu-24.04-arm
     defaults:
       run:
@@ -177,6 +182,21 @@ jobs:
         run: cargo test --release -p unio --test native
       - name: The linker and SDK are the pinned ones
         run: python3 ../.github/scripts/expected_toolchain.py check target/release/unio
+      # R-7a: the job `release` needs this job, so no release is built while a test of SB-8 or
+      # SB-15 fails here.
+      - name: Sandbox suites SB-8 and SB-15 (R-7a)
+        run: |
+          cargo test -p unio --test sandbox --test workers --test packages
+          cargo test -p unio-runtime --test writer --test process --test process_windows
+      # R-8: every test on every platform, as the jobs `compiler` and `spec` run them on the others.
+      - name: Tests (corpus, all .unio sources, diagnostics, mutation)
+        run: cargo test
+      - name: Unio test blocks (stdlib, examples, tools)
+        shell: bash
+        working-directory: .
+        run: |
+          (cd compiler && cargo build --release --locked -p unio)
+          compiler/target/release/unio test docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
 
   compiler:
     name: compiler front end
@@ -203,6 +223,12 @@ jobs:
         run: cargo fmt --check
       - name: Lints
         run: cargo clippy --all-targets -- -D warnings
+      # R-7a: the job `release` needs this job, so no release is built while a test of SB-8 or
+      # SB-15 fails on Linux x86-64, macOS, or Windows (Linux AArch64: job native-linux-arm).
+      - name: Sandbox suites SB-8 and SB-15 (R-7a)
+        run: |
+          cargo test -p unio --test sandbox --test workers --test packages
+          cargo test -p unio-runtime --test writer --test process --test process_windows
       - name: Tests (corpus, all .unio sources, diagnostics, mutation)
         run: cargo test
       - name: Formatter speed (T-3, release build)
@@ -234,6 +260,10 @@ jobs:
     # .github/scripts/release_build.sh, kept for the jobs below: `install` runs it where there is
     # no checkout, and `reproducible` builds it again elsewhere and compares the bytes.
     name: release build
+    # R-7a: no release while a test of the sandbox suites SB-8 and SB-15 fails on any of the four
+    # platforms (the jobs `compiler` and `native-linux-arm` run them), and R-8: no release while
+    # any test of either job fails.
+    needs: [compiler, native-linux-arm]
     strategy:
       fail-fast: false
       matrix:

@@ -14,6 +14,12 @@ public error PropertyError:
 
 ## Returns the first counterexample, reduced in shrinker order within a finite attempt budget.
 ## Reproduce the original with generate(result.sample_seed); "minimal" is local, not a proof of global minimality.
+## Example:
+##     let problem = try check_property(sample, smaller, function (n as Int) returns Bool: n < 50, seed = 3) on PropertyError as e:
+##         assert_fail(e.message)
+##     match problem:
+##         case some(found): assert found.minimal == 50 and found.original == sample(found.sample_seed)
+##         case none: assert_fail("expected a counterexample")
 public function check_property[T](
     generate as Function[(Int) -> T],
     shrink as Function[(T) -> List[T]],

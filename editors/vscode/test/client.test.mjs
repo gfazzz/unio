@@ -56,6 +56,7 @@ test("a session with unio lsp: diagnostics of a buffer, then shutdown", { skip: 
         const published = new Promise((resolve) => client.on("textDocument/publishDiagnostics", resolve));
         const init = await client.request("initialize", { processId: null, rootUri: null, capabilities: {} });
         assert.equal(init.capabilities.renameProvider, true);
+        assert.ok(init.capabilities.codeActionProvider);
         client.notify("initialized", {});
         const uri = pathToFileURL(file).href;
         client.notify("textDocument/didOpen", {
@@ -63,6 +64,17 @@ test("a session with unio lsp: diagnostics of a buffer, then shutdown", { skip: 
         });
         const params = await published;
         assert.equal(params.diagnostics[0].code, "E0056");
+        // A quick fix of the server is bound to the revision of its diagnostic (T-13).
+        const diagnostic = params.diagnostics[0];
+        assert.equal(diagnostic.data.revision, 1);
+        const actions = await client.request("textDocument/codeAction", {
+            textDocument: { uri },
+            range: diagnostic.range,
+            context: { diagnostics: [diagnostic] },
+        });
+        for (const action of actions) {
+            assert.equal(action.edit.documentChanges[0].textDocument.version, 1);
+        }
         assert.equal(await client.stop(), 0);
     } finally {
         rmSync(dir, { recursive: true, force: true });

@@ -1267,3 +1267,185 @@ fn copy_dir(from: &Path, to: &Path) {
         }
     }
 }
+
+/// S-14: the fallible list functions carry the effects of their callbacks to each call, and
+/// only there; the clock and randomness are derived effects that need no permission
+/// (semantics 8.2, 8.3).
+#[test]
+fn fallible_callbacks_carry_their_effects_and_the_clock_and_randomness_are_derived() {
+    let dir = package(
+        "callbacks",
+        &[
+            (
+                "unio.toml",
+                "[package]\nname = \"callbacks\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = [\"$CWD/**\"]\n",
+            ),
+            (
+                "main.unio",
+                "import std.files as files\nimport std.time as time\nimport std.random as random\n\n\
+                 function read_all(paths as List[Path]) returns List[Text] fails with IoError:\n    \
+                 return try paths.try_map(files.read_text)\n\n\
+                 function lengths(paths as List[Path]) returns List[Int] fails with IoError:\n    \
+                 return try paths.try_map(function (p as Path) returns Int fails with IoError: p.name().length())\n\n\
+                 function keep_existing(paths as List[Path]) returns List[Path] fails with IoError:\n    \
+                 return try paths.try_filter(function (p as Path) returns Bool fails with IoError: files.exists(p))\n\n\
+                 function total(paths as List[Path]) returns Int fails with IoError:\n    \
+                 return try paths.try_fold(0, function (sum as Int, p as Path) returns Int fails with IoError: sum + (try files.read_text(p)).length())\n\n\
+                 function stamp() returns time.Timestamp:\n    return time.now()\n\n\
+                 function roll() returns Int:\n    var generator = random.from_entropy()\n    return generator.next_int(1, 7)\n\n\
+                 function replay() returns Int:\n    var generator = random.seeded(7)\n    return generator.next_int(1, 7)\n\n\
+                 function span() returns time.Duration:\n    return time.seconds(1) + time.milliseconds(5)\n\n\
+                 function main():\n    let _ = stamp()\n    let _ = roll()\n",
+            ),
+        ],
+    );
+    assert_reads(
+        &dir,
+        "main.unio",
+        &["main.read_all", "main.keep_existing", "main.total"],
+        &["main.lengths"],
+    );
+    let stamp = effects(&dir, "main.stamp");
+    assert!(
+        stamp.contains(&"clock") && !stamp.contains(&"random"),
+        "{stamp:?}"
+    );
+    let roll = effects(&dir, "main.roll");
+    assert!(
+        roll.contains(&"random") && !roll.contains(&"clock"),
+        "{roll:?}"
+    );
+    for pure in ["main.replay", "main.span"] {
+        let e = effects(&dir, pure);
+        assert!(
+            !e.contains(&"clock") && !e.contains(&"random"),
+            "{pure}: {e:?}"
+        );
+    }
+    let main = effects(&dir, "main.main");
+    assert!(
+        main.contains(&"clock") && main.contains(&"random"),
+        "{main:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// RFC 0009, refinements 1 to 3: `clock` and `random` travel through function values like every
+/// effect (RFC 0005); operations on given durations, timestamps and dates have no `clock`, and
+/// a generator with an explicit seed has no `random`, since its state changes as a `var` value.
+#[test]
+fn clock_and_random_follow_function_values_and_skip_pure_operations() {
+    let dir = package(
+        "clock-random",
+        &[
+            (
+                "unio.toml",
+                "[package]\nname = \"clock_random\"\nversion = \"0.1.0\"\n\n[permissions]\nnetwork = false\n",
+            ),
+            (
+                "main.unio",
+                "import std.time as time\nimport std.random as random\n\n\
+                 struct Source:\n    read as Function[() -> time.Timestamp]\n\n\
+                 function call_it(read as Function[() -> time.Timestamp]) returns time.Timestamp:\n    return read()\n\n\
+                 function through_parameter() returns time.Timestamp:\n    return call_it(time.now)\n\n\
+                 function through_lambda() returns time.Timestamp:\n    return call_it(function () returns time.Timestamp: time.now())\n\n\
+                 function through_field() returns time.Timestamp:\n    let source = Source(read = time.now)\n    return source.read()\n\n\
+                 function fixed() returns time.Timestamp:\n    return time.from_unix_seconds(0)\n\n\
+                 function given_value_only() returns time.Timestamp:\n    return call_it(fixed)\n\n\
+                 function secure_through_value() returns Int fails with random.RandomError:\n    \
+                 let draw = random.secure_int\n    return try draw(0, 6)\n\n\
+                 function calendar() returns Text fails with time.TimeError:\n    \
+                 let parsed = try time.parse_timestamp(\"2026-11-13T10:00:00+01:00\")\n    \
+                 let shifted = parsed.plus(time.hours(2) - time.minutes(30))\n    \
+                 let fields = shifted.to_utc()\n    \
+                 let rebuilt = try time.from_utc(time.DateTime(year = fields.year, month = fields.month, day = fields.day))\n    \
+                 let span = shifted.since(rebuilt)\n    \
+                 return \"{shifted} {span} {span.as_seconds()} {span < time.seconds(1)} {shifted.unix_seconds()}\"\n\n\
+                 function manual() returns time.Timestamp:\n    \
+                 var clock = time.manual_clock(time.from_unix_seconds(5))\n    \
+                 clock.advance(time.milliseconds(10))\n    return clock.now()\n\n\
+                 function simulation() returns List[Int]:\n    \
+                 var generator = random.seeded(2026)\n    \
+                 let die = generator.next_int(1, 7)\n    \
+                 let coin = generator.next_bool()\n    \
+                 let x = generator.next_float()\n    \
+                 let picked = generator.choose([1, 2, 3]) or 0\n    \
+                 let order = generator.shuffled([1, 2, 3])\n    \
+                 var result = [die, picked, 1 if coin else 0, 1 if x < 0.5 else 0]\n    result.append_all(order)\n    return result\n\n\
+                 function main():\n    let _ = through_parameter()\n",
+            ),
+        ],
+    );
+    let found = codes(&dir, "main.unio", Profile::Application);
+    assert!(found.is_empty(), "{found:?}");
+    for name in [
+        "main.through_parameter",
+        "main.through_lambda",
+        "main.through_field",
+        "main.main",
+    ] {
+        let e = effects(&dir, name);
+        assert!(e.contains(&"clock"), "{name} reads the clock: {e:?}");
+    }
+    let e = effects(&dir, "main.secure_through_value");
+    assert!(e.contains(&"random") && !e.contains(&"clock"), "{e:?}");
+    for name in [
+        "main.given_value_only",
+        "main.calendar",
+        "main.manual",
+        "main.fixed",
+    ] {
+        let e = effects(&dir, name);
+        assert!(
+            !e.contains(&"clock") && !e.contains(&"random"),
+            "{name}: {e:?}"
+        );
+    }
+    let e = effects(&dir, "main.simulation");
+    assert!(
+        !e.contains(&"random") && !e.contains(&"clock"),
+        "a seeded generator: {e:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// RFC 0009, refinement 4: the random source of the system cannot be replaced from outside the
+/// program. Two runs with the same environment, including variables that might be expected to
+/// seed it, draw different numbers.
+#[test]
+fn the_random_source_of_the_system_is_not_replaceable_by_the_environment() {
+    let dir = package(
+        "entropy-runs",
+        &[(
+            "main.unio",
+            "import std.random as random\n\n\
+             function main():\n    var generator = random.from_entropy()\n    \
+             let secure = try random.secure_int(MINIMUM_INT, MAXIMUM_INT) on random.RandomError as e:\n        \
+             assert_fail(e.reason)\n    \
+             print(\"{generator.next_int(MINIMUM_INT, MAXIMUM_INT)} {secure}\")\n",
+        )],
+    );
+    let run = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+            .current_dir(&dir)
+            .env_remove("UNIO_POLICY")
+            .env("UNIO_SEED", "1")
+            .env("UNIO_RANDOM_SEED", "1")
+            .env("SOURCE_DATE_EPOCH", "0")
+            .args(["run", "main.unio"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let (first, second) = (run(), run());
+    let pairs = |text: &str| {
+        text.split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let (a, b) = (pairs(&first), pairs(&second));
+    assert_eq!((a.len(), b.len()), (2, 2), "{first} {second}");
+    assert!(a[0] != b[0] && a[1] != b[1], "{first} {second}");
+    let _ = fs::remove_dir_all(&dir);
+}

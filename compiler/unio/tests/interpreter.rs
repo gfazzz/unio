@@ -68,6 +68,11 @@ fn every_test_block_of_the_repository_runs_and_passes() {
                 .count()
         })
         .sum();
+    // The examples of documentation comments run as tests too (T-13).
+    let examples: usize = files
+        .iter()
+        .map(|f| unio::doctest::examples(&common::read(f)).len())
+        .sum();
     assert!(blocks > 100, "only {blocks} test blocks found");
     let output = unio()
         .arg("test")
@@ -83,7 +88,7 @@ fn every_test_block_of_the_repository_runs_and_passes() {
         .filter(|l| l.contains("\"status\""))
         .collect();
     assert!(failed.is_empty(), "failed tests:\n{}", failed.join("\n"));
-    assert_eq!(passed, blocks, "{json}");
+    assert_eq!(passed, blocks + examples, "{json}");
     assert!(output.status.success());
 }
 
@@ -370,6 +375,46 @@ fn types_of_one_name_in_two_modules_keep_their_own_methods() {
     let out = text(&output.stdout);
     assert!(out.contains("1 passed, 0 failed"), "{out}");
     assert!(output.status.success(), "{out}");
+}
+
+/// What `tests/programs/checked_runs/main.unio` prints.
+const CHECKED_RUNS_OUTPUT: &str =
+    "anna 30\nboris 41\nolder 1 boris\nborrowers 0 7\ndecoded 1 Dune 3\nloaded 3 6\n";
+
+/// Programs that `unio check` accepts run as it typed them, never into an internal fault: a
+/// map is visited as (key, value) pairs, `books[2].borrower = 7` changes the value under the
+/// key (a missing key is a fault, its test block), and `let x as List[Book] = try
+/// json.decode(v)` decodes to the expected type, also through a generic function.
+#[test]
+fn checked_programs_run_as_they_were_typed() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/checked_runs");
+    let main = dir.join("main.unio");
+    expect(&run(&main, &[], &dir, &[]), 0, CHECKED_RUNS_OUTPUT);
+    let output = unio().arg("test").arg(&main).output().unwrap();
+    let out = text(&output.stdout);
+    assert!(out.contains("1 passed, 0 failed"), "{out}");
+    assert!(output.status.success(), "{out}");
+}
+
+/// An integer literal that does not fit in Int is E0008 of the check, not a fault of the run.
+#[test]
+fn an_integer_literal_beyond_int_is_refused_before_it_runs() {
+    let dir = scratch("int-literal");
+    let file = dir.join("big.unio");
+    fs::write(
+        &file,
+        "public function main():\n    print(\"{9223372036854775808}\")\n",
+    )
+    .unwrap();
+    let output = run(&file, &[], &dir, &[]);
+    let err = program_err(&output);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("E0008") && err.contains("does not fit in Int"),
+        "{err}"
+    );
+    assert!(!err.contains("internal"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// S-17: the run-time conversion never sets a private field, even in a program whose check

@@ -1,0 +1,246 @@
+## The chapter "From classes to Unio" of the guide (docs/guide.md, chapter 8) as a program:
+## each part replaces one use of classes and has its tests.
+##
+## Usage:
+##     unio run classes.unio
+
+from std.text import join
+
+# ---------------------------------------------------------------- 1. a class: struct and extend
+
+## A bank account. Its balance changes only through deposit and withdraw: the fields that hold
+## it are private, so another module cannot build an Account or change them directly.
+struct Account:
+    public owner as Text
+    var balance as Int = 0
+    var history as List[Int] = []
+
+error Overdraft:
+    needed as Int
+    available as Int
+
+extend Account:
+    ## The constructor of a class becomes a function of the type: Account.open("Anna").
+    public function open(owner as Text) returns Account:
+        return Account(owner = owner)
+
+    public function current_balance(self) returns Int:
+        return self.balance
+
+    ## var self: the method changes the account, and the caller's place must be a var.
+    public function deposit(var self, amount as Int):
+        self.balance = self.balance + amount
+        self.history.append(amount)
+
+    public function withdraw(var self, amount as Int) fails with Overdraft:
+        if amount > self.balance: fail Overdraft(needed = amount, available = self.balance)
+        self.balance = self.balance - amount
+        self.history.append(-amount)
+
+# ---------------------------------------------------------------- 2. a base class: an interface
+
+## What a base class Shape would declare. describe has a default implementation that every
+## shape shares; a type may replace it.
+interface Shape:
+    function area(self) returns Float
+    function name(self) returns Text
+
+    function describe(self) returns Text:
+        return "{self.name()} of area {self.area()}"
+
+struct Rectangle:
+    public width as Float
+    public height as Float
+
+struct Square:
+    public side as Float
+
+extend Rectangle with Shape:
+    function area(self) returns Float:
+        return self.width * self.height
+
+    function name(self) returns Text:
+        return "rectangle"
+
+extend Square with Shape:
+    function area(self) returns Float:
+        return self.side * self.side
+
+    function name(self) returns Text:
+        return "square"
+
+    ## Replaces the default, as an override would.
+    function describe(self) returns Text:
+        return "square with side {self.side}"
+
+## A list of the interface type holds values of different types; each call goes to the
+## implementation of the value's own type.
+function total_area(shapes as List[Shape]) returns Float:
+    var total = 0.0
+    for shape in shapes:
+        total = total + shape.area()
+    return total
+
+# ---------------------------------------------------------------- 3. inheritance: composition
+
+struct Person:
+    public name as Text
+    public email as Text
+
+## An employee is not a kind of person here: it contains one.
+struct Employee:
+    public person as Person
+    public team as Text
+
+function greeting(person as Person) returns Text:
+    return "Hello, {person.name}"
+
+extend Employee:
+    ## Delegation is written out, so a reader sees where the name comes from.
+    public function name(self) returns Text:
+        return self.person.name
+
+# ---------------------------------------------------------------- 4. shared objects: ids and maps
+
+struct Book:
+    public id as Int
+    public title as Text
+    public var borrower as Option[Int] = none
+
+struct Member:
+    public id as Int
+    public name as Text
+
+error NotFound:
+    what as Text
+    id as Int
+
+## Books and members refer to each other by number, not by holding each other: the library
+## owns both maps, and every change goes through it.
+struct Library:
+    var books as Map[Int, Book] = {}
+    var members as Map[Int, Member] = {}
+
+extend Library:
+    public function new() returns Library:
+        return Library()
+
+    public function add_book(var self, id as Int, title as Text):
+        self.books[id] = Book(id = id, title = title)
+
+    public function add_member(var self, id as Int, name as Text):
+        self.members[id] = Member(id = id, name = name)
+
+    public function lend(var self, book_id as Int, member_id as Int) fails with NotFound:
+        if member_id not in self.members: fail NotFound(what = "member", id = member_id)
+        match self.books.get(book_id):
+            case some(book):
+                var lent = book
+                lent.borrower = some(member_id)
+                self.books[book_id] = lent
+            case none: fail NotFound(what = "book", id = book_id)
+
+    public function borrowed_by(self, member_id as Int) returns List[Text]:
+        return [book.title for book in self.books.values() if book.borrower == some(member_id)]
+
+# ---------------------------------------------------------------- 5. domain types: checked wrappers
+
+## A network port. The field is private, so every Port was made by from_int and is in range.
+struct Port:
+    number as Int
+
+error InvalidPort:
+    value as Int
+
+extend Port:
+    public function from_int(value as Int) returns Port fails with InvalidPort:
+        if value < 1 or value > 65535: fail InvalidPort(value = value)
+        return Port(number = value)
+
+    public function value(self) returns Int:
+        return self.number
+
+## A size in bytes: a function that takes a ByteCount cannot be given a count of items by mistake.
+struct ByteCount:
+    public bytes as Int
+
+extend ByteCount:
+    public function kibibytes(count as Int) returns ByteCount:
+        return ByteCount(bytes = count * 1024)
+
+public function main() returns Int:
+    var account = Account.open("Anna")
+    account.deposit(100)
+    try account.withdraw(30) on Overdraft as e:
+        print_error("cannot withdraw {e.needed}: {e.available} available")
+        return 1
+    print("{account.owner}: {account.current_balance()}")
+    let shapes as List[Shape] = [Rectangle(width = 2.0, height = 3.0), Square(side = 2.0)]
+    for shape in shapes:
+        print(shape.describe())
+    let employee = Employee(
+        person = Person(name = "Boris", email = "boris@example.org"),
+        team = "tools",
+    )
+    print("{greeting(employee.person)} from {employee.team}")
+    var library = Library.new()
+    library.add_book(1, "Dune")
+    library.add_member(7, "Anna")
+    try library.lend(1, 7) on NotFound as e:
+        print_error("no {e.what} {e.id}")
+        return 1
+    print("Anna has: {join(library.borrowed_by(7), ", ")}")
+    return 0
+
+test "an account refuses an overdraft and keeps its balance":
+    var account = Account.open("Anna")
+    account.deposit(50)
+    try:
+        account.withdraw(80)
+        assert_fail("expected an overdraft")
+    on Overdraft as e: assert e.available == 50
+    assert account.current_balance() == 50
+
+test "interface values dispatch to their own type, and defaults can be replaced":
+    let shapes as List[Shape] = [Rectangle(width = 2.0, height = 3.0), Square(side = 2.0)]
+    assert total_area(shapes) == 10.0
+    assert shapes[0].describe() == "rectangle of area 6.0"
+    assert shapes[1].describe() == "square with side 2.0"
+
+test "composition: the employee delegates to the person it contains":
+    let employee = Employee(
+        person = Person(name = "Boris", email = "b@example.org"),
+        team = "tools",
+    )
+    assert employee.name() == "Boris"
+    assert greeting(employee.person) == "Hello, Boris"
+
+test "the library changes books through their numbers":
+    var library = Library.new()
+    library.add_book(1, "Dune")
+    library.add_book(2, "Emma")
+    library.add_member(7, "Anna")
+    try library.lend(2, 7) on NotFound as e:
+        assert_fail("no {e.what} {e.id}")
+    assert library.borrowed_by(7) == ["Emma"]
+    try:
+        library.lend(3, 7)
+        assert_fail("expected NotFound")
+    on NotFound as e: assert e.what == "book"
+
+test "a value taken out of the library is a copy":
+    var library = Library.new()
+    library.add_book(1, "Dune")
+    var copy = library.books[1]
+    copy.borrower = some(7)
+    assert library.books[1].borrower == none
+
+test "a port is checked once, where it is made":
+    let port = try Port.from_int(8080) on InvalidPort as e:
+        assert_fail("{e.value} refused")
+    assert port.value() == 8080
+    try:
+        Port.from_int(70000)
+        assert_fail("expected InvalidPort")
+    on InvalidPort as e: assert e.value == 70000
+    assert ByteCount.kibibytes(2) == ByteCount(bytes = 2048)

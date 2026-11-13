@@ -1,0 +1,78 @@
+name: sanitizers
+
+# R-5: all external function code of the standard library is tested with memory sanitizers.
+# The externals are the bindings of compiler/unio-runtime/src/externs/ and the runtime code they
+# call (values, files, processes, the sandbox); docs/extern-review.md lists them.
+#
+# AddressSanitizer and MemorySanitizer exist in Rust only as `-Zsanitizer`, which the stable
+# toolchain refuses, and Miri cannot run the system calls of the externals. This workflow alone
+# therefore uses a nightly toolchain, pinned to one dated release so that its results do not
+# move with nightly; the compiler and every release are still built with the stable toolchain of
+# compiler/rust-toolchain.toml. Update the date deliberately, as the stable pin.
+#
+# What runs: under AddressSanitizer (out-of-bounds accesses, use after free, double free), the
+# tests of the runtime crate and every `test` block of the Unio sources, executed by a `unio`
+# built with the sanitizer, so that every external is called through the interpreter as programs
+# call it; under MemorySanitizer (reads of uninitialized memory), with the standard library of
+# Rust rebuilt with the sanitizer, the tests of the runtime crate. Linux x86-64 only: the
+# sanitizers of Rust support it fully, and the code of the externals is the same on every
+# platform but for the system calls of files and processes.
+#
+# The options of the sanitizers are compiled into the binaries, since the workers of the tool
+# start with an empty environment (docs/runtime.md 9.7): leak detection is off, because
+# LeakSanitizer needs ptrace, which the sandbox forbids (a leak is no memory error in Rust), and
+# an allocation the allocator refuses returns null, as the tests of the allocator-failure path
+# expect.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NIGHTLY: nightly-2026-11-01
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  sanitizers:
+    name: externals under AddressSanitizer and MemorySanitizer (R-5)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: compiler
+    steps:
+      - uses: actions/checkout@v4
+      - name: The dated nightly toolchain of the sanitizers
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+      - name: Options of the sanitizers, compiled in
+        run: |
+          mkdir -p "$RUNNER_TEMP/sanitizers"
+          cd "$RUNNER_TEMP/sanitizers"
+          printf '%s\n' \
+            'const char *__asan_default_options(void) { return "detect_leaks=0:allocator_may_return_null=1"; }' \
+            'const char *__msan_default_options(void) { return "allocator_may_return_null=1"; }' > options.c
+          cc -c -fPIC -o options.o options.c
+          # The workers of the tool limit their address space to compile.memory_bytes, and the
+          # shadow memory of a sanitizer is far larger; the operator's policy lifts the limit.
+          printf '[compile]\nmemory_bytes = 9_223_372_036_854_775_807\n' > policy.toml
+      - name: Runtime tests under AddressSanitizer
+        run: |
+          RUSTFLAGS="-Zsanitizer=address -Clink-arg=$RUNNER_TEMP/sanitizers/options.o" \
+          CARGO_TARGET_DIR=target/asan \
+            cargo "+$NIGHTLY" test --locked -p unio-runtime --tests --target "$TARGET"
+      - name: Every test block, run by unio under AddressSanitizer
+        working-directory: .
+        run: |
+          (cd compiler && RUSTFLAGS="-Zsanitizer=address -Clink-arg=$RUNNER_TEMP/sanitizers/options.o" \
+            CARGO_TARGET_DIR=target/asan cargo "+$NIGHTLY" build --locked -p unio --bin unio --target "$TARGET")
+          UNIO_POLICY="$RUNNER_TEMP/sanitizers/policy.toml" \
+            "compiler/target/asan/$TARGET/debug/unio" test docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
+      - name: Runtime tests under MemorySanitizer
+        run: |
+          RUSTFLAGS="-Zsanitizer=memory -Zsanitizer-memory-track-origins -Clink-arg=$RUNNER_TEMP/sanitizers/options.o" \
+          CARGO_TARGET_DIR=target/msan \
+            cargo "+$NIGHTLY" test --locked -Zbuild-std -p unio-runtime --tests --target "$TARGET"

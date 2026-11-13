@@ -734,10 +734,71 @@ impl Interp {
             return self.call_external(rt, f, frame, &types);
         }
         if let Some(intrinsic) = self.intrinsics[f] {
+            if let Intrinsic::Property = intrinsic {
+                return self.check_property(rt, f, frame, types);
+            }
             if let Some(result) = self.intrinsic(rt, intrinsic, frame) {
                 return result;
             }
         }
+        self.invoke_code(rt, f, frame, types)
+    }
+
+    /// `std.test.check_property` (T-12): the seed of `unio test --seed` takes the place of the
+    /// seed of the call, and a counterexample the call returns is recorded for the runner.
+    fn check_property(
+        &self,
+        rt: &mut Runtime,
+        f: FnId,
+        frame: &mut Vec<Value>,
+        types: Types,
+    ) -> Outcome {
+        let seed_slot = self.program.funcs[f]
+            .params
+            .iter()
+            .position(|p| p.name == "seed");
+        if let (Some(seed), Some(slot)) = (property::seed(), seed_slot) {
+            while frame.len() <= slot {
+                frame.push(Value::Unit);
+            }
+            frame[slot] = Value::Int(seed);
+        }
+        let result = self.invoke_code(rt, f, frame, types)?;
+        if let Value::Enum(e) = &result {
+            if &*e.variant == "some" {
+                if let Some((_, Value::Struct(found))) = e.fields.first() {
+                    let mut report = property::Report::default();
+                    for (name, value) in &found.fields {
+                        let int = match value {
+                            Value::Int(i) => *i,
+                            _ => 0,
+                        };
+                        match &**name {
+                            "seed" => report.seed = int,
+                            "case_index" => report.case_index = int,
+                            "sample_seed" => report.sample_seed = int,
+                            "shrink_attempts" => report.shrink_attempts = int,
+                            "original" => report.original = self.display(rt, value)?,
+                            "minimal" => report.minimal = self.display(rt, value)?,
+                            _ => {}
+                        }
+                    }
+                    property::record(report);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Runs the Unio definition of a function.
+    fn invoke_code(
+        &self,
+        rt: &mut Runtime,
+        f: FnId,
+        frame: &mut Vec<Value>,
+        types: Types,
+    ) -> Outcome {
+        let def = &self.program.funcs[f];
         if let Some(hooks) = self.native.get() {
             return hooks.invoke(self, rt, f, frame, &types);
         }
@@ -1788,9 +1849,11 @@ impl Interp {
         Ok(match source {
             Value::List(l) | Value::Tuple(l) => Cursor::List(l, 0),
             Value::Set(s) => Cursor::Items(s.items().cloned().collect::<Vec<_>>().into_iter()),
+            // A map is visited as its (key, value) pairs in insertion order, the type the
+            // check gives the items of `for` and of a comprehension (semantics 2, runtime 2.4).
             Value::Map(m) => Cursor::Items(
                 m.entries()
-                    .map(|(k, _)| k.clone())
+                    .map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()]))
                     .collect::<Vec<_>>()
                     .into_iter(),
             ),
@@ -3471,6 +3534,14 @@ pub(crate) fn navigate<'a>(
                 }
             }
         }
+        (Value::Map(m), Step::Index(key)) => {
+            // `books[id].borrower = x` changes the value under the key in place; a missing key
+            // is the fault of reading it (L-18).
+            match Rc::make_mut(m).get_mut(key) {
+                Some(x) => x,
+                None => return Err(rt.fault(FaultKind::MissingKey, "the map has no such key")),
+            }
+        }
         (Value::Resource(cell), _) => {
             // A resource field reached through a struct; change it inside its cell.
             let _ = cell;
@@ -3618,6 +3689,50 @@ pub struct TestResult {
     pub message: String,
     pub output: String,
     pub millis: u128,
+    /// The counterexamples `std.test.check_property` returned in the test (T-12).
+    pub properties: Vec<property::Report>,
+}
+
+/// The counterexamples of property tests for the runner (T-12, scheme `unio-property-v1`).
+pub mod property {
+    use std::cell::{Cell, RefCell};
+
+    /// The scheme of the generator and the shrinker of `std.test.check_property`.
+    pub const SCHEME: &str = "unio-property-v1";
+
+    /// A counterexample as the runner reports it, with its values as `print` shows them.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Report {
+        pub seed: i64,
+        pub case_index: i64,
+        pub sample_seed: i64,
+        pub original: String,
+        pub minimal: String,
+        pub shrink_attempts: i64,
+    }
+
+    thread_local! {
+        static SEED: Cell<Option<i64>> = const { Cell::new(None) };
+        static FOUND: RefCell<Vec<Report>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// The seed every `check_property` of the tests on this thread uses (`unio test --seed`).
+    pub fn set_seed(seed: Option<i64>) {
+        SEED.with(|s| s.set(seed));
+    }
+
+    pub(crate) fn seed() -> Option<i64> {
+        SEED.with(Cell::get)
+    }
+
+    pub(crate) fn record(report: Report) {
+        FOUND.with(|f| f.borrow_mut().push(report));
+    }
+
+    /// The counterexamples recorded on this thread since the last call.
+    pub fn take() -> Vec<Report> {
+        FOUND.with(|f| std::mem::take(&mut *f.borrow_mut()))
+    }
 }
 
 /// Runs one test block of a module in a fresh runtime with captured output.
@@ -3626,6 +3741,7 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
         unreachable!("a test item")
     };
     let name = description(&test.description);
+    property::take();
     let (mut rt, out, err) = Runtime::captured(Vec::new());
     let started = std::time::Instant::now();
     let label = format!("test \"{name}\"");
@@ -3670,6 +3786,100 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
         message,
         output,
         millis,
+        properties: property::take(),
+    }
+}
+
+/// What running the statements of a REPL input gave (T-13).
+pub struct InputRun {
+    /// `None` when the statements ended normally; otherwise what ended them.
+    pub failure: Option<String>,
+    pub output: String,
+    pub errors: String,
+    /// The bindings at the top level of the input, the last of each name, with their values.
+    pub values: Vec<(String, Value)>,
+    /// The text of the value of the binding `show`, as `print` shows it.
+    pub shown: Option<String>,
+}
+
+/// Runs the body of the function `item` of a module as the statements of a REPL input, with
+/// captured output, and returns the values of its top-level bindings and the text of the
+/// binding `show`. The sandbox applies already (SB-1).
+pub fn run_input(interp: &Rc<Interp>, module: ModId, function: FnId, show: &str) -> InputRun {
+    let Some(body) = interp
+        .program
+        .funcs
+        .get(function)
+        .and_then(|f| f.body)
+        .and_then(
+            |b| match &interp.program.modules[b.module].analysis.file.items[b.item] {
+                Item::Declaration(d) => match &d.kind {
+                    DeclarationKind::Function(f) => Some(f.body.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+        )
+    else {
+        return InputRun {
+            failure: Some("the input has no statements".into()),
+            output: String::new(),
+            errors: String::new(),
+            values: Vec::new(),
+            shown: None,
+        };
+    };
+    let (mut rt, out, err) = Runtime::captured(Vec::new());
+    let mut lower = Lowering::new(interp, module);
+    let (block, names) = lower.statements(&body);
+    let mut env = Env {
+        vars: Slots::new(vec![Value::Unit; lower.slots()]),
+        module,
+        types: Rc::clone(&interp.empty_types),
+    };
+    let line = interp.program.funcs[function].span.start.line as u32;
+    let result = rt
+        .enter("input", Rc::clone(&interp.files[module]), line)
+        .and_then(|_| interp.run_block(&mut rt, &mut env, &block));
+    let result = match result {
+        Err(Unwind::Fault(_)) if rt.check_heap().is_err() => {
+            Err(Unwind::Exhausted(rf::Exhaustion::Heap))
+        }
+        other => other,
+    };
+    let failure = match result {
+        Ok(_) => None,
+        Err(Unwind::Fault(f)) => Some(unio_runtime::reserve::outside(|| f.render())),
+        Err(Unwind::Exhausted(x)) => Some(x.message().to_string()),
+        Err(Unwind::Error(e)) => {
+            let text = interp.display(&mut rt, &e).unwrap_or_default();
+            Some(format!("an error was not handled: {text}\n"))
+        }
+    };
+    let mut values: Vec<(String, Value)> = Vec::new();
+    for (name, slot) in names {
+        let value = env.vars[slot as usize].clone();
+        values.retain(|(n, _)| *n != name);
+        values.push((name, value));
+    }
+    // Showing a value may call its `to_text`, which is code of the program, so only the value
+    // of an expression input is shown, and only when the input ended normally.
+    let shown = match (&failure, values.iter().find(|(n, _)| n == show)) {
+        (None, Some((_, value))) => match value {
+            Value::Unit => None,
+            value => Some(interp.display(&mut rt, value).unwrap_or_default()),
+        },
+        _ => None,
+    };
+    drop(env);
+    let output = String::from_utf8_lossy(&out.borrow()).into_owned();
+    let errors = String::from_utf8_lossy(&err.borrow()).into_owned();
+    InputRun {
+        failure,
+        output,
+        errors,
+        values,
+        shown,
     }
 }
 
@@ -3688,6 +3898,9 @@ pub(crate) enum Intrinsic {
     Values,
     AppendAll,
     Range(DefId),
+    /// `std.test.check_property`: its Unio definition runs, with the seed of `unio test
+    /// --seed`, and the runner records the counterexample it returns (T-12).
+    Property,
 }
 
 impl Intrinsic {
@@ -3705,6 +3918,7 @@ impl Intrinsic {
             (Some("map"), "values") => Intrinsic::Values,
             (Some("list"), "append_all") => Intrinsic::AppendAll,
             (None, "range") if module == "prelude:core/prelude" => Intrinsic::Range(range?),
+            (None, "check_property") if module == "std.test" => Intrinsic::Property,
             _ => return None,
         })
     }

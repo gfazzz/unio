@@ -1,5 +1,609 @@
-## Program arguments. Flags, defaults and automatic help (requirement S-4) are added in stage 5.
+## Program arguments (requirements S-1, S-4): the raw list, and a parser of positional arguments,
+## flags and options with defaults and an automatic --help.
+##
+## A program declares its parameters once; parse checks the arguments against them and help writes
+## the usage text from the same declarations, so the two cannot disagree:
+##
+##     let cli = parser("copy", "Copies a file.", [
+##         flag("verbose", "Print what is copied.", short = "v"),
+##         option("mode", "File mode of the copy.", default = some("644")),
+##         positional("source", "The file to read."),
+##         positional("target", "Where to write.", default = some("out.txt")),
+##     ])
+##     let arguments = try parse(cli, list()) on ArgsError as e:
+##         ...
+##
+## The syntax: "--name", "--name value" and "--name=value" for long names; "-x" and "-x value" for
+## short names, and "-abc" for several short flags; "--" ends the options, so what follows is
+## positional even when it starts with "-"; a lone "-" is positional. "--help" and "-h" give an
+## ArgsError of kind HelpRequested whose message is the help text, unless the program declares a
+## parameter of that name itself.
 unsafe module
 
+from std.text import join
+
 ## The arguments of the program without its name.
+## Example:
+##     assert list().length() >= 0
 public external function list() returns List[Text]
+
+enum ParameterKind:
+    Flag
+    Option
+    Positional
+    Rest
+
+## One declared parameter; made by flag, option, positional or rest.
+public struct Parameter:
+    name as Text
+    help as Text
+    kind as ParameterKind
+    short as Text = ""
+    default as Option[Text] = none
+
+## The declared parameters of a program with its name and description.
+public struct Parser:
+    program as Text
+    about as Text
+    parameters as List[Parameter]
+
+## What went wrong, for a program that wants to react to each case.
+public enum ArgsErrorKind:
+    HelpRequested
+    UnknownOption
+    MissingValue
+    UnexpectedValue
+    MissingArgument
+    UnexpectedArgument
+    InvalidValue
+
+## Arguments that do not match the declared parameters, or a request for help. message says what
+## is wrong in one line followed by the usage line, or is the whole help text for HelpRequested.
+public error ArgsError:
+    kind as ArgsErrorKind
+    message as Text
+
+## The result of parse: the value of every declared parameter.
+public struct Arguments:
+    parser as Parser
+    flags as Set[Text]
+    values as Map[Text, List[Text]]
+
+## A flag: present or absent, never with a value. short is one character or "".
+## Example:
+##     let cli = parser("ls", "Lists.", [flag("all", "Show hidden files.", short = "a")])
+##     let arguments = try parse(cli, ["-a"]) on ArgsError as e:
+##         assert_fail(e.message)
+##     assert arguments.flag("all")
+public function flag(name as Text, help as Text, named short as Text = "") returns Parameter:
+    return Parameter(name = name, help = help, kind = ParameterKind.Flag, short = short)
+
+## An option with a value. Without a default it may be left out, and get gives none; repeated, the
+## last value counts for get and value, and all of them for values.
+## Example:
+##     let cli = parser("serve", "Serves.", [option("port", "Port to listen on.", default = some("8080"))])
+##     let arguments = try parse(cli, []) on ArgsError as e:
+##         assert_fail(e.message)
+##     assert arguments.value("port") == "8080"
+public function option(
+    name as Text,
+    help as Text,
+    named short as Text = "",
+    named default as Option[Text] = none,
+) returns Parameter:
+    return Parameter(
+        name = name,
+        help = help,
+        kind = ParameterKind.Option,
+        short = short,
+        default = default,
+    )
+
+## A positional argument, taken in the order of declaration. Without a default it is required;
+## with one it is optional, and every positional after it must be optional too.
+## Example:
+##     let cli = parser("cat", "Prints a file.", [positional("file", "The file.")])
+##     let arguments = try parse(cli, ["notes.txt"]) on ArgsError as e:
+##         assert_fail(e.message)
+##     assert arguments.value("file") == "notes.txt"
+public function positional(
+    name as Text,
+    help as Text,
+    named default as Option[Text] = none,
+) returns Parameter:
+    return Parameter(name = name, help = help, kind = ParameterKind.Positional, default = default)
+
+## The positional arguments that remain after the declared ones, possibly none; at most one, and
+## the last parameter.
+## Example:
+##     let cli = parser("rm", "Removes files.", [rest("files", "The files.")])
+##     let arguments = try parse(cli, ["a", "b"]) on ArgsError as e:
+##         assert_fail(e.message)
+##     assert arguments.values("files") == ["a", "b"]
+public function rest(name as Text, help as Text) returns Parameter:
+    return Parameter(name = name, help = help, kind = ParameterKind.Rest)
+
+## The declared parameters of a program. A declaration that cannot work is a fault: an empty or
+## repeated name or short name, a short name longer than one character, a required positional
+## after an optional one, or a rest that is not the last parameter.
+## Example:
+##     let cli = parser("greet", "Greets someone.", [positional("name", "Who to greet.")])
+##     assert help(cli).starts_with("Usage: greet [options] <name>")
+public function parser(
+    program as Text,
+    about as Text,
+    parameters as List[Parameter],
+) returns Parser:
+    var names = Set[Text]()
+    var shorts = Set[Text]()
+    var optional_seen = false
+    for index, parameter in parameters.enumerate():
+        if parameter.name.is_empty() or parameter.name.starts_with("-"):
+            assert_fail("args.parser: the name '{parameter.name}' is empty or starts with -")
+        if parameter.name in names: assert_fail("args.parser: '{parameter.name}' is declared twice")
+        names.insert(parameter.name)
+        if not parameter.short.is_empty():
+            if parameter.short.length() != 1 or parameter.short == "-":
+                assert_fail(
+                    "args.parser: the short name of '{parameter.name}' is not one character",
+                )
+            if parameter.short in shorts:
+                assert_fail("args.parser: the short name '{parameter.short}' is declared twice")
+            shorts.insert(parameter.short)
+        match parameter.kind:
+            case ParameterKind.Positional:
+                if parameter.default.is_some(): optional_seen = true
+                else if optional_seen:
+                    assert_fail(
+                        "args.parser: the required '{parameter.name}' follows an optional positional",
+                    )
+            case ParameterKind.Rest:
+                if index != parameters.length() - 1:
+                    assert_fail(
+                        "args.parser: the rest '{parameter.name}' is not the last parameter",
+                    )
+            case _: pass
+    return Parser(program = program, about = about, parameters = parameters)
+
+## The usage text: the usage line, the description, and every parameter with its help and default.
+## --help and -h give it unless the program declares parameters of those names.
+## Example:
+##     let cli = parser("wc", "Counts words.", [flag("lines", "Count lines.", short = "l")])
+##     assert help(cli).contains("  -l, --lines  Count lines.")
+public function help(parser as Parser) returns Text:
+    var lines = [usage(parser), ""]
+    if not parser.about.is_empty():
+        lines.append(parser.about)
+        lines.append("")
+    var argument_rows as List[Tuple[Text, Text]] = []
+    var option_rows as List[Tuple[Text, Text]] = []
+    for parameter in parser.parameters:
+        var description = parameter.help
+        match parameter.default:
+            case some(value): description = description + " (default: {value})"
+            case none: pass
+        match parameter.kind:
+            case ParameterKind.Positional: argument_rows.append((parameter.name, description))
+            case ParameterKind.Rest: argument_rows.append((parameter.name, description))
+            case ParameterKind.Flag: option_rows.append((switch_label(parameter), description))
+            case ParameterKind.Option:
+                option_rows.append(("{switch_label(parameter)} VALUE", description))
+    if automatic_help(parser):
+        let label = "-h, --help" if automatic_short_help(parser) else "    --help"
+        option_rows.append((label, "Show this help."))
+    if not argument_rows.is_empty():
+        lines.append("Arguments:")
+        lines.append_all(rows(argument_rows))
+        lines.append("")
+    if not option_rows.is_empty():
+        lines.append("Options:")
+        lines.append_all(rows(option_rows))
+        lines.append("")
+    return join(lines, "\n")
+
+## Checks the arguments against the declared parameters.
+## Example:
+##     let cli = parser("cp", "Copies.", [flag("force", "Overwrite.", short = "f"), positional("from", "Source."), positional("to", "Target.")])
+##     let arguments = try parse(cli, ["-f", "a.txt", "b.txt"]) on ArgsError as e:
+##         assert_fail(e.message)
+##     assert arguments.flag("force") and arguments.value("to") == "b.txt"
+public function parse(
+    parser as Parser,
+    arguments as List[Text],
+) returns Arguments fails with ArgsError:
+    var flags = Set[Text]()
+    var values as Map[Text, List[Text]] = {}
+    var positionals as List[Text] = []
+    var only_positional = false
+    var index = 0
+    while index < arguments.length():
+        let argument = arguments[index]
+        index = index + 1
+        if only_positional or argument == "-" or not argument.starts_with("-"):
+            positionals.append(argument)
+            continue
+        if argument == "--":
+            only_positional = true
+            continue
+        if argument.starts_with("--"):
+            let body = argument.slice(2, argument.length())
+            var name = body
+            var inline as Option[Text] = none
+            match body.index_of("="):
+                case some(at):
+                    name = body.slice(0, at)
+                    inline = some(body.slice(at + 1, body.length()))
+                case none: pass
+            match find_long(parser, name):
+                case some(parameter):
+                    match parameter.kind:
+                        case ParameterKind.Flag:
+                            if inline.is_some():
+                                fail problem(
+                                    parser,
+                                    ArgsErrorKind.UnexpectedValue,
+                                    "the flag --{name} takes no value",
+                                )
+                            flags.insert(parameter.name)
+                        case _:
+                            var value = ""
+                            match inline:
+                                case some(given): value = given
+                                case none:
+                                    if index >= arguments.length():
+                                        fail problem(
+                                            parser,
+                                            ArgsErrorKind.MissingValue,
+                                            "the option --{name} needs a value",
+                                        )
+                                    value = arguments[index]
+                                    index = index + 1
+                            add_value(values, parameter.name, value)
+                case none:
+                    if name == "help" and automatic_help(parser):
+                        fail ArgsError(kind = ArgsErrorKind.HelpRequested, message = help(parser))
+                    fail problem(parser, ArgsErrorKind.UnknownOption, "unknown option --{name}")
+            continue
+        # One or more short names after a single "-".
+        let letters = argument.slice(1, argument.length()).chars()
+        for position, letter in letters.enumerate():
+            match find_short(parser, letter):
+                case some(parameter):
+                    match parameter.kind:
+                        case ParameterKind.Flag: flags.insert(parameter.name)
+                        case _:
+                            if position != letters.length() - 1:
+                                fail problem(
+                                    parser,
+                                    ArgsErrorKind.MissingValue,
+                                    "the option -{letter} needs a value and must come last in {argument}",
+                                )
+                            if index >= arguments.length():
+                                fail problem(
+                                    parser,
+                                    ArgsErrorKind.MissingValue,
+                                    "the option -{letter} needs a value",
+                                )
+                            add_value(values, parameter.name, arguments[index])
+                            index = index + 1
+                case none:
+                    if letter == "h" and automatic_short_help(parser):
+                        fail ArgsError(kind = ArgsErrorKind.HelpRequested, message = help(parser))
+                    fail problem(parser, ArgsErrorKind.UnknownOption, "unknown option -{letter}")
+    var next = 0
+    for parameter in parser.parameters:
+        match parameter.kind:
+            case ParameterKind.Positional:
+                if next < positionals.length():
+                    values.put(parameter.name, [positionals[next]])
+                    next = next + 1
+                else if parameter.default.is_none():
+                    fail problem(
+                        parser,
+                        ArgsErrorKind.MissingArgument,
+                        "missing the argument <{parameter.name}>",
+                    )
+            case ParameterKind.Rest:
+                values.put(parameter.name, positionals.slice(next, positionals.length()))
+                next = positionals.length()
+            case _: pass
+    if next < positionals.length():
+        fail problem(
+            parser,
+            ArgsErrorKind.UnexpectedArgument,
+            "unexpected argument {positionals[next]}",
+        )
+    return Arguments(parser = parser, flags = flags, values = values)
+
+extend Arguments:
+    ## Whether the flag was given. A name that is not a declared flag is a fault.
+    ## Example:
+    ##     let cli = parser("ls", "Lists.", [flag("long", "Long format.")])
+    ##     let arguments = try parse(cli, []) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     assert not arguments.flag("long")
+    public function flag(self, name as Text) returns Bool:
+        let parameter = declared(self.parser, name)
+        match parameter.kind:
+            case ParameterKind.Flag: return name in self.flags
+            case _: assert_fail("Arguments.flag: '{name}' is not a flag")
+
+    ## The value of an option or positional: the last one given, else its default, else none. A
+    ## name that is not declared, or that is a flag, is a fault.
+    ## Example:
+    ##     let cli = parser("run", "Runs.", [option("config", "Configuration file.")])
+    ##     let arguments = try parse(cli, ["--config=app.toml"]) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     assert arguments.get("config") == some("app.toml")
+    public function get(self, name as Text) returns Option[Text]:
+        let parameter = declared(self.parser, name)
+        match parameter.kind:
+            case ParameterKind.Flag: assert_fail("Arguments.get: '{name}' is a flag")
+            case _: pass
+        match self.values.get(name):
+            case some(given): return given.last() or parameter.default
+            case none: return parameter.default
+
+    ## The value of an option or positional that has one: given, or by default. A parameter without
+    ## a value is a fault, so use it for required positionals and parameters with defaults, and get
+    ## for the others.
+    ## Example:
+    ##     let cli = parser("say", "Says.", [positional("word", "The word.", default = some("hi"))])
+    ##     let arguments = try parse(cli, []) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     assert arguments.value("word") == "hi"
+    public function value(self, name as Text) returns Text:
+        match self.get(name):
+            case some(found): return found
+            case none: assert_fail("Arguments.value: '{name}' has no value; use get")
+
+    ## Every value given for an option, in order, or the arguments of a rest parameter; for a
+    ## positional, its one value. Defaults are not included.
+    ## Example:
+    ##     let cli = parser("tag", "Tags.", [option("tag", "A tag.", short = "t")])
+    ##     let arguments = try parse(cli, ["-t", "a", "--tag", "b"]) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     assert arguments.values("tag") == ["a", "b"]
+    public function values(self, name as Text) returns List[Text]:
+        let _ = declared(self.parser, name)
+        return self.values.get(name) or []
+
+    ## The value as a decimal integer; none when the parameter has no value. A value that is not an
+    ## integer fails with kind InvalidValue.
+    ## Example:
+    ##     let cli = parser("head", "Prints lines.", [option("lines", "How many.", short = "n", default = some("10"))])
+    ##     let arguments = try parse(cli, ["-n", "3"]) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     let count = try arguments.get_int("lines") on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     assert count == some(3)
+    public function get_int(self, name as Text) returns Option[Int] fails with ArgsError:
+        match self.get(name):
+            case none: return none
+            case some(text):
+                match text.to_int():
+                    case some(number): return some(number)
+                    case none:
+                        fail problem(
+                            self.parser,
+                            ArgsErrorKind.InvalidValue,
+                            "the value of {name} is not an integer: {text}",
+                        )
+
+## The usage line: "Usage: program [options] <required> [optional] [rest...]".
+function usage(parser as Parser) returns Text:
+    var parts = ["Usage: {parser.program}"]
+    var has_options = automatic_help(parser)
+    for parameter in parser.parameters:
+        match parameter.kind:
+            case ParameterKind.Flag: has_options = true
+            case ParameterKind.Option: has_options = true
+            case _: pass
+    if has_options: parts.append("[options]")
+    for parameter in parser.parameters:
+        match parameter.kind:
+            case ParameterKind.Positional:
+                parts.append(
+                    "[{parameter.name}]" if parameter.default.is_some() else "<{parameter.name}>",
+                )
+            case ParameterKind.Rest: parts.append("[{parameter.name}...]")
+            case _: pass
+    return join(parts, " ")
+
+function problem(parser as Parser, kind as ArgsErrorKind, message as Text) returns ArgsError:
+    return ArgsError(kind = kind, message = "{parser.program}: {message}\n{usage(parser)}")
+
+function switch_label(parameter as Parameter) returns Text:
+    if parameter.short.is_empty(): return "    --{parameter.name}"
+    return "-{parameter.short}, --{parameter.name}"
+
+function rows(entries as List[Tuple[Text, Text]]) returns List[Text]:
+    var width = 0
+    for label, _ in entries:
+        width = max(width, label.length())
+    return ["  {label}{" ".repeat(width - label.length())}  {text}" for label, text in entries]
+
+function is_switch(parameter as Parameter) returns Bool:
+    match parameter.kind:
+        case ParameterKind.Flag: return true
+        case ParameterKind.Option: return true
+        case _: return false
+
+function find_long(parser as Parser, name as Text) returns Option[Parameter]:
+    return parser.parameters.find(
+        function (p as Parameter) returns Bool: p.name == name and is_switch(p),
+    )
+
+function find_short(parser as Parser, letter as Text) returns Option[Parameter]:
+    return parser.parameters.find(
+        function (p as Parameter) returns Bool: p.short == letter and is_switch(p),
+    )
+
+function automatic_help(parser as Parser) returns Bool:
+    return parser.parameters.find(
+        function (p as Parameter) returns Bool: p.name == "help",
+    ).is_none()
+
+function automatic_short_help(parser as Parser) returns Bool:
+    return automatic_help(parser) and parser.parameters.find(
+        function (p as Parameter) returns Bool: p.short == "h",
+    ).is_none()
+
+function declared(parser as Parser, name as Text) returns Parameter:
+    match parser.parameters.find(function (p as Parameter) returns Bool: p.name == name):
+        case some(parameter): return parameter
+        case none: assert_fail("args: '{name}' is not a declared parameter")
+
+function add_value(var values as Map[Text, List[Text]], name as Text, value as Text):
+    var given = values.get(name) or []
+    given.append(value)
+    values.put(name, given)
+
+function example_parser() returns Parser:
+    return parser(
+        "copy",
+        "Copies a file.",
+        [
+            flag("verbose", "Print what is copied.", short = "v"),
+            flag("dry-run", "Change nothing."),
+            option("mode", "File mode of the copy.", short = "m", default = some("644")),
+            option("exclude", "A name to skip; may be repeated."),
+            positional("source", "The file to read."),
+            positional("target", "Where to write.", default = some("out.txt")),
+            rest("extra", "More files to read."),
+        ],
+    )
+
+function parsed(arguments as List[Text]) returns Arguments fails with ArgsError:
+    return try parse(example_parser(), arguments)
+
+test "flags, options, positionals and defaults":
+    let arguments = try parsed(["-v", "--mode=600", "a.txt"]) on ArgsError as e:
+        assert_fail(e.message)
+    assert arguments.flag("verbose") and not arguments.flag("dry-run")
+    assert arguments.value("mode") == "600"
+    assert arguments.value("source") == "a.txt"
+    assert arguments.value("target") == "out.txt"
+    assert arguments.get("exclude") == none
+    assert arguments.values("extra") == []
+    let more = try parsed(
+        ["--exclude", "x", "-m", "700", "--exclude=y", "a", "b", "c", "d"],
+    ) on ArgsError as e:
+        assert_fail(e.message)
+    assert more.values("exclude") == ["x", "y"] and more.get("exclude") == some("y")
+    assert more.value("target") == "b" and more.values("extra") == ["c", "d"]
+    assert more.values("mode") == ["700"]
+
+test "combined short flags and the end of options":
+    let cli = parser(
+        "x",
+        "",
+        [
+            flag("a", "", short = "a"),
+            flag("b", "", short = "b"),
+            option("c", "", short = "c"),
+            rest("files", ""),
+        ],
+    )
+    let arguments = try parse(cli, ["-ab", "-c", "1", "--", "-a", "-"]) on ArgsError as e:
+        assert_fail(e.message)
+    assert arguments.flag("a") and arguments.flag("b") and arguments.value("c") == "1"
+    assert arguments.values("files") == ["-a", "-"]
+    let attached = try parse(cli, ["-ac", "2"]) on ArgsError as e:
+        assert_fail(e.message)
+    assert attached.value("c") == "2"
+
+function kind_of(arguments as List[Text]) returns Text:
+    try:
+        let _ = try parsed(arguments)
+        return "ok"
+    on ArgsError as e:
+        match e.kind:
+            case ArgsErrorKind.HelpRequested: return "help"
+            case ArgsErrorKind.UnknownOption: return "unknown"
+            case ArgsErrorKind.MissingValue: return "missing value"
+            case ArgsErrorKind.UnexpectedValue: return "unexpected value"
+            case ArgsErrorKind.MissingArgument: return "missing argument"
+            case ArgsErrorKind.UnexpectedArgument: return "unexpected argument"
+            case ArgsErrorKind.InvalidValue: return "invalid"
+
+test "mistakes are reported with their kind":
+    assert kind_of(["a"]) == "ok"
+    assert kind_of(["--help"]) == "help" and kind_of(["-h"]) == "help" and kind_of(
+        ["a", "-vh"],
+    ) == "help"
+    assert kind_of(["--nope", "a"]) == "unknown" and kind_of(["-z", "a"]) == "unknown"
+    assert kind_of(["a", "--mode"]) == "missing value" and kind_of(
+        ["-mv", "x", "a"],
+    ) == "missing value"
+    assert kind_of(["--verbose=yes", "a"]) == "unexpected value"
+    assert kind_of([]) == "missing argument"
+    let cli = parser("two", "", [positional("only", "")])
+    try:
+        let _ = try parse(cli, ["a", "b"])
+        assert_fail("accepted an extra argument")
+    on ArgsError as e:
+        assert e.kind == ArgsErrorKind.UnexpectedArgument
+        assert e.message == "two: unexpected argument b\nUsage: two [options] <only>"
+
+test "integer values are checked":
+    let arguments = try parsed(["--mode", "seven", "a"]) on ArgsError as e:
+        assert_fail(e.message)
+    try:
+        let _ = try arguments.get_int("mode")
+        assert_fail("read seven as an integer")
+    on ArgsError as e: assert e.kind == ArgsErrorKind.InvalidValue
+    let none_given = try arguments.get_int("exclude") on ArgsError as e:
+        assert_fail(e.message)
+    assert none_given == none
+
+test "the help text is generated from the declarations":
+    let expected = [
+        "Usage: copy [options] <source> [target] [extra...]",
+        "",
+        "Copies a file.",
+        "",
+        "Arguments:",
+        "  source  The file to read.",
+        "  target  Where to write. (default: out.txt)",
+        "  extra   More files to read.",
+        "",
+        "Options:",
+        "  -v, --verbose        Print what is copied.",
+        "      --dry-run        Change nothing.",
+        "  -m, --mode VALUE     File mode of the copy. (default: 644)",
+        "      --exclude VALUE  A name to skip; may be repeated.",
+        "  -h, --help           Show this help.",
+        "",
+    ]
+    assert help(example_parser()) == join(expected, "\n")
+    try:
+        let _ = try parsed(["--help"])
+    on ArgsError as e: assert e.message == help(example_parser())
+
+test "a program can declare its own help":
+    let cli = parser("h", "", [flag("help", "Custom.", short = "h")])
+    let arguments = try parse(cli, ["-h"]) on ArgsError as e:
+        assert_fail(e.message)
+    assert arguments.flag("help")
+    assert not help(cli).contains("Show this help.")
+
+test "impossible declarations are faults":
+    expect_fault(duplicate_names)
+    expect_fault(required_after_optional)
+    expect_fault(rest_not_last)
+    expect_fault(undeclared_lookup)
+
+function duplicate_names():
+    let _ = parser("x", "", [flag("a", ""), option("a", "")])
+
+function required_after_optional():
+    let _ = parser("x", "", [positional("a", "", default = some("1")), positional("b", "")])
+
+function rest_not_last():
+    let _ = parser("x", "", [rest("a", ""), flag("b", "")])
+
+function undeclared_lookup():
+    let arguments = try parse(parser("x", "", []), []) on ArgsError as e:
+        assert_fail(e.message)
+    let _ = arguments.get("missing")

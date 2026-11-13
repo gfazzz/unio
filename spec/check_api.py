@@ -144,7 +144,7 @@ def load_api(grammar, problems):
         if layer not in LAYERS:
             problems.append(f"stdlib/{rel}: not in a layer directory ({', '.join(LAYERS)})")
             continue
-        before_methods = set(methods)
+        file_methods = set()  # every method this file declares, as tools/check_api.unio notes them
         public_functions = set()
         for rule, kids in top_items(tree):
             if rule == "declaration" and is_public(kids):
@@ -162,19 +162,22 @@ def load_api(grammar, problems):
                     if isinstance(k, cg.Token) or k[0] != "member":
                         continue
                     if with_interface or is_public(k[1]):
-                        methods.add(signature_name(k))
+                        file_methods.add(signature_name(k))
             elif rule == "declaration":
                 inner = kids[0]
                 if inner[0] == "interface_decl":
                     for r2, k2 in walk(inner):
                         if r2 == "function_sig":
-                            methods.add(names_in(k2)[0])
+                            file_methods.add(names_in(k2)[0])
         for rule, kids in top_items(tree):
             if rule == "declaration" and is_public(kids) and kids[1][0] == "interface_decl":
                 for r2, k2 in walk(kids[1]):
                     if r2 == "function_sig":
-                        methods.add(names_in(k2)[0])
-        for name in methods - before_methods:
+                        file_methods.add(names_in(k2)[0])
+        methods |= file_methods
+        # The lowest layer that declares a method of the name: a file of a later layer may come
+        # first in the walk (alloc/ sorts before core/), so every file notes all its methods.
+        for name in file_methods:
             note_layer(layers, "method:" + name, layer)
         for name in public_functions:
             note_layer(layers, ("function:" if module == "prelude" else module + ":") + name, layer)

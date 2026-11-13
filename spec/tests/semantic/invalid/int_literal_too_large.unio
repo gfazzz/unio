@@ -1,0 +1,5 @@
+# expect-error: 4 E0008
+# An integer literal that does not fit in Int is refused by the check, not at run time.
+public function main():
+    let total = 9223372036854775808
+    print("{total}")

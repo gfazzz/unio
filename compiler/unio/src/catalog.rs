@@ -122,8 +122,8 @@ pub fn entry(code: &str) -> Option<Entry> {
             "let A = 1 + 2\n",
         ),
         "E0008" => (
-            "A number is decimal (1_000, 2.5, 1e-3), hexadecimal (0xFF) or binary (0b1010) and cannot be followed directly by a letter. Separate the number from the name that follows it.",
-            "Число бывает десятичным (1_000, 2.5, 1e-3), шестнадцатеричным (0xFF) или двоичным (0b1010) и не может сразу продолжаться буквой. Отделите число от следующего за ним имени.",
+            "A number is decimal (1_000, 2.5, 1e-3), hexadecimal (0xFF) or binary (0b1010) and cannot be followed directly by a letter. Separate the number from the name that follows it. An integer literal fits in Int, at most 9223372036854775807; the smallest Int is MINIMUM_INT.",
+            "Число бывает десятичным (1_000, 2.5, 1e-3), шестнадцатеричным (0xFF) или двоичным (0b1010) и не может сразу продолжаться буквой. Отделите число от следующего за ним имени. Целый литерал помещается в Int, не больше 9223372036854775807; наименьший Int — MINIMUM_INT.",
             "let A = 12abc\n",
             "let A = 12\n",
         ),
@@ -308,6 +308,14 @@ pub fn invalid_character(shown: &str) -> Msg {
     )
 }
 
+/// E0008 for an integer literal that is well formed but does not fit in `Int` (L-4).
+pub fn int_literal_too_large(literal: &str) -> Msg {
+    Msg::new(
+        format!("integer literal '{literal}' does not fit in Int, whose largest value is 9223372036854775807"),
+        format!("целый литерал '{literal}' не помещается в Int, наибольшее значение которого 9223372036854775807"),
+    )
+}
+
 pub fn invalid_number(bad: &str) -> Msg {
     Msg::new(
         format!("invalid number literal '{bad}'"),
@@ -456,6 +464,7 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0010", mismatched(")", '[')),
         ("E0007", invalid_character("$")),
         ("E0008", invalid_number("12abc")),
+        ("E0008", int_literal_too_large("9223372036854775808")),
         ("E0013", texts_nested_too_deeply()),
         ("E0005", unterminated_text()),
         ("E0006", invalid_unicode_escape()),
@@ -1230,6 +1239,14 @@ pub fn missing_label(name: &str) -> Msg {
     )
 }
 
+/// The fix of E0040: the label of the one named-only parameter the argument can be for.
+pub fn insert_label(name: &str) -> Msg {
+    Msg::new(
+        format!("insert '{name} = '"),
+        format!("вставить '{name} = '"),
+    )
+}
+
 pub fn too_many_arguments(count: usize) -> Msg {
     Msg::new(
         format!("too many arguments; the function takes {count}"),
@@ -1297,6 +1314,14 @@ pub fn variant_collision(variant: &str, enum_name: &str) -> Msg {
     Msg::new(
         format!("'{variant}' is also another visible name; write '{enum_name}.{variant}'"),
         format!("'{variant}' — ещё и другое видимое имя; пишите '{enum_name}.{variant}'"),
+    )
+}
+
+/// The fix of E0072: the variant with its enum name.
+pub fn write_variant_in_full(variant: &str, enum_name: &str) -> Msg {
+    Msg::new(
+        format!("write '{enum_name}.{variant}'"),
+        format!("написать '{enum_name}.{variant}'"),
     )
 }
 

@@ -2,30 +2,59 @@
 unsafe module
 
 extend[K with Hash and Equal, V] Map[K, V]:
+    ## The number of entries.
+    ## Example:
+    ##     assert {"a": 1, "b": 2}.length() == 2
     public external function length(self) returns Int
 
+    ## The value for the key; none if the key is absent.
+    ## Example:
+    ##     let ages = {"ana": 31}
+    ##     assert ages.get("ana") == some(31) and ages.get("bo") == none
     public external function get(self, key as K) returns Option[V]
 
     ## Sets the value for the key; an existing key keeps its position.
+    ## Example:
+    ##     var ages = {"ana": 31}
+    ##     ages.put("bo", 25)
+    ##     ages.put("ana", 32)
+    ##     assert ages.entries() == [("ana", 32), ("bo", 25)]
     public external function put(var self, key as K, value as V)
 
     ## Removes the key and returns its value; none if the key is absent.
+    ## Example:
+    ##     var ages = {"ana": 31}
+    ##     assert ages.remove("ana") == some(31) and ages.remove("ana") == none
     public external function remove(var self, key as K) returns Option[V]
 
     ## Pairs of a key and a value in insertion order.
+    ## Example:
+    ##     assert {"b": 2, "a": 1}.entries() == [("b", 2), ("a", 1)]
     public external function entries(self) returns List[Tuple[K, V]]
 
+    ## Whether the map has no entries.
+    ## Example:
+    ##     let empty as Map[Text, Int] = {}
+    ##     assert empty.is_empty()
     public function is_empty(self) returns Bool:
         return self.length() == 0
 
     ## Used by "key in map".
+    ## Example:
+    ##     assert "a" in {"a": 1} and "b" not in {"a": 1}
     public function contains(self, key as K) returns Bool:
         match self.get(key):
             case some(_): return true
             case none: return false
 
+    ## The keys in insertion order.
+    ## Example:
+    ##     assert {"b": 2, "a": 1}.keys() == ["b", "a"]
     public function keys(self) returns List[K]:
         return [key for key, _ in self.entries()]
 
+    ## The values in the insertion order of their keys.
+    ## Example:
+    ##     assert {"b": 2, "a": 1}.values() == [2, 1]
     public function values(self) returns List[V]:
         return [value for _, value in self.entries()]

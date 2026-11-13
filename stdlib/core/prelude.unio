@@ -58,19 +58,31 @@ public enum Result[T, E]:
     error(value as E)
 
 ## Ends the program, or the current test, with a fault that carries the message.
+## Example:
+##     expect_fault(function (): assert_fail("unreachable"))
 public external function assert_fail(message as Text) returns Never
 
 ## Runs the action and fails the test unless the action ends with a fault. Available only in test blocks.
+## Example:
+##     expect_fault(function (): assert_fail("the action ends with a fault"))
 public external function expect_fault(action as Function[()])
 
 ## Whether two names refer to the same resource; resources have no ==.
+## Example:
+##     using first = ExampleResource(id = 1):
+##         using second = ExampleResource(id = 2):
+##             assert is_same(first, first) and not is_same(first, second)
 public external function is_same[T with Resource](a as T, b as T) returns Bool
 
 ## The smaller of two values; a when they are equal.
+## Example:
+##     assert min(3, 2) == 2 and min("b", "a") == "a"
 public function min[T with Order](a as T, b as T) returns T:
     return b if b < a else a
 
 ## The larger of two values; a when they are equal.
+## Example:
+##     assert max(3, 2) == 3
 public function max[T with Order](a as T, b as T) returns T:
     return b if b > a else a
 
@@ -88,11 +100,21 @@ public struct RangeIterator:
     end as Int
 
 ## start >= end gives an empty range; no subtraction of the bounds is required.
+## Example:
+##     var total = 0
+##     for n in range(1, 4):
+##         total = total + n
+##     assert total == 6
+##     var empty = range(5, 2).iterator()
+##     assert empty.next() == none
 public function range(start as Int, end as Int) returns Range:
     return Range(start = start, end = end)
 
 extend Range:
     ## Each traversal has an independent cursor.
+    ## Example:
+    ##     var cursor = range(0, 2).iterator()
+    ##     assert cursor.next() == some(0) and cursor.next() == some(1) and cursor.next() == none
     public function iterator(self) returns RangeIterator:
         return RangeIterator(current = self.start, end = self.end)
 
@@ -118,3 +140,16 @@ test "range reaches the largest endpoint without overflow":
     assert cursor.next() == none
     var empty = range(MAXIMUM_INT, MINIMUM_INT).iterator()
     assert empty.next() == none
+
+## A resource for the examples and tests of this module; it holds nothing.
+struct ExampleResource:
+    id as Int
+
+extend ExampleResource with Resource:
+    function release(var self):
+        pass
+
+test "resources are compared by identity":
+    using first = ExampleResource(id = 1):
+        using copy = ExampleResource(id = 1):
+            assert is_same(first, first) and not is_same(first, copy)

@@ -566,6 +566,15 @@ impl Lexer {
             ));
             word = "0".to_string();
             kind = Kind::Int;
+        } else if kind == Kind::Int && crate::interp::parse_int(&word).is_none() {
+            // A well-formed integer that does not fit in Int (L-4) is refused here, so that no
+            // program reaches a literal without a value.
+            self.diagnostics.push(Diagnostic::error(
+                "E0008",
+                Span::new(start, self.here()),
+                catalog::int_literal_too_large(&word),
+            ));
+            word = "0".to_string();
         }
         Token::new(kind, word, Span::new(start, self.here()))
     }

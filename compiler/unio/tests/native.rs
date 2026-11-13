@@ -547,6 +547,29 @@ fn benchmarks_and_tools_match_the_interpreter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// What `tests/programs/checked_runs/main.unio` prints (tests/interpreter.rs has the same).
+const CHECKED_RUNS_OUTPUT: &str =
+    "anna 30\nboris 41\nolder 1 boris\nborrowers 0 7\ndecoded 1 Dune 3\nloaded 3 6\n";
+
+/// Map iteration as pairs, a field changed through a map index, and decoding to an inferred
+/// type: the executable does what the check typed, as `unio run` does.
+#[test]
+fn checked_runs_match_the_interpreter() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("checked-runs");
+    let program =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/checked_runs/main.unio");
+    let exe = build(&program, &dir, true);
+    let output = native(&exe, &case(program.clone(), &[], &dir));
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stdout), CHECKED_RUNS_OUTPUT);
+    let differences = compare(&[case(program, &[], &dir)], &dir);
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Types of one name in two modules: the executable finds methods, implementations, handlers
 /// and variants by the identity of the type, as the interpreter does.
 #[test]

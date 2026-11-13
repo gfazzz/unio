@@ -4,6 +4,9 @@ unsafe module
 
 from std.text import join, split
 
+## A path from its text, as given; nothing is checked or normalized.
+## Example:
+##     assert Path("a/b").to_text() == "a/b"
 public external function Path(text as Text) returns Path
 
 extend Path with Display:
@@ -16,6 +19,8 @@ struct PathParts:
 extend Path:
     ## The anchor, if present, then names. Examples: ["/", "a"], ["C:", "a"], ["C:/", "a"].
     ## UNC roots are one anchor such as "//server/share/", never ordinary directory names.
+    ## Example:
+    ##     assert Path("/usr/lib").components() == ["/", "usr", "lib"]
     public function components(self) returns List[Text]:
         let parsed = parse_parts(self.to_text(), separator() == "\\")
         var result as List[Text] = []
@@ -23,15 +28,23 @@ extend Path:
         result.append_all(parsed.items)
         return result
 
+    ## Whether the path starts at a root: "/" on Linux and macOS; a drive with a root ("C:\\") or a
+    ## UNC share on Windows.
+    ## Example:
+    ##     assert not Path("a/b").is_absolute()
     public function is_absolute(self) returns Bool:
         let windows = separator() == "\\"
         return absolute_parts(parse_parts(self.to_text(), windows), windows)
 
     ## The last name; "" for an empty path, a drive anchor or a root.
+    ## Example:
+    ##     assert Path("dir/file.txt").name() == "file.txt"
     public function name(self) returns Text:
         return parse_parts(self.to_text(), separator() == "\\").items.last() or ""
 
     ## Text after the last dot; a leading dot alone does not introduce an extension.
+    ## Example:
+    ##     assert Path("a/report.tar.gz").extension() == "gz" and Path(".profile").extension() == ""
     public function extension(self) returns Text:
         let name = self.name()
         var position = -1
@@ -41,6 +54,8 @@ extend Path:
         return name.slice(position + 1, name.length())
 
     ## Remove the last name; none at a root/drive anchor. UNC parents never leave the share.
+    ## Example:
+    ##     assert Path("a/b.txt").parent() == some(Path("a"))
     public function parent(self) returns Option[Path]:
         let parsed = parse_parts(self.to_text(), separator() == "\\")
         if parsed.items.is_empty(): return none
@@ -56,6 +71,8 @@ extend Path:
         )
 
     ## Append text without changing the anchor. This is not a sandbox containment check.
+    ## Example:
+    ##     assert Path("a").join("b.txt") == Path("a{separator()}b.txt")
     public function join(self, part as Text) returns Path:
         let text = self.to_text()
         let parsed = parse_parts(text, separator() == "\\")
@@ -66,6 +83,8 @@ extend Path:
 
     ## Remove "." and redundant separators, preserving ".." and the anchor.
     ## This does not resolve symlinks or prove filesystem equivalence; use files.resolve for resolution.
+    ## Example:
+    ##     assert Path("a/./b//c").normalize() == Path("a/b/c")
     public function normalize(self) returns Path:
         let parsed = parse_parts(self.to_text(), separator() == "\\")
         let names = [part for part in parsed.items if part != "."]

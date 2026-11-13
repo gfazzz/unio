@@ -1023,6 +1023,8 @@ pub fn start(
             "out of memory",
             "Cannot allocate memory",
             "capacity overflow",
+            // A refused allocation ends a worker as it ends a program (C-18).
+            "fault: memory exhausted",
         ];
         if exhausted.iter().any(|m| tail.contains(m)) {
             stopped = Some(format!(

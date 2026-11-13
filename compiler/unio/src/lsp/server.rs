@@ -197,6 +197,8 @@ struct Server {
     out: Output,
     documents: HashMap<String, Document>,
     diagnosing: HashMap<String, Diagnosing>,
+    /// The diagnostics published for each document, with the revision they were made for.
+    published: HashMap<String, (i64, Vec<Json>)>,
     shut_down: bool,
     events: mpsc::Sender<Event>,
     receiver: Option<mpsc::Receiver<Event>>,
@@ -211,6 +213,7 @@ impl Server {
             out: Output(Arc::new(Mutex::new(std::io::stdout()))),
             documents: HashMap::new(),
             diagnosing: HashMap::new(),
+            published: HashMap::new(),
             shut_down: false,
             events,
             receiver: Some(receiver),
@@ -303,6 +306,10 @@ impl Server {
                     None => self.out.fail(&id, INVALID_PARAMS, "unknown code"),
                 }
             }
+            "textDocument/codeAction" => {
+                let actions = self.code_actions(&params);
+                self.out.respond(&id, actions);
+            }
             "textDocument/hover" => self.request(id, &params, Kind::Hover),
             "textDocument/definition" => self.request(id, &params, Kind::Definition),
             "textDocument/completion" => self.request(id, &params, Kind::Completion),
@@ -363,6 +370,7 @@ impl Server {
             }
             "textDocument/didSave" if self.documents.contains_key(&uri) => self.diagnose(uri),
             "textDocument/didClose" if self.documents.remove(&uri).is_some() => {
+                self.published.remove(&uri);
                 self.out.notify(
                     "textDocument/publishDiagnostics",
                     Json::object(vec![
@@ -494,6 +502,89 @@ impl Server {
         });
     }
 
+    /// The fixes of the published diagnostics in a range, as quick fixes. A fix is offered
+    /// only for the revision its diagnostic was made for: when the document changed since, or
+    /// the editor asks about diagnostics of another revision, there is none until the checks
+    /// ran again (T-13). Each edit names that revision, so that the editor refuses to apply it
+    /// to a later text, and the change it makes runs the checks again. Nothing is analysed
+    /// here and nothing runs.
+    fn code_actions(&self, params: &Json) -> Json {
+        let uri = params
+            .at(&["textDocument", "uri"])
+            .and_then(Json::as_str)
+            .unwrap_or("");
+        let current = self.documents.get(uri).map(|d| d.version);
+        let Some((revision, items)) = self.published.get(uri) else {
+            return Json::Array(Vec::new());
+        };
+        if current != Some(*revision) {
+            return Json::Array(Vec::new());
+        }
+        let asked: Vec<&Json> = params
+            .at(&["context", "diagnostics"])
+            .and_then(Json::as_array)
+            .map(|a| a.iter().collect())
+            .unwrap_or_default();
+        let stale = asked.iter().any(|d| {
+            d.at(&["data", "revision"])
+                .and_then(Json::as_i64)
+                .is_some_and(|r| r != *revision)
+        });
+        if stale {
+            return Json::Array(Vec::new());
+        }
+        let line = |p: Option<&Json>, key: &str| {
+            p.and_then(|p| p.at(&[key, "line"]))
+                .and_then(Json::as_i64)
+                .unwrap_or(0)
+        };
+        let range = params.get("range");
+        let (from, to) = (line(range, "start"), line(range, "end"));
+        let mut actions = Vec::new();
+        for item in items {
+            let at = item.get("range");
+            if line(at, "end") < from || line(at, "start") > to {
+                continue;
+            }
+            let Some(fixes) = item.at(&["data", "fixes"]).and_then(Json::as_array) else {
+                continue;
+            };
+            for fix in fixes {
+                let (Some(title), Some(fix_range), Some(new_text)) =
+                    (fix.get("title"), fix.get("range"), fix.get("newText"))
+                else {
+                    continue;
+                };
+                let edit = Json::object(vec![(
+                    "documentChanges",
+                    Json::Array(vec![Json::object(vec![
+                        (
+                            "textDocument",
+                            Json::object(vec![
+                                ("uri", Json::str(uri)),
+                                ("version", Json::int(*revision)),
+                            ]),
+                        ),
+                        (
+                            "edits",
+                            Json::Array(vec![Json::object(vec![
+                                ("range", fix_range.clone()),
+                                ("newText", new_text.clone()),
+                            ])]),
+                        ),
+                    ])]),
+                )]);
+                actions.push(Json::object(vec![
+                    ("title", title.clone()),
+                    ("kind", Json::str("quickfix")),
+                    ("diagnostics", Json::Array(vec![item.clone()])),
+                    ("edit", edit),
+                ]));
+            }
+        }
+        Json::Array(actions)
+    }
+
     fn diagnosed(&mut self, uri: String, version: i64, items: Json) {
         let again = match self.diagnosing.get_mut(&uri) {
             Some(state) => {
@@ -504,12 +595,26 @@ impl Server {
         };
         let current = self.documents.get(&uri).map(|d| d.version);
         if current == Some(version) {
+            // Every diagnostic carries the revision of the document it was made for (T-13).
+            let items: Vec<Json> = match items {
+                Json::Array(items) => items
+                    .into_iter()
+                    .map(|mut item| {
+                        let mut data = item.get("data").cloned().unwrap_or(Json::object(vec![]));
+                        data.set("revision", Json::int(version));
+                        item.set("data", data);
+                        item
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            self.published.insert(uri.clone(), (version, items.clone()));
             self.out.notify(
                 "textDocument/publishDiagnostics",
                 Json::object(vec![
                     ("uri", Json::str(uri.clone())),
                     ("version", Json::int(version)),
-                    ("diagnostics", items),
+                    ("diagnostics", Json::Array(items)),
                 ]),
             );
         }
@@ -596,6 +701,13 @@ fn capabilities() -> Json {
                 ("documentFormattingProvider", Json::Bool(true)),
                 ("renameProvider", Json::Bool(true)),
                 ("inlayHintProvider", Json::Bool(true)),
+                (
+                    "codeActionProvider",
+                    Json::object(vec![(
+                        "codeActionKinds",
+                        Json::Array(vec![Json::str("quickfix")]),
+                    )]),
+                ),
             ]),
         ),
         (

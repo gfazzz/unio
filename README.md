@@ -41,11 +41,17 @@ Unio is to ship as a single kit: compiler, standard library, dependency manageme
 - [Work plan](docs/plan.md)
 - [Implementation status](docs/status.md): every requirement with its implementation, check, platforms, and known limits
 - [Cryptography policy](docs/cryptography.md): post-quantum defaults, trust, compatibility, and acceptance
+- [Review of the external functions](docs/extern-review.md): the checklist of the two-person review of R-5 and the sanitizer runs
 - [Example program](docs/examples/todo.unio)
+- [Guide](docs/guide.md): from installation to publishing a package, building `todo` step by step, with a chapter on moving from classes
+- [Language reference](docs/reference.md): every construct of the grammar with its meaning, and every diagnostic code
+- [Standard library reference](docs/stdlib-reference.md), generated from the documentation comments of `stdlib/`
+- [How Unio works with AI](docs/ai.md): the JSON formats, the loop of check, fix and test, prompt examples, and the R-10 trial results
 - [Grammar and specification tests](spec/README.md)
 - [The Unio style](docs/style.md): the one form that `unio fmt` writes
 - [Static semantics](docs/semantics.md): names, types, errors, values, resources, and layers that `unio check` verifies
 - [Packages](docs/packages.md): the manifest, `unio.lock`, the package commands, the cache, and signed registries with publishing
+- [Interactive and maintenance tools](docs/tools.md): `unio repl`, documentation tests, fixes bound to a revision, property replay, `unio api-diff`, `unio fmt --migrate`, and test running in the editor
 - [Dynamic semantics and runtime](docs/runtime.md): evaluation, values, memory, faults, resources, and the interpreter
 - [Standard library](docs/stdlib.md), written in Unio in [stdlib/](stdlib) in the layers `core`, `alloc`, and `std`
 - [Reference utilities](examples)

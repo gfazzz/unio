@@ -47,71 +47,126 @@ extend Text with Display:
         return self
 
 extend Text:
+    ## The number of Unicode scalars; O(1).
+    ## Example:
+    ##     assert "мир".length() == 3 and "e\u{301}".length() == 2
     public external function length(self) returns Int
 
+    ## The number of bytes of the UTF-8 encoding.
+    ## Example:
+    ##     assert "мир".byte_length() == 6
     public external function byte_length(self) returns Int
 
     ## The characters, each as a Text of length 1.
+    ## Example:
+    ##     assert "ab".chars() == ["a", "b"]
     public external function chars(self) returns List[Text]
 
     ## The Unicode code points of the characters.
+    ## Example:
+    ##     assert "A\u{E9}".code_points() == [65, 233]
     public external function code_points(self) returns List[Int]
 
     ## Scalars from start up to, but not including, end; a fault outside 0..length().
     ## O(1) after the shared O(n)-time, O(n)-space scalar index is constructed; slicing shares storage.
+    ## Example:
+    ##     assert "привет".slice(0, 3) == "при"
     public external function slice(self, start as Int, end as Int) returns Text
 
     ## Position of the first occurrence of part at or after start. An empty part is found at start.
+    ## Example:
+    ##     assert "banana".index_of("an") == some(1) and "banana".index_of("an", start = 2) == some(3)
+    ##     assert "banana".index_of("x") == none
     public external function index_of(self, part as Text, start as Int = 0) returns Option[Int]
 
     ## Lower case by the Unicode rules.
+    ## Example:
+    ##     assert "ÉCOLE".to_lower() == "école"
     public external function to_lower(self) returns Text
 
     ## Upper case by the Unicode rules.
+    ## Example:
+    ##     assert "straße".to_upper() == "STRASSE"
     public external function to_upper(self) returns Text
 
     ## The number written in decimal or scientific notation; none for anything else.
+    ## Example:
+    ##     assert "2.5e3".to_float() == some(2500.0) and "x".to_float() == none
     public external function to_float(self) returns Option[Float]
 
     ## The character at the position as a Text of length 1; a fault outside 0..length().
     ## O(1) after the scalar index is constructed, as for slice.
+    ## Example:
+    ##     assert "héllo".char_at(1) == "é"
     public function char_at(self, index as Int) returns Text:
         return self.slice(index, index + 1)
 
+    ## Whether the text has no characters.
+    ## Example:
+    ##     assert "".is_empty() and not " ".is_empty()
     public function is_empty(self) returns Bool:
         return self.length() == 0
 
     ## Whether part occurs in the text; an empty part occurs in every text.
+    ## Example:
+    ##     assert "hello".contains("ell") and "ell" in "hello"
     public external function contains(self, part as Text) returns Bool
 
+    ## Whether the text begins with the prefix; every text begins with "".
+    ## Example:
+    ##     assert "unio.toml".starts_with("unio")
     public external function starts_with(self, prefix as Text) returns Bool
 
+    ## Whether the text ends with the suffix; every text ends with "".
+    ## Example:
+    ##     assert "unio.toml".ends_with(".toml")
     public external function ends_with(self, suffix as Text) returns Bool
 
     ## Number of non-overlapping occurrences of part, from the start; part must not be empty.
+    ## Example:
+    ##     assert "a,b,c".count(",") == 2
     public external function count(self, part as Text) returns Int
 
     ## Every non-overlapping occurrence of old, from the start, replaced with new; old must not
     ## be empty.
+    ## Example:
+    ##     assert "a-b-c".replace("-", "+") == "a+b+c"
     public external function replace(self, old as Text, new as Text) returns Text
 
     ## Lines split on "\n" and "\r\n"; one final empty line is dropped, so "a\n" has one line.
+    ## Example:
+    ##     assert "one\r\ntwo\n".lines() == ["one", "two"]
     public external function lines(self) returns List[Text]
 
     ## Words separated by white space (space, tab, line ends, vertical tab, form feed).
+    ## Example:
+    ##     assert " to  be\tor ".split_whitespace() == ["to", "be", "or"]
     public external function split_whitespace(self) returns List[Text]
 
     ## The text without white space at the start and at the end.
+    ## Example:
+    ##     assert "  hi \n".trim() == "hi"
     public external function trim(self) returns Text
 
+    ## The text without white space at the start.
+    ## Example:
+    ##     assert "  hi ".trim_start() == "hi "
     public external function trim_start(self) returns Text
 
+    ## The text without white space at the end.
+    ## Example:
+    ##     assert "  hi ".trim_end() == "  hi"
     public external function trim_end(self) returns Text
 
     ## The text repeated the given number of times; a negative count is a fault.
+    ## Example:
+    ##     assert "ab".repeat(3) == "ababab"
     public external function repeat(self, times as Int) returns Text
 
     ## A decimal integer with an optional sign; none for anything else, including overflow.
+    ## Example:
+    ##     assert "-42".to_int() == some(-42) and "4.2".to_int() == none
+    ##     assert "9223372036854775808".to_int() == none
     public function to_int(self) returns Option[Int]:
         let characters = self.chars()
         var start = 0

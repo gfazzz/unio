@@ -259,7 +259,7 @@ fn read_whole(runtime: &Runtime, p: &Text, target: &Path) -> Result<Vec<u8>, Unw
                             .saturating_add(data.len())
                             .saturating_add(more),
                     )?;
-                    data.try_reserve_exact(more)
+                    crate::reserve::fallible(|| data.try_reserve_exact(more))
                         .map_err(|_| Unwind::Exhausted(crate::fault::Exhaustion::Heap))?;
                 }
                 data.extend_from_slice(&chunk[..n]);

@@ -17,6 +17,13 @@ crate-type = ["rlib", "staticlib"]
 name = "unio"
 path = "src/main.rs"
 
+# The coverage-guided fuzzer of R-1 (fuzz/main.rs): an example, so that it is built and linted
+# with the tests but is never part of the shipped `unio` or `libunio.a`. fuzz/build.sh builds it
+# with the coverage instrumentation.
+[[example]]
+name = "fuzz"
+path = "fuzz/main.rs"
+
 [dependencies]
 unio-runtime = { path = "../unio-runtime" }
 # The code generator of `unio build` (requirements, section 10). Exact versions, so that builds

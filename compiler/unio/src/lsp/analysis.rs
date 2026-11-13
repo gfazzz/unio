@@ -327,7 +327,37 @@ impl Context<'_> {
             }
             for d in all {
                 let at = range(source, d.span.start.offset, d.span.end.offset);
-                items.push(lsp_diagnostic(&d, at, lang, None));
+                let mut item = lsp_diagnostic(&d, at, lang, None);
+                // The fixes and the expected type travel with the diagnostic; the server binds
+                // them to the revision of the document they were made for (T-13).
+                if let Some(Json::Object(data)) = match &mut item {
+                    Json::Object(fields) => {
+                        fields.iter_mut().find(|(k, _)| k == "data").map(|(_, v)| v)
+                    }
+                    _ => None,
+                } {
+                    if let Some(expected) = &d.expected {
+                        data.push(("expected".to_string(), Json::str(expected.clone())));
+                    }
+                    let fixes: Vec<Json> = d
+                        .fixes
+                        .iter()
+                        .map(|f| {
+                            Json::object(vec![
+                                ("title", Json::str(f.description.get(lang))),
+                                (
+                                    "range",
+                                    range(source, f.span.start.offset, f.span.end.offset),
+                                ),
+                                ("newText", Json::str(f.new_text.clone())),
+                            ])
+                        })
+                        .collect();
+                    if !fixes.is_empty() {
+                        data.push(("fixes".to_string(), Json::Array(fixes)));
+                    }
+                }
+                items.push(item);
             }
         }
         Json::object(vec![("diagnostics", Json::Array(items))])

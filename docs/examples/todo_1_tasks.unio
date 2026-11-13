@@ -1,0 +1,46 @@
+## Step 1 of the guide (docs/guide.md, chapter 3): tasks as values in a list.
+##
+## Usage:
+##     unio run todo_1_tasks.unio
+
+struct Task:
+    public id as Int
+    public title as Text
+    public var done as Bool = false
+
+## The number for a new task: one more than the largest number in the list.
+function next_id(tasks as List[Task]) returns Int:
+    return (tasks.map(function (task): task.id).max() or 0) + 1
+
+## Adds a task to the caller's list; var makes the change visible at the call.
+function add_task(var tasks as List[Task], title as Text):
+    tasks.append(Task(id = next_id(tasks), title = title))
+
+## One line of the listing: "[x] 2. buy bread".
+function render(task as Task) returns Text:
+    let mark = "x" if task.done else " "
+    return "[{mark}] {task.id}. {task.title}"
+
+public function main():
+    var tasks as List[Task] = []
+    add_task(tasks, "buy bread")
+    add_task(tasks, "write the guide")
+    tasks[0].done = true
+    for task in tasks:
+        print(render(task))
+
+test "numbers grow from one":
+    var tasks as List[Task] = []
+    assert next_id(tasks) == 1
+    add_task(tasks, "a")
+    add_task(tasks, "b")
+    assert tasks.map(function (task): task.id) == [1, 2]
+
+test "a task is a value: a copy does not change the list":
+    var tasks as List[Task] = []
+    add_task(tasks, "a")
+    var copy = tasks[0]
+    copy.done = true
+    assert not tasks[0].done
+    tasks[0].done = true
+    assert render(tasks[0]) == "[x] 1. a"

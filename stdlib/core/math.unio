@@ -1,0 +1,272 @@
+## Mathematics (requirement S-1): constants, the elementary functions of IEEE binary64, rounding,
+## and integer functions that report overflow as none instead of a fault. Everything here belongs
+## to the core layer: nothing allocates and nothing touches the operating system.
+##
+## The Float functions follow IEEE 754: they never fault, and a result outside the domain is NaN
+## (sqrt(-1.0)) or an infinity (ln(0.0)). sqrt and the roundings are exact; the transcendental
+## functions come from the math library of the platform and may differ in the last bit between
+## platforms. A Float result becomes an Int only explicitly: math.floor(x).to_int().
+unsafe module
+
+## The ratio of a circle's circumference to its diameter, the Float nearest to π.
+## Example:
+##     assert PI > 3.14159 and PI < 3.1416
+public let PI as Float = 3.141592653589793
+
+## The Float nearest to τ = 2π.
+## Example:
+##     assert TAU == 2.0 * PI
+public let TAU as Float = 6.283185307179586
+
+## The Float nearest to Euler's number e.
+## Example:
+##     assert ln(E) == 1.0
+public let E as Float = 2.718281828459045
+
+## Positive infinity.
+## Example:
+##     assert not INFINITY.is_finite() and INFINITY > 1e308
+public let INFINITY as Float = 1e308 * 10.0
+
+## A quiet NaN. It is not equal to itself; test for it with is_nan.
+## Example:
+##     assert NAN.is_nan() and NAN != NAN
+public let NAN as Float = 0.0 * (1e308 * 10.0)
+
+## The square root, correctly rounded; NaN for a negative number, -0.0 for -0.0.
+## Example:
+##     assert sqrt(2.25) == 1.5
+public external function sqrt(x as Float) returns Float
+
+## The cube root; defined for negative numbers.
+## Example:
+##     assert cbrt(-27.0) == -3.0
+public external function cbrt(x as Float) returns Float
+
+## e raised to the power x.
+## Example:
+##     assert exp(0.0) == 1.0
+public external function exp(x as Float) returns Float
+
+## The natural logarithm; -infinity at 0.0 and NaN for a negative number.
+## Example:
+##     assert ln(1.0) == 0.0
+public external function ln(x as Float) returns Float
+
+## The base-2 logarithm.
+## Example:
+##     assert log2(1024.0) == 10.0
+public external function log2(x as Float) returns Float
+
+## The base-10 logarithm.
+## Example:
+##     assert log10(1000.0) == 3.0
+public external function log10(x as Float) returns Float
+
+## The sine of an angle in radians.
+## Example:
+##     assert sin(0.0) == 0.0
+public external function sin(x as Float) returns Float
+
+## The cosine of an angle in radians.
+## Example:
+##     assert cos(0.0) == 1.0
+public external function cos(x as Float) returns Float
+
+## The tangent of an angle in radians.
+## Example:
+##     assert tan(0.0) == 0.0
+public external function tan(x as Float) returns Float
+
+## The arcsine in radians, in -π/2..π/2; NaN outside -1.0..1.0.
+## Example:
+##     assert asin(1.0) == PI / 2.0
+public external function asin(x as Float) returns Float
+
+## The arccosine in radians, in 0..π; NaN outside -1.0..1.0.
+## Example:
+##     assert acos(1.0) == 0.0
+public external function acos(x as Float) returns Float
+
+## The arctangent in radians, in -π/2..π/2.
+## Example:
+##     assert atan(0.0) == 0.0
+public external function atan(x as Float) returns Float
+
+## The angle in radians of the point (x, y) from the positive x axis, in -π..π; it uses the signs of
+## both arguments to find the quadrant.
+## Example:
+##     assert atan2(1.0, 0.0) == PI / 2.0
+public external function atan2(y as Float, x as Float) returns Float
+
+## base raised to the power exponent, as IEEE 754 pow: power(x, 0.0) is 1.0 even for NaN.
+## Example:
+##     assert power(2.0, 10.0) == 1024.0
+public external function power(base as Float, exponent as Float) returns Float
+
+## The length of the hypotenuse, sqrt(x * x + y * y) without intermediate overflow.
+## Example:
+##     assert hypot(3.0, 4.0) == 5.0
+public external function hypot(x as Float, y as Float) returns Float
+
+## The largest whole number not greater than x.
+## Example:
+##     assert floor(-2.5) == -3.0
+public external function floor(x as Float) returns Float
+
+## The smallest whole number not less than x.
+## Example:
+##     assert ceil(2.1) == 3.0
+public external function ceil(x as Float) returns Float
+
+## The nearest whole number; a half rounds away from zero.
+## Example:
+##     assert round(2.5) == 3.0 and round(-2.5) == -3.0
+public external function round(x as Float) returns Float
+
+## The whole part of x: x rounded toward zero.
+## Example:
+##     assert truncate(-2.7) == -2.0
+public external function truncate(x as Float) returns Float
+
+## The Float whose IEEE 754 binary64 bits are the two's-complement bits of the Int; the inverse of
+## Float.to_bits.
+## Example:
+##     assert from_bits(4607182418800017408) == 1.0
+public external function from_bits(bits as Int) returns Float
+
+## The value limited to low..high: low below it, high above it. low greater than high is a fault.
+## Example:
+##     assert clamp(15, 0, 10) == 10 and clamp("b", "a", "c") == "b"
+public function clamp[T with Order](value as T, low as T, high as T) returns T:
+    if high < low: assert_fail("math.clamp: low is greater than high")
+    if value < low: return low
+    if high < value: return high
+    return value
+
+## The greatest common divisor, never negative; gcd(0, 0) is 0. A result of 2^63, which only
+## gcd(MINIMUM_INT, 0) and gcd(MINIMUM_INT, MINIMUM_INT) give, is a fault, as for overflow.
+## Example:
+##     assert gcd(12, -18) == 6
+public function gcd(a as Int, b as Int) returns Int:
+    var x = a
+    var y = b
+    while y != 0:
+        if y == 1 or y == -1: return 1
+        let rest = x % y
+        x = y
+        y = rest
+    return x.abs()
+
+## The least common multiple, never negative; 0 if either is 0, and none if it does not fit in Int.
+## Example:
+##     assert lcm(4, 6) == some(12) and lcm(MAXIMUM_INT, 2) == none
+public function lcm(a as Int, b as Int) returns Option[Int]:
+    if a == 0 or b == 0: return some(0)
+    let divisor = gcd(a, b)
+    match (a / divisor).checked_multiply(b):
+        case some(product): return product.checked_abs()
+        case none: return none
+
+## base raised to a nonnegative exponent, or none on overflow or for a negative exponent.
+## Example:
+##     assert checked_power(3, 4) == some(81) and checked_power(2, 63) == none
+public function checked_power(base as Int, exponent as Int) returns Option[Int]:
+    if exponent < 0: return none
+    var result = 1
+    var factor = base
+    var rest = exponent
+    while rest > 0:
+        if rest % 2 == 1:
+            match result.checked_multiply(factor):
+                case some(value): result = value
+                case none: return none
+        rest = rest / 2
+        if rest > 0:
+            match factor.checked_multiply(factor):
+                case some(value): factor = value
+                case none: return none
+    return some(result)
+
+## The integer square root: the largest r with r * r <= n; a negative n is a fault.
+## Example:
+##     assert integer_sqrt(17) == 4 and integer_sqrt(MAXIMUM_INT) == 3037000499
+public function integer_sqrt(n as Int) returns Int:
+    if n < 0: assert_fail("math.integer_sqrt of a negative number")
+    if n < 2: return n
+    var low = 1
+    var high = 3037000500
+    if high > n: high = n
+    while low < high:
+        let middle = low + (high - low + 1) / 2
+        if middle <= n / middle: low = middle
+        else: high = middle - 1
+    return low
+
+## The quotient rounded toward negative infinity, unlike /, which truncates toward zero. A zero
+## divisor and floor_divide(MINIMUM_INT, -1) are faults, as for /.
+## Example:
+##     assert floor_divide(-7, 2) == -4 and -7 / 2 == -3
+public function floor_divide(a as Int, b as Int) returns Int:
+    let quotient = a / b
+    if (a % b != 0) and ((a < 0) != (b < 0)): return quotient - 1
+    return quotient
+
+## The remainder of floor_divide: it has the sign of the divisor, unlike %, which has the sign of
+## the dividend. A zero divisor is a fault.
+## Example:
+##     assert modulo(-7, 3) == 2 and -7 % 3 == -1
+public function modulo(a as Int, b as Int) returns Int:
+    if b == -1: return 0
+    let rest = a % b
+    if rest != 0 and ((rest < 0) != (b < 0)): return rest + b
+    return rest
+
+test "the elementary functions keep their IEEE meaning":
+    assert sqrt(-1.0).is_nan()
+    assert ln(0.0) == -INFINITY
+    assert floor(2.0) == 2.0 and ceil(-2.5) == -2.0
+    assert round(0.5) == 1.0 and round(-0.4) == 0.0
+    assert truncate(2.9) == 2.0
+    assert power(NAN, 0.0) == 1.0
+    assert not NAN.is_finite() and not INFINITY.is_finite()
+    assert atan2(0.0, -1.0) == PI
+    assert hypot(1e308, 1e308).is_finite()
+
+test "Float converts to Int only when it is whole and fits":
+    assert 3.0.to_int() == some(3)
+    assert 2.5.to_int() == none
+    assert floor(2.5).to_int() == some(2)
+    assert NAN.to_int() == none and INFINITY.to_int() == none
+    assert (-9223372036854775808.0).to_int() == some(MINIMUM_INT)
+    assert 9223372036854775808.0.to_int() == none
+    assert from_bits(1.5.to_bits()) == 1.5
+    assert (-0.0).to_bits() == MINIMUM_INT
+
+test "integer functions report overflow":
+    assert gcd(0, 0) == 0 and gcd(-4, 0) == 4 and gcd(17, 5) == 1
+    assert lcm(0, 5) == some(0) and lcm(-3, 4) == some(12)
+    assert checked_power(-2, 3) == some(-8) and checked_power(5, 0) == some(1)
+    assert checked_power(2, 62) == some(4611686018427387904)
+    assert checked_power(2, -1) == none
+    assert checked_power(-2, 63) == some(MINIMUM_INT)
+    for n in range(0, 2000):
+        let root = integer_sqrt(n)
+        assert root * root <= n and (root + 1) * (root + 1) > n
+    expect_fault(negative_root)
+    expect_fault(gcd_of_minimum)
+
+function negative_root():
+    let _ = integer_sqrt(-1)
+
+function gcd_of_minimum():
+    let _ = gcd(MINIMUM_INT, 0)
+
+test "floor division and modulo agree with each other":
+    for a in range(-7, 8):
+        for b in range(-3, 4):
+            if b == 0: continue
+            assert floor_divide(a, b) * b + modulo(a, b) == a
+            assert modulo(a, b) == 0 or (modulo(a, b) < 0) == (b < 0)
+    assert modulo(MINIMUM_INT, -1) == 0
+    assert clamp(-5, 0, 10) == 0 and clamp(5, 0, 10) == 5

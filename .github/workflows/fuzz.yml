@@ -1,0 +1,89 @@
+name: fuzz
+
+# R-1: the compiler does not crash on any input, verified by fuzzing for at least 24 hours before
+# release. The coverage-guided fuzzer of compiler/unio/fuzz/ (stable toolchain, coverage from
+# LLVM's SanitizerCoverage, no crate beyond those of Cargo.lock) runs every target: the lexer and
+# parser with the diagnostics and the outline (`front`), the checker with the `core` profile
+# (`check`), the formatter (`format`), checking, lowering, and code generation up to the object
+# file (`build`), the readers of manifests, locks, policies, and the other TOML files
+# (`manifest`), and the reader of package archives (`archive`).
+#
+# How the 24 hours are counted: a job of GitHub runs at most 6 hours, so the run is five stages
+# of 300 minutes that run one after another, each starting from the corpus the stage before it
+# left. Every target fuzzes in a process of its own through all five stages: 25 hours of wall
+# time per target, on the four processors of the runner (about 100 processor-hours in all). The
+# release is fuzzed by a run of this workflow on its commit (workflow_dispatch) that ends with
+# no finding; plan section 12 and docs/status.md, row R-1.
+#
+# A finding (a panic, an abort, an overflow of the stack, a signal, or an input with no result
+# within 60 seconds) fails the stage and is uploaded as the artifact `fuzz-findings-N`, the
+# input with a `.txt` that names the reason. Its minimized input
+# (`fuzz minimize --target T FILE`) becomes a regression test in
+# compiler/unio/tests/data/fuzz/TARGET/, which `tests/fuzz.rs` runs on every change.
+
+on:
+  schedule:
+    # Saturdays at 01:37 UTC; the five stages end on Sunday.
+    - cron: "37 1 * * 6"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes of fuzzing per stage (five stages run one after another)
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzzing, stage ${{ matrix.stage }} of 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      # One stage at a time, in order, each from the corpus of the one before; a finding in one
+      # stage does not stop the next.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include:
+          - { stage: 1, previous: "" }
+          - { stage: 2, previous: "1" }
+          - { stage: 3, previous: "2" }
+          - { stage: 4, previous: "3" }
+          - { stage: 5, previous: "4" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
+        run: sh .github/scripts/pinned_toolchain.sh
+      - name: The corpus of the stage before
+        if: matrix.previous != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.previous }}
+          path: ${{ runner.temp }}/fuzz/corpus
+      - name: Build the fuzzer with the coverage instrumentation
+        run: echo "FUZZ=$(sh compiler/unio/fuzz/build.sh)" >> "$GITHUB_ENV"
+      - name: Fuzz every target (R-1)
+        run: |
+          minutes="${{ github.event.inputs.minutes }}"
+          "$FUZZ" run --minutes "${minutes:-300}" --jobs 6 --timeout 60 --work "$RUNNER_TEMP/fuzz"
+      - name: Keep the corpus for the next stage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.stage }}
+          path: ${{ runner.temp }}/fuzz/corpus
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Keep the findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings-${{ matrix.stage }}
+          path: ${{ runner.temp }}/fuzz/crashes
+          retention-days: 90
+          if-no-files-found: ignore

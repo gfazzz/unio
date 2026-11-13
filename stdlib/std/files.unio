@@ -26,13 +26,23 @@ public error IoError:
     reason as Text
 
 ## Whether the path exists and is accessible. Permission: files.read.
+## Example:
+##     assert not exists(Path("no-such-directory/file.txt"))
 public external function exists(path as Path) returns Bool
 
 ## Whether the path is an accessible directory. Permission: files.read.
+## Example:
+##     assert not is_directory(Path("no-such-directory"))
 public external function is_directory(path as Path) returns Bool
 
 ## The whole file as text; kind InvalidData if it is not UTF-8. Permission: files.read.
 ## A file larger than the heap limit of the policy allows ends the program with code 102 before it is read.
+## Example:
+##     try:
+##         let text = try read_text(Path("no-such-directory/notes.txt"))
+##         assert_fail("read {text}")
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public external function read_text(path as Path) returns Text fails with IoError
 
 enum ReaderState:
@@ -56,6 +66,13 @@ struct ReadStep:
     problem as Option[IoError] = none
 
 ## Opens a byte stream. Permission: files.read. No file content is read ahead of the first read.
+## Example:
+##     try:
+##         using reader = try open_reader(Path("no-such-directory/data.bin")):
+##             let chunk = try reader.read_bytes(max_bytes = 4096)
+##             assert chunk != none
+##     on IoError as e:
+##         assert e.path == Path("no-such-directory/data.bin")
 public function open_reader(path as Path) returns FileReader fails with IoError:
     let descriptor = try system_open_read(path)
     return FileReader(path = path, descriptor = descriptor)
@@ -76,6 +93,16 @@ extend FileReader:
     ## otherwise InvalidData. Buffered bytes are returned before a pending error on the next call.
     ## An error makes further reads return that error. Memory is O(max_bytes), independent of file size;
     ## a max_bytes beyond the heap limit of the policy ends the program with code 102.
+    ## Example:
+    ##     try:
+    ##         using reader = try open_reader(Path("no-such-directory/data.bin")):
+    ##             var total = 0
+    ##             while true:
+    ##                 match try reader.read_bytes(max_bytes = 65536):
+    ##                     case some(chunk): total = total + chunk.length()
+    ##                     case none: break
+    ##     on IoError as e:
+    ##         assert e.kind != IoErrorKind.AlreadyExists
     public function read_bytes(
         var self,
         named max_bytes as Int = 65536,
@@ -185,15 +212,33 @@ test "invalid read size fails before any native I/O":
 
 ## Resolve an existing path through the filesystem, including links. Permission: files.read.
 ## This is not an authorization token; sandbox enforcement still applies at the eventual open.
+## Example:
+##     try:
+##         let real = try resolve(Path("no-such-directory"))
+##         assert real.is_absolute()
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public external function resolve(path as Path) returns Path fails with IoError
 
 ## The entries of a directory, sorted by name, without "." and "..". Permission: files.read.
+## Example:
+##     try:
+##         for entry in try list_directory(Path("no-such-directory")):
+##             print(entry.name())
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public external function list_directory(path as Path) returns List[Path] fails with IoError
 
 ## Every file below the directory, sorted, depth first; directories themselves are not listed.
 ## A symbolic link to a directory is listed as an entry and not followed, so that a link cannot
 ## lead the listing into a cycle or out of the tree; the root itself may be a link.
 ## A link is recognized because resolving it does not give its own place in the resolved tree.
+## Example:
+##     try:
+##         let sources = [p for p in try list_tree(Path("no-such-directory")) if p.extension() == "unio"]
+##         assert sources.length() >= 0
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public function list_tree(root as Path) returns List[Path] fails with IoError:
     return try list_tree_below(root, try resolve(root))
 
@@ -209,15 +254,31 @@ function list_tree_below(directory as Path, real as Path) returns List[Path] fai
     return found
 
 ## Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.
+## Example:
+##     try:
+##         try write_text(Path("no-such-directory/report.txt"), "done\n")
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError:
     using file = try open_atomic(path, durable = durable):
         try file.write(text)
         try file.commit()
 
 ## The whole file as bytes. Permission: files.read. Memory is checked as in read_text.
+## Example:
+##     try:
+##         let data = try read_bytes(Path("no-such-directory/image.png"))
+##         assert_fail("read {data.length()} bytes")
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public external function read_bytes(path as Path) returns Bytes fails with IoError
 
 ## Replaces the file with the bytes atomically, like write_text. Permission: files.write.
+## Example:
+##     try:
+##         try write_bytes(Path("no-such-directory/empty.bin"), Bytes())
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public function write_bytes(
     path as Path,
     data as Bytes,
@@ -229,6 +290,11 @@ public function write_bytes(
 
 ## Copies the content of a file; the target is replaced atomically, like write_bytes.
 ## Permission: files.read for the source, files.write for the target.
+## Example:
+##     try:
+##         try copy_file(Path("no-such-directory/a.txt"), Path("no-such-directory/b.txt"))
+##     on IoError as e:
+##         assert e.path == Path("no-such-directory/a.txt")
 public function copy_file(
     source as Path,
     target as Path,
@@ -242,6 +308,11 @@ public function copy_file(
 ## RENAME_EXCL on macOS, MoveFileExW on Windows. Where the system or the file system has no such
 ## step, a file is linked under the new name and then unlinked from the old one, which still never
 ## replaces a target, and a directory fails with kind Unsupported. Permission: files.write.
+## Example:
+##     try:
+##         try rename(Path("no-such-directory/old.txt"), Path("no-such-directory/new.txt"))
+##     on IoError as e:
+##         assert e.kind != IoErrorKind.AlreadyExists
 public external function rename(source as Path, target as Path) fails with IoError
 
 ## Creates one directory; fails with kind AlreadyExists if it exists and NotFound if its parent
@@ -249,10 +320,21 @@ public external function rename(source as Path, target as Path) fails with IoErr
 ## write into the new directory survives power loss (S-9). If that sync fails, the directory is
 ## still created; a later durable commit below it syncs the parent again first and fails with kind
 ## DurabilityUnconfirmed if it still cannot. Permission: files.write.
+## Example:
+##     try:
+##         try create_directory(Path("no-such-directory/child"))
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public external function create_directory(path as Path) fails with IoError
 
 ## Creates the directory and every missing parent; an existing directory is not an error.
 ## Permission: files.write.
+## Example:
+##     try:
+##         try create_directories(Path("no-such-directory").join("a").join("b"))
+##         assert is_directory(Path("no-such-directory/a/b"))
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.PermissionDenied
 public function create_directories(path as Path) fails with IoError:
     if is_directory(path): return
     match path.parent():
@@ -316,6 +398,16 @@ struct TemporaryFile:
 
 ## Opens a temporary file in the directory of the target. With durable = true it fails with kind
 ## Unsupported on a file system where durability cannot be guaranteed (S-9a). Permission: files.write.
+## Example:
+##     try:
+##         using file = try open_atomic(Path("no-such-directory/out.txt")):
+##             try file.write("header\n")
+##             try file.write_line("row")
+##             try file.write_bytes(Bytes())
+##             try file.commit()
+##             assert file.is_replaced()
+##     on IoError as e:
+##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
 public function open_atomic(
     path as Path,
     durable as Bool = false,
@@ -335,6 +427,17 @@ public function open_atomic(
     )
 
 extend AtomicFile:
+    ## Appends the text to the temporary file; the target does not change before commit.
+    ## Example:
+    ##     try:
+    ##         using file = try open_atomic(Path("no-such-directory/out.txt")):
+    ##             try file.write("header\n")
+    ##             try file.write_line("row")
+    ##             try file.write_bytes(Bytes())
+    ##             try file.commit()
+    ##             assert file.is_replaced()
+    ##     on IoError as e:
+    ##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
     public function write(var self, text as Text) fails with IoError:
         if self.state != AtomicState.Writing:
             fail IoError(
@@ -345,9 +448,31 @@ extend AtomicFile:
         let write_data = self.steps.write_data
         try write_data(self.descriptor, text)
 
+    ## Appends the text and a line end "\n".
+    ## Example:
+    ##     try:
+    ##         using file = try open_atomic(Path("no-such-directory/out.txt")):
+    ##             try file.write("header\n")
+    ##             try file.write_line("row")
+    ##             try file.write_bytes(Bytes())
+    ##             try file.commit()
+    ##             assert file.is_replaced()
+    ##     on IoError as e:
+    ##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
     public function write_line(var self, text as Text) fails with IoError:
         try self.write(text + "\n")
 
+    ## Appends the bytes.
+    ## Example:
+    ##     try:
+    ##         using file = try open_atomic(Path("no-such-directory/out.txt")):
+    ##             try file.write("header\n")
+    ##             try file.write_line("row")
+    ##             try file.write_bytes(Bytes())
+    ##             try file.commit()
+    ##             assert file.is_replaced()
+    ##     on IoError as e:
+    ##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
     public function write_bytes(var self, data as Bytes) fails with IoError:
         if self.state != AtomicState.Writing:
             fail IoError(
@@ -359,6 +484,16 @@ extend AtomicFile:
         try write_bytes(self.descriptor, data)
 
     ## Whether the target already holds the new content.
+    ## Example:
+    ##     try:
+    ##         using file = try open_atomic(Path("no-such-directory/out.txt")):
+    ##             try file.write("header\n")
+    ##             try file.write_line("row")
+    ##             try file.write_bytes(Bytes())
+    ##             try file.commit()
+    ##             assert file.is_replaced()
+    ##     on IoError as e:
+    ##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
     public function is_replaced(self) returns Bool:
         return self.state in [AtomicState.Replaced, AtomicState.Durable]
 
@@ -367,6 +502,16 @@ extend AtomicFile:
     ## stopped. If only the directory sync fails, the error has kind DurabilityUnconfirmed: the
     ## target is already replaced (guarantees 1 and 2 hold), but its survival after power loss is
     ## not confirmed.
+    ## Example:
+    ##     try:
+    ##         using file = try open_atomic(Path("no-such-directory/out.txt")):
+    ##             try file.write("header\n")
+    ##             try file.write_line("row")
+    ##             try file.write_bytes(Bytes())
+    ##             try file.commit()
+    ##             assert file.is_replaced()
+    ##     on IoError as e:
+    ##         assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied
     public function commit(var self) fails with IoError:
         if self.state == AtomicState.Writing:
             let sync_data = self.steps.sync_data

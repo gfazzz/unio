@@ -3,50 +3,96 @@
 unsafe module
 
 extend[T] List[T]:
+    ## The number of items.
+    ## Example:
+    ##     assert [1, 2, 3].length() == 3
     public external function length(self) returns Int
 
+    ## The item at the position; none outside 0..length(), where items[index] is a fault.
+    ## Example:
+    ##     assert [10, 20].get(1) == some(20) and [10, 20].get(2) == none
     public external function get(self, index as Int) returns Option[T]
 
     ## Adds the item at the end in amortized constant time.
+    ## Example:
+    ##     var items = [1]
+    ##     items.append(2)
+    ##     assert items == [1, 2]
     public external function append(var self, item as T)
 
     ## Removes and returns the last item; none for an empty list.
+    ## Example:
+    ##     var items = [1, 2]
+    ##     assert items.remove_last() == some(2) and items == [1]
     public external function remove_last(var self) returns Option[T]
 
+    ## Whether the list has no items.
+    ## Example:
+    ##     let empty as List[Int] = []
+    ##     assert empty.is_empty() and not [0].is_empty()
     public function is_empty(self) returns Bool:
         return self.length() == 0
 
+    ## The first item; none for an empty list.
+    ## Example:
+    ##     assert ["a", "b"].first() == some("a")
     public function first(self) returns Option[T]:
         return self.get(0)
 
+    ## The last item; none for an empty list.
+    ## Example:
+    ##     assert ["a", "b"].last() == some("b")
     public function last(self) returns Option[T]:
         return self.get(self.length() - 1)
 
     ## Items from start up to, but not including, end; a fault outside 0..length().
+    ## Example:
+    ##     assert [1, 2, 3, 4].slice(1, 3) == [2, 3]
     public function slice(self, start as Int, end as Int) returns List[T]:
         return [self[index] for index in range(start, end)]
 
+    ## Adds the items at the end, in order.
+    ## Example:
+    ##     var items = [1]
+    ##     items.append_all([2, 3])
+    ##     assert items == [1, 2, 3]
     public function append_all(var self, items as List[T]):
         for item in items:
             self.append(item)
 
+    ## The first item for which the predicate is true; none if there is none.
+    ## Example:
+    ##     assert [1, 4, 6].find(function (n as Int) returns Bool: n % 2 == 0) == some(4)
     public function find(self, predicate as Function[(T) -> Bool]) returns Option[T]:
         for item in self:
             if predicate(item): return some(item)
         return none
 
+    ## The position of the first item for which the predicate is true; none if there is none.
+    ## Example:
+    ##     assert ["a", "b"].find_index(function (s as Text) returns Bool: s == "b") == some(1)
     public function find_index(self, predicate as Function[(T) -> Bool]) returns Option[Int]:
         for index, item in self.enumerate():
             if predicate(item): return some(index)
         return none
 
+    ## The items for which the predicate is true, in order.
+    ## Example:
+    ##     assert [1, 2, 3, 4].filter(function (n as Int) returns Bool: n > 2) == [3, 4]
     public function filter(self, predicate as Function[(T) -> Bool]) returns List[T]:
         return [item for item in self if predicate(item)]
 
+    ## The results of change for every item, in order.
+    ## Example:
+    ##     assert [1, 2].map(function (n as Int) returns Text: "#{n}") == ["#1", "#2"]
     public function map[U](self, change as Function[(T) -> U]) returns List[U]:
         return [change(item) for item in self]
 
     ## Like map, propagating the first callback error; later items are not visited.
+    ## Example:
+    ##     let doubled = try [1, 2].try_map(positive) on ItemError as e:
+    ##         assert_fail("unexpected {e.item}")
+    ##     assert doubled == [2, 4]
     public function try_map[U, E with Error](
         self,
         change as Function[(T) -> U fails with E],
@@ -57,6 +103,10 @@ extend[T] List[T]:
         return result
 
     ## Like filter, propagating the first callback error.
+    ## Example:
+    ##     let even = try [1, 2, 3, 4].try_filter(positive_even) on ItemError as e:
+    ##         assert_fail("unexpected {e.item}")
+    ##     assert even == [2, 4]
     public function try_filter[E with Error](
         self,
         predicate as Function[(T) -> Bool fails with E],
@@ -67,6 +117,8 @@ extend[T] List[T]:
         return result
 
     ## Left fold in input order; an empty list returns initial without calling combine.
+    ## Example:
+    ##     assert [1, 2, 3].fold(0, function (sum as Int, n as Int) returns Int: sum + n) == 6
     public function fold[U](self, initial as U, combine as Function[(U, T) -> U]) returns U:
         var result = initial
         for item in self:
@@ -74,6 +126,10 @@ extend[T] List[T]:
         return result
 
     ## Left fold, stopping at the first callback error.
+    ## Example:
+    ##     let sum = try [1, 2].try_fold(10, add_positive) on ItemError as e:
+    ##         assert_fail("unexpected {e.item}")
+    ##     assert sum == 16
     public function try_fold[U, E with Error](
         self,
         initial as U,
@@ -85,6 +141,8 @@ extend[T] List[T]:
         return result
 
     ## Matching items, then nonmatching items; each list keeps input order.
+    ## Example:
+    ##     assert [1, 2, 3, 4].partition(function (n as Int) returns Bool: n % 2 == 0) == ([2, 4], [1, 3])
     public function partition(
         self,
         predicate as Function[(T) -> Bool],
@@ -97,6 +155,9 @@ extend[T] List[T]:
         return (yes, no)
 
     ## Groups and their items keep first-occurrence order; key is called once per item.
+    ## Example:
+    ##     let groups = ["apple", "bean", "avocado"].group_by(function (s as Text) returns Text: s.char_at(0))
+    ##     assert groups == {"a": ["apple", "avocado"], "b": ["bean"]}
     public function group_by[K with Hash and Equal](
         self,
         key as Function[(T) -> K],
@@ -116,6 +177,8 @@ extend[T] List[T]:
         return result
 
     ## Equal-length lists paired in order; none for different lengths, never silent truncation.
+    ## Example:
+    ##     assert [1, 2].zip(["a", "b"]) == some([(1, "a"), (2, "b")]) and [1].zip(["a", "b"]) == none
     public function zip[U](self, other as List[U]) returns Option[List[Tuple[T, U]]]:
         if self.length() != other.length(): return none
         var pairs as List[Tuple[T, U]] = []
@@ -124,6 +187,8 @@ extend[T] List[T]:
         return some(pairs)
 
     ## Consecutive nonempty blocks, with a possibly shorter last block; none unless size > 0.
+    ## Example:
+    ##     assert [1, 2, 3, 4, 5].chunks(2) == some([[1, 2], [3, 4], [5]])
     public function chunks(self, size as Int) returns Option[List[List[T]]]:
         if size <= 0: return none
         var result as List[List[T]] = []
@@ -135,6 +200,8 @@ extend[T] List[T]:
         return some(result)
 
     ## Overlapping complete windows, advancing by one; none unless size > 0.
+    ## Example:
+    ##     assert [1, 2, 3].windows(2) == some([[1, 2], [2, 3]])
     public function windows(self, size as Int) returns Option[List[List[T]]]:
         if size <= 0: return none
         var result as List[List[T]] = []
@@ -144,6 +211,8 @@ extend[T] List[T]:
         return some(result)
 
     ## Pairs of a position, counted from start, and an item.
+    ## Example:
+    ##     assert ["a", "b"].enumerate(start = 1) == [(1, "a"), (2, "b")]
     public function enumerate(self, start as Int = 0) returns List[Tuple[Int, T]]:
         var pairs as List[Tuple[Int, T]] = []
         var index = start
@@ -152,11 +221,16 @@ extend[T] List[T]:
             index = index + 1
         return pairs
 
+    ## The items in the opposite order.
+    ## Example:
+    ##     assert [1, 2, 3].reversed() == [3, 2, 1]
     public function reversed(self) returns List[T]:
         return [self[self.length() - 1 - index] for index in range(0, self.length())]
 
     ## A sorted list where comes_before(a, b) means that a goes before b; equal items keep their order.
     ## Merge sort, O(n log n).
+    ## Example:
+    ##     assert [1, 3, 2].sorted_with(function (a as Int, b as Int) returns Bool: a > b) == [3, 2, 1]
     public function sorted_with(self, comes_before as Function[(T, T) -> Bool]) returns List[T]:
         if self.length() <= 1: return self
         let middle = self.length() / 2
@@ -166,6 +240,8 @@ extend[T] List[T]:
 
     ## Stable sorting; key is evaluated exactly once per item, in input order, even for a singleton.
     ## O(n) additional key storage. Example: names.sorted_by(function (name as Text) returns Int: name.length()).
+    ## Example:
+    ##     assert ["ccc", "a", "bb"].sorted_by(function (s as Text) returns Int: s.length()) == ["a", "bb", "ccc"]
     public function sorted_by[K with Order](self, key as Function[(T) -> K]) returns List[T]:
         let keyed = [Keyed[K, T](key = key(item), value = item) for item in self]
         let ordered = keyed.sorted_with(
@@ -183,6 +259,10 @@ public struct ListIterator[T]:
     var position as Int = 0
 
 extend[T] List[T]:
+    ## A cursor over a value snapshot of the list: later changes to the list do not change it.
+    ## Example:
+    ##     var cursor = [1, 2].iterator()
+    ##     assert cursor.next() == some(1) and cursor.next() == some(2) and cursor.next() == none
     public function iterator(self) returns ListIterator[T]:
         return ListIterator[T](items = self)
 
@@ -195,12 +275,17 @@ extend[T] ListIterator[T] with Iterator[T]:
 
 extend[T with Equal] List[T]:
     ## Used by "item in list".
+    ## Example:
+    ##     assert 2 in [1, 2] and not [1, 2].contains(3)
     public function contains(self, item as T) returns Bool:
         for candidate in self:
             if candidate == item: return true
         return false
 
 extend[T with Order] List[T]:
+    ## The largest item, the first of equal largest ones; none for an empty list.
+    ## Example:
+    ##     assert [3, 7, 5].max() == some(7)
     public function max(self) returns Option[T]:
         if self.is_empty(): return none
         var best = self[0]
@@ -209,6 +294,8 @@ extend[T with Order] List[T]:
         return some(best)
 
     ## A sorted list; equal items keep their order.
+    ## Example:
+    ##     assert ["b", "c", "a"].sorted() == ["a", "b", "c"]
     public function sorted(self) returns List[T]:
         return self.sorted_with(function (a as T, b as T) returns Bool: a < b)
 
@@ -317,3 +404,43 @@ test "list cursors see a snapshot and remain exhausted":
     assert cursor.next() == some(2)
     assert cursor.next() == none
     assert cursor.next() == none
+
+error LimitError:
+    limit as Int
+
+## An explicit named adapter for a callback that meets two errors (language contracts, S-14): the
+## callback reports one concrete error, and no error-set polymorphism is needed.
+error CheckError:
+    item as Int
+    reason as Text
+
+function below_limit(value as Int, limit as Int) returns Int fails with LimitError:
+    if value > limit: fail LimitError(limit = limit)
+    return value
+
+function checked_double(item as Int) returns Int fails with CheckError:
+    let doubled = try positive(item) on ItemError as e:
+        fail CheckError(item = e.item, reason = "negative")
+    return try below_limit(doubled, 100) on LimitError as e:
+        fail CheckError(item = item, reason = "above {e.limit}")
+
+test "a callback with two errors uses a named adapter":
+    let doubled = try [1, 2].try_map(checked_double) on CheckError as e:
+        assert_fail(e.reason)
+    assert doubled == [2, 4]
+    try:
+        let _ = try [1, 60, -1].try_map(checked_double)
+        assert_fail("expected CheckError")
+    on CheckError as e: assert e.item == 60 and e.reason == "above 100"
+    try:
+        let _ = try [-1, 60].try_fold(
+            0,
+            function (
+                sum as Int,
+                item as Int,
+            ) returns Int fails with CheckError: sum + try checked_double(
+                item,
+            ),
+        )
+        assert_fail("expected CheckError")
+    on CheckError as e: assert e.reason == "negative"

@@ -5,10 +5,12 @@
 //! The interpreter of docs/runtime.md runs programs for `unio run` and `unio test`, and
 //! `native` compiles them to an executable for `unio build` (docs/runtime.md 8.4).
 
+pub mod api;
 pub mod ast;
 pub mod catalog;
 pub mod check;
 pub mod diag;
+pub mod doctest;
 pub mod effects;
 pub mod envelope;
 pub mod format;
@@ -16,12 +18,14 @@ pub mod interp;
 pub mod lexer;
 mod lower;
 pub mod lsp;
+pub mod migrate;
 pub mod native;
 pub mod outline;
 pub mod package;
 pub mod parser;
 pub mod program;
 pub mod release;
+pub mod repl;
 pub mod sandbox_cli;
 pub mod sexpr;
 pub mod sha;

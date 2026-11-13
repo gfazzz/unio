@@ -41,10 +41,17 @@ let HEX_DIGITS as Text = "0123456789abcdef"
 
 ## The value as JSON text; pretty = true puts one item per line with an indent of four spaces.
 ## A Float that is NaN or infinite is written as null, because JSON has no such numbers.
+## Example:
+##     assert encode({"id": 7}) == "\{\"id\":7\}"
+##     assert encode([1, 2]) == "[1,2]"
 public function encode[T](value as T, pretty as Bool = false) returns Text:
     return write_value(to_value(value), pretty, 0)
 
 ## Strict encoding for protocols and configuration: reject non-finite numbers instead of losing data.
+## Example:
+##     let text = try encode_checked([1.5]) on EncodeError as e:
+##         assert_fail(e.message)
+##     assert text == "[1.5]"
 public function encode_checked[T](
     value as T,
     named pretty as Bool = false,
@@ -66,10 +73,19 @@ function validate_finite(value as Value, path as Text) fails with EncodeError:
                 try validate_finite(item, "{path}/{segment}")
         case _: pass
 
+## The value converted to the type T, strictly (S-17): a missing required field, an unknown field or
+## variant, a number that is not exact for the type, or a wrong kind fails with DecodeError, whose
+## path points at the value.
+## Example:
+##     let numbers = try decode[List[Int]](Value.Array([Value.Int(1), Value.Int(2)])) on DecodeError as e:
+##         assert_fail(e.message)
+##     assert numbers == [1, 2]
 public function decode[T](value as Value) returns T fails with DecodeError:
     return try from_value[T](value)
 
 ## "null", "bool", "int", "float", "text", "array", or "object".
+## Example:
+##     assert kind_name(Value.Null) == "null"
 public function kind_name(value as Value) returns Text:
     match value:
         case Value.Null: return "null"
@@ -99,6 +115,10 @@ struct Reader:
 
 ## Bounded strict parsing: duplicate keys fail. Limits are checked before constructing the character list.
 ## Depth counts values along a nesting path, including the root; max_bytes counts UTF-8 bytes.
+## Example:
+##     let value = try parse("\{\"name\": \"Ana\"\}") on ParseError as e:
+##         assert_fail(e.message)
+##     assert value == Value.Object({"name": Value.Text("Ana")})
 public function parse(
     text as Text,
     named max_depth as Int = 128,

@@ -1,0 +1,183 @@
+## Logging (requirement S-1): records of four levels written to standard error, one line each,
+## never to standard output, which belongs to the result of the program.
+##
+## A line is the level, the name of the logger if it has one, the message, and the fields as
+## key=value pairs in the order given; a value with a space, a quote, an equals sign, a backslash or
+## a control character is quoted with backslash escapes, so every record stays one line that a
+## program can split:
+##
+##     WARNING sync: retrying attempt=2 path="/tmp/a b"
+##
+## The functions of the module write every record. A Logger has a minimum level and skips records
+## below it; the program chooses the level, for example from its arguments. Writing to standard
+## error needs no permission and has no derived effect. Messages and fields are written as given:
+## leave secrets out of them.
+
+from std.text import join
+
+## The importance of a record, from the least to the most important.
+public enum Level:
+    Debug
+    Info
+    Warning
+    Error
+
+extend Level with Order:
+    function compare(self, other as Self) returns Int:
+        return rank(self) - rank(other)
+
+extend Level with Display:
+    ## The name written in a record: DEBUG, INFO, WARNING or ERROR.
+    function to_text(self) returns Text:
+        match self:
+            case Level.Debug: return "DEBUG"
+            case Level.Info: return "INFO"
+            case Level.Warning: return "WARNING"
+            case Level.Error: return "ERROR"
+
+## A named source of records with a minimum level.
+public struct Logger:
+    public name as Text
+    public level as Level = Level.Info
+
+extend Logger:
+    ## Whether a record of the level is written; a caller can skip building an expensive message.
+    ## Example:
+    ##     assert Logger(name = "app").enabled(Level.Warning)
+    ##     assert not Logger(name = "app").enabled(Level.Debug)
+    public function enabled(self, level as Level) returns Bool:
+        return level >= self.level
+
+    ## Writes a record of the level if the level is enabled.
+    ## Example:
+    ##     Logger(name = "app", level = Level.Debug).write(Level.Debug, "starting", {"pid": "42"})
+    public function write(self, level as Level, message as Text, fields as Map[Text, Text] = {}):
+        if self.enabled(level): print_error(format_record(level, self.name, message, fields))
+
+    ## Writes a record of level Debug if it is enabled.
+    ## Example:
+    ##     Logger(name = "app").debug("not written below Info")
+    public function debug(self, message as Text, fields as Map[Text, Text] = {}):
+        self.write(Level.Debug, message, fields)
+
+    ## Writes a record of level Info if it is enabled.
+    ## Example:
+    ##     Logger(name = "app").info("started", {"port": "8080"})
+    public function info(self, message as Text, fields as Map[Text, Text] = {}):
+        self.write(Level.Info, message, fields)
+
+    ## Writes a record of level Warning if it is enabled.
+    ## Example:
+    ##     Logger(name = "app").warning("disk almost full")
+    public function warning(self, message as Text, fields as Map[Text, Text] = {}):
+        self.write(Level.Warning, message, fields)
+
+    ## Writes a record of level Error if it is enabled.
+    ## Example:
+    ##     Logger(name = "app").error("cannot open the file", {"path": "a b.txt"})
+    public function error(self, message as Text, fields as Map[Text, Text] = {}):
+        self.write(Level.Error, message, fields)
+
+## Writes a record of level Debug without a name.
+## Example:
+##     debug("cache miss", {"key": "user:7"})
+public function debug(message as Text, fields as Map[Text, Text] = {}):
+    print_error(format_record(Level.Debug, "", message, fields))
+
+## Writes a record of level Info without a name.
+## Example:
+##     info("listening")
+public function info(message as Text, fields as Map[Text, Text] = {}):
+    print_error(format_record(Level.Info, "", message, fields))
+
+## Writes a record of level Warning without a name.
+## Example:
+##     warning("retrying", {"attempt": "2"})
+public function warning(message as Text, fields as Map[Text, Text] = {}):
+    print_error(format_record(Level.Warning, "", message, fields))
+
+## Writes a record of level Error without a name.
+## Example:
+##     error("request failed", {"status": "500"})
+public function error(message as Text, fields as Map[Text, Text] = {}):
+    print_error(format_record(Level.Error, "", message, fields))
+
+## The line of a record without its line end, as the functions of this module write it; an empty
+## name is left out.
+## Example:
+##     assert format_record(Level.Info, "web", "started", {"port": "80"}) == "INFO web: started port=80"
+##     assert format_record(Level.Error, "", "failed", {"path": "a b"}) == "ERROR failed path=\"a b\""
+public function format_record(
+    level as Level,
+    name as Text,
+    message as Text,
+    fields as Map[Text, Text] = {},
+) returns Text:
+    var parts = ["{level}"]
+    parts.append(message if name.is_empty() else "{name}: {message}")
+    for key, value in fields.entries():
+        parts.append("{key}={quoted(value)}")
+    return join(parts, " ")
+
+function rank(level as Level) returns Int:
+    match level:
+        case Level.Debug: return 0
+        case Level.Info: return 1
+        case Level.Warning: return 2
+        case Level.Error: return 3
+
+## The value as written in a record: as it is, or quoted with escapes when it would be ambiguous.
+function quoted(value as Text) returns Text:
+    var plain = not value.is_empty()
+    for code in value.code_points():
+        if code <= 32 or code == 127 or code == 34 or code == 61 or code == 92: plain = false
+    if plain: return value
+    var result = "\""
+    for character in value.chars():
+        let code = character.code_points()[0]
+        if character == "\"": result = result + "\\\""
+        else if character == "\\": result = result + "\\\\"
+        else if character == "\n": result = result + "\\n"
+        else if character == "\r": result = result + "\\r"
+        else if character == "\t": result = result + "\\t"
+        else if code < 32 or code == 127: result = result + "\\u{hex(code)}"
+        else: result = result + character
+    return result + "\""
+
+function hex(code as Int) returns Text:
+    let digits = "0123456789abcdef"
+    var text = ""
+    var rest = code
+    for _ in range(0, 4):
+        text = digits.char_at(rest % 16) + text
+        rest = rest / 16
+    return text
+
+test "records are one line with escaped fields":
+    assert format_record(Level.Debug, "", "x") == "DEBUG x"
+    assert format_record(
+        Level.Warning,
+        "db",
+        "slow",
+        {"ms": "120", "query": "select 1"},
+    ) == "WARNING db: slow ms=120 query=\"select 1\""
+    assert format_record(
+        Level.Info,
+        "",
+        "m",
+        {"a": "x=y", "b": "", "c": "line\nend", "d": "\u{1}"},
+    ) == "INFO m a=\"x=y\" b=\"\" c=\"line\\nend\" d=\"\\u0001\""
+    assert format_record(
+        Level.Info,
+        "",
+        "m",
+        {"q": "say \"hi\" \\"},
+    ) == "INFO m q=\"say \\\"hi\\\" \\\\\""
+    assert format_record(Level.Info, "", "m", {"name": "мир"}) == "INFO m name=мир"
+
+test "levels are ordered and a logger skips the lower ones":
+    assert Level.Debug < Level.Info and Level.Info < Level.Warning and Level.Warning < Level.Error
+    let logger = Logger(name = "app", level = Level.Warning)
+    assert not logger.enabled(Level.Info)
+    assert logger.enabled(Level.Error)
+    assert "{Level.Warning}" == "WARNING"

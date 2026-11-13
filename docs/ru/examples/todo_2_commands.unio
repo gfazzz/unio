@@ -1,0 +1,58 @@
+## Шаг 2 руководства (docs/ru/guide.md, глава 4): команды из аргументов и ошибки.
+##
+## Использование:
+##     unio run todo_2_commands.unio -- add купить хлеб
+##     unio run todo_2_commands.unio -- done 1
+
+import std.args
+from std.text import join
+
+enum Command:
+    Add(title as Text)
+    Done(id as Int)
+    Show
+    Help
+
+error UsageError:
+    message as Text
+
+## Команда, которую называют аргументы; ошибка в них — это ошибка, а не сбой.
+function parse_command(arguments as List[Text]) returns Command fails with UsageError:
+    match arguments:
+        case ["add", rest...] if not rest.is_empty(): return Add(title = join(rest, " "))
+        case ["done", id_text]:
+            if id_text.to_int() is some(id): return Done(id = id)
+            fail UsageError(message = "номер задачи должен быть числом: {id_text}")
+        case ["list"]: return Show
+        case ["help"] | []: return Help
+        case _: fail UsageError(message = "неизвестная команда: {join(arguments, " ")}")
+
+function describe(command as Command) returns Text:
+    match command:
+        case Add(title): return "добавить \"{title}\""
+        case Done(id): return "отметить задачу {id} выполненной"
+        case Show: return "показать задачи"
+        case Help: return "показать справку"
+
+public function main() returns Int:
+    let command = try parse_command(args.list()) on UsageError as e:
+        print_error("Ошибка: {e.message}")
+        return 2
+    print("Программа бы: {describe(command)}")
+    return 0
+
+test "add берёт остаток строки как название":
+    let command = try parse_command(["add", "купить", "хлеб"]) on UsageError as e:
+        assert_fail(e.message)
+    assert command == Add(title = "купить хлеб")
+
+test "без аргументов показывается справка":
+    let command = try parse_command([]) on UsageError as e:
+        assert_fail(e.message)
+    assert command == Help
+
+test "номер, который не число, — ошибка использования":
+    try:
+        parse_command(["done", "первая"])
+        assert_fail("ожидалась ошибка")
+    on UsageError as e: assert e.message.contains("должен быть числом")

@@ -1,0 +1,76 @@
+## Шаг 3 руководства (docs/ru/guide.md, глава 5): задачи в JSON-файле в пределах
+## разрешений unio.toml.
+##
+## Использование:
+##     unio run todo_3_storage.unio
+
+import std.env
+import std.files
+import std.json as json
+
+struct Task:
+    public id as Int
+    public title as Text
+    public var done as Bool = false
+
+error StorageError:
+    path as Path
+    reason as Text
+
+## Путь к файлу хранения: $TODO_FILE, иначе ~/.todo.json, а без домашнего каталога ./.todo.json.
+function storage_path() returns Path:
+    match env.get("TODO_FILE"):
+        case some(value): return Path(value)
+        case none: return (env.home_dir() or Path(".")).join(".todo.json")
+
+## Задачи из текста JSON; путь только называет файл в ошибке.
+function decode_tasks(path as Path, text as Text) returns List[Task] fails with StorageError:
+    let value = try json.parse(text) on ParseError as e:
+        fail StorageError(path = path, reason = "повреждённый JSON: {e.message}")
+    return try json.decode[List[Task]](value) on DecodeError as e:
+        fail StorageError(path = path, reason = e.message)
+
+function load_tasks(path as Path) returns List[Task] fails with StorageError:
+    if not files.exists(path): return []
+    let text = try files.read_text(path) on IoError as e:
+        fail StorageError(path = path, reason = e.reason)
+    return try decode_tasks(path, text)
+
+function save_tasks(path as Path, tasks as List[Task]) fails with StorageError:
+    let text = try json.encode_checked(tasks, pretty = true) on EncodeError as e:
+        fail StorageError(path = path, reason = e.message)
+    try files.write_text(path, text) on IoError as e:
+        fail StorageError(path = path, reason = e.reason)
+
+public function main() returns Int:
+    let path = storage_path()
+    let tasks = try load_tasks(path) on StorageError as e:
+        print_error("Хранилище {e.path}: {e.reason}")
+        return 1
+    print("Задач в {path}: {tasks.length()}")
+    return 0
+
+test "задачи возвращаются из своего текста JSON":
+    let tasks = [
+        Task(id = 1, title = "купить хлеб"),
+        Task(id = 2, title = "позвонить", done = true),
+    ]
+    let text = try json.encode_checked(tasks) on EncodeError as e:
+        assert_fail(e.message)
+    let back = try decode_tasks(Path("test.json"), text) on StorageError as e:
+        assert_fail(e.reason)
+    assert back == tasks
+
+test "пропущенное поле получает значение по умолчанию":
+    let text = "[\{\"id\": 7, \"title\": \"x\"\}]"
+    let back = try decode_tasks(Path("t.json"), text) on StorageError as e:
+        assert_fail(e.reason)
+    assert back == [Task(id = 7, title = "x")]
+
+test "повреждённый файл — ошибка хранилища с именем файла":
+    try:
+        decode_tasks(Path("broken.json"), "[\{")
+        assert_fail("ожидалась ошибка")
+    on StorageError as e:
+        assert e.path == Path("broken.json")
+        assert e.reason.starts_with("повреждённый JSON")

@@ -232,6 +232,9 @@ pub struct Program {
     pub calls: Vec<CallEdge>,
     /// Calls of generic functions with their type arguments (E0046).
     pub generic_calls: Vec<GenericCall>,
+    /// The type parameters that reach a JSON conversion of `std.json` (semantics 3.8): a call
+    /// that infers them passes the inferred types at run time, as written ones are.
+    pub conversion_params: std::collections::HashSet<ParamId>,
     /// Places where a function is named, for `unio symbol`.
     pub usages: Vec<(FnId, ModId, Span)>,
     /// What the effects need beyond `calls`: implicit calls through interfaces, uses of
@@ -481,6 +484,7 @@ impl Program {
             diagnostics: Vec::new(),
             calls: Vec::new(),
             generic_calls: Vec::new(),
+            conversion_params: Default::default(),
             usages: Vec::new(),
             effect_facts: Default::default(),
             tests: TestScope::None,
@@ -555,6 +559,7 @@ impl Program {
             diagnostics: Vec::new(),
             calls: Vec::new(),
             generic_calls: Vec::new(),
+            conversion_params: Default::default(),
             usages: Vec::new(),
             effect_facts: Default::default(),
             tests: TestScope::None,

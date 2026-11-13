@@ -2,12 +2,38 @@
 unsafe module
 
 extend Float:
+    ## True for every NaN, the value that is not equal to itself.
+    ## Example:
+    ##     assert (0.0 * (1e308 * 10.0)).is_nan() and not 1.0.is_nan()
     public external function is_nan(self) returns Bool
 
     ## True unless the number is infinite or NaN.
+    ## Example:
+    ##     assert 1.5.is_finite() and not (1e308 * 10.0).is_finite()
     public external function is_finite(self) returns Bool
 
+    ## The integer equal to the number; none when it has a fraction, is infinite or NaN, or lies
+    ## outside MINIMUM_INT..MAXIMUM_INT. Round first to choose how: std.math.floor(x).to_int().
+    ## Example:
+    ##     assert 3.0.to_int() == some(3) and 2.5.to_int() == none
+    public external function to_int(self) returns Option[Int]
+
+    ## The IEEE 754 binary64 bits of the number, read as a two's-complement Int; std.math.from_bits
+    ## is the inverse.
+    ## Example:
+    ##     assert 1.0.to_bits() == 4607182418800017408 and (-0.0).to_bits() == MINIMUM_INT
+    public external function to_bits(self) returns Int
+
+    ## The absolute value: the number without its sign, so (-0.0).abs() is 0.0; NaN stays NaN.
+    ## Example:
+    ##     assert (-2.5).abs() == 2.5
+    public function abs(self) returns Float:
+        if self < 0.0 or self == 0.0: return 0.0 - self
+        return self
+
     ## An explicit total-order key: numeric order, both zeros equal, all NaNs equal and last.
+    ## Example:
+    ##     assert (-0.0).total_order() == 0.0.total_order()
     public function total_order(self) returns OrderedFloat:
         return OrderedFloat(key = total_order_key(self))
 
@@ -34,3 +60,8 @@ test "ordered Float keys agree on zeros and numerical order":
     assert (-1.0).total_order() < 0.0.total_order()
     assert 0.0.total_order() < 1.0.total_order()
     assert (-0.0).total_order().hash() == 0.0.total_order().hash()
+
+test "the absolute value of a Float clears the sign":
+    assert (-0.0).abs().to_bits() == 0
+    assert 3.0.abs() == 3.0
+    assert (0.0 * (1e308 * 10.0)).abs().is_nan()

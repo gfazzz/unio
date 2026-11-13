@@ -2,10 +2,14 @@
 unsafe module
 
 ## Writes the text and a line end to standard output.
+## Example:
+##     print("hello")
 public function print(text as Text):
     write_output(text + "\n")
 
 ## Writes the text and a line end to standard error.
+## Example:
+##     print_error("warning: nothing to do")
 public function print_error(text as Text):
     write_error(text + "\n")
 

@@ -1,0 +1,809 @@
+## Generates the standard library reference from the documentation comments of stdlib/ (D-3) and
+## checks the language reference against the grammar and the diagnostic catalog (D-1).
+##
+## Usage (from the root of the repository):
+##     reference stdlib [en|ru]    print the standard library reference in Markdown
+##     reference --check           report every generated or checked file that is out of date
+##
+## The generated files are made with:
+##     unio run tools/reference.unio -- stdlib en > docs/stdlib-reference.md
+##     unio run tools/reference.unio -- stdlib ru > docs/ru/stdlib-reference.md
+## --check compares them with what the sources give now, and checks that docs/reference.md and
+## docs/ru/reference.md list exactly the codes of compiler/unio/src/catalog.rs and name every
+## rule of spec/grammar.ebnf. The reading is line by line on sources in the one style (unio fmt):
+## a public declaration starts a line, its members are indented by four spaces, and the
+## documentation comment ("##" lines) stands right above what it documents.
+## Exit code: 0 if everything is up to date, 1 otherwise, 2 for a usage error or an unreadable file.
+
+import std.args
+import std.files
+from std.text import join, split
+
+let STDLIB as Text = "stdlib"
+
+let LAYERS as List[Text] = ["core", "alloc", "std"]
+
+let CATALOG as Text = "compiler/unio/src/catalog.rs"
+
+let GRAMMAR as Text = "spec/grammar.ebnf"
+
+## The language reference in both languages, which must list the codes and name the rules.
+let REFERENCES as List[Text] = ["docs/reference.md", "docs/ru/reference.md"]
+
+let DECLARATION_KINDS as List[Text] = [
+    "function",
+    "struct",
+    "enum",
+    "error",
+    "interface",
+    "let",
+    "extend",
+    "test",
+]
+
+## The fixed text of the generated reference in one language.
+struct Words:
+    language as Text
+    path as Text
+    title as Text
+    ## The paragraphs before the contents, in pieces; an empty piece ends a paragraph.
+    preamble as List[Text]
+    contents as Text
+    prelude as Text
+    source as Text
+    layer as Text
+    methods_of as Text
+    implements as Text
+    private_fields as Text
+    default_method as Text
+    path_to_root as Text
+
+## One file of the standard library as a section of the reference.
+struct Page:
+    key as Text
+    title as Text
+    relative as Text
+    layer as Text
+    doc as List[Text]
+    body as List[Text]
+    declarations as Int
+    undocumented as Int
+
+public function main() returns Int:
+    let arguments = args.list()
+    match arguments:
+        case ["stdlib"]: return print_reference(words("en"))
+        case ["stdlib", language] if language in ["en", "ru"]:
+            return print_reference(words(language))
+        case ["--check"]: return check()
+        case _:
+            print_error("usage: reference stdlib [en|ru] | reference --check")
+            return 2
+
+function print_reference(language as Words) returns Int:
+    let pages = try read_pages(language) on IoError as e:
+        print_error("reference: {e.path}: {e.reason}")
+        return 2
+    print(join(render(pages, language), "\n"))
+    return 0
+
+# ---------------------------------------------------------------- checking
+
+function check() returns Int:
+    var problems as List[Text] = []
+    var files_read = 0
+    for language in [words("en"), words("ru")]:
+        let pages = try read_pages(language) on IoError as e:
+            print_error("reference: {e.path}: {e.reason}")
+            return 2
+        files_read = pages.length()
+        let expected = render(pages, language)
+        match read_lines(language.path):
+            case some(actual):
+                if actual != expected:
+                    let command = "unio run tools/reference.unio -- stdlib {language.language} > {language.path}"
+                    problems.append("{language.path}: out of date; regenerate it with {command}")
+            case none: problems.append("{language.path}: cannot be read")
+    let codes = catalog_codes(read_lines(CATALOG) or [])
+    if codes.is_empty(): problems.append("{CATALOG}: no list of codes found")
+    let rules = grammar_rules(read_lines(GRAMMAR) or [])
+    if rules.is_empty(): problems.append("{GRAMMAR}: no rules found")
+    for reference in REFERENCES:
+        match read_lines(reference):
+            case some(lines):
+                problems.append_all(reference_problems(reference, lines, codes, rules))
+            case none: problems.append("{reference}: cannot be read")
+    for problem in problems:
+        print(problem)
+    if problems.is_empty():
+        print(
+            "the references are up to date: {files_read} library files, {codes.length()} codes, {rules.length()} rules",
+        )
+        return 0
+    print("{problems.length()} problem(s)")
+    return 1
+
+function read_lines(name as Text) returns Option[List[Text]]:
+    let text = try files.read_text(Path(name)) on IoError:
+        return none
+    return some(text.lines())
+
+## The codes of `pub const CODES` in the catalog of the compiler.
+function catalog_codes(lines as List[Text]) returns List[Text]:
+    var codes as List[Text] = []
+    var inside = false
+    for line in lines:
+        if line.starts_with("pub const CODES"):
+            inside = true
+            continue
+        if not inside: continue
+        if line.trim().starts_with("];"): break
+        for part in split(line, "\""):
+            if is_code(part): codes.append(part)
+    return codes
+
+function is_code(text as Text) returns Bool:
+    if text.length() != 5 or not text.starts_with("E"): return false
+    return text.slice(1, 5).to_int().is_some()
+
+## The names the grammar defines: a line that starts with a name followed by "=".
+function grammar_rules(lines as List[Text]) returns List[Text]:
+    var rules as List[Text] = []
+    for line in lines:
+        let name = leading_name(line)
+        if name.is_empty(): continue
+        let rest = line.slice(name.length(), line.length()).trim_start()
+        if rest.starts_with("=") and not rest.starts_with("=="): rules.append(name)
+    return rules
+
+## The codes in the rows of the code table ("| `E0001` | ...") of a reference.
+function listed_codes(lines as List[Text]) returns List[Text]:
+    var codes as List[Text] = []
+    for line in lines:
+        if line.starts_with("| `E") and line.length() > 9:
+            let code = line.slice(3, 8)
+            if is_code(code): codes.append(code)
+    return codes
+
+function reference_problems(
+    reference as Text,
+    lines as List[Text],
+    codes as List[Text],
+    rules as List[Text],
+) returns List[Text]:
+    var problems as List[Text] = []
+    let listed = listed_codes(lines)
+    for code in codes:
+        if code not in listed:
+            problems.append("{reference}: code {code} of the catalog is not listed")
+    for code in listed:
+        if code not in codes: problems.append("{reference}: code {code} is not in the catalog")
+    let text = join(lines, "\n")
+    for rule in rules:
+        if not text.contains("`{rule}`"):
+            problems.append("{reference}: grammar rule `{rule}` is not described")
+    return problems
+
+# ---------------------------------------------------------------- reading the library
+
+function read_pages(language as Words) returns List[Page] fails with IoError:
+    var pages as List[Page] = []
+    for path in try files.list_tree(Path(STDLIB)):
+        let relative = relative_name(path.to_text())
+        if not relative.ends_with(".unio"): continue
+        let text = try files.read_text(path)
+        pages.append(read_page(relative, text.lines(), language))
+    return pages.sorted_by(function (page as Page) returns Text: page.key)
+
+## The path below stdlib/ with "/" as the separator on every system.
+function relative_name(path as Text) returns Text:
+    let name = path.replace("\\", "/")
+    let prefix = STDLIB + "/"
+    match name.index_of(prefix):
+        case some(position): return name.slice(position + prefix.length(), name.length())
+        case none: return name
+
+## The module a file is, or "" for a file of the prelude.
+function module_name(relative as Text) returns Text:
+    let parts = split(relative, "/")
+    if parts.length() < 2: return ""
+    let inside = join(parts.slice(1, parts.length()), "/")
+    if inside == "prelude.unio" or inside.starts_with("builtin/"): return ""
+    return "std." + inside.slice(0, inside.length() - 5).replace("/", ".")
+
+function layer_index(relative as Text) returns Int:
+    let layer = split(relative, "/")[0]
+    return LAYERS.find_index(function (name as Text) returns Bool: name == layer) or LAYERS.length()
+
+## The order of the reference: the preludes by layer, then the modules by name.
+function page_key(relative as Text) returns Text:
+    let module = module_name(relative)
+    if not module.is_empty(): return "1 {module}"
+    let first = "0" if relative.ends_with("/prelude.unio") else "1"
+    return "0 {layer_index(relative)} {first} {relative}"
+
+function read_page(relative as Text, lines as List[Text], language as Words) returns Page:
+    var doc as List[Text] = []
+    var module_doc as List[Text] = []
+    var body as List[Text] = []
+    var counts = [0, 0]
+    var seen_code = false
+    var index = 0
+    while index < lines.length():
+        let line = lines[index]
+        if line.starts_with("##"):
+            doc.append(doc_text(line))
+            index = index + 1
+            continue
+        let kind = declaration_kind(line)
+        if kind.is_empty():
+            if not seen_code and module_doc.is_empty(): module_doc = doc
+            seen_code = true
+            if not line.starts_with("#"): doc = []
+            index = index + 1
+            continue
+        seen_code = true
+        let header_end = logical_end(lines, index)
+        let last = block_end(lines, header_end, 0)
+        if kind == "extend":
+            render_extend(lines, index, header_end, last, doc, language, body, counts)
+        else if line.starts_with("public ") and kind != "test":
+            let place = Place(start = index, header_end = header_end, last = last, indent = 0)
+            render_declaration(lines, place, kind, doc, 3, [], language, body, counts)
+        doc = []
+        index = last + 1
+    let module = module_name(relative)
+    let title = "`{module}`" if not module.is_empty() else "`{relative}`"
+    return Page(
+        key = page_key(relative),
+        title = title,
+        relative = relative,
+        layer = split(relative, "/")[0],
+        doc = module_doc,
+        body = body,
+        declarations = counts[0],
+        undocumented = counts[1],
+    )
+
+## The text of a documentation comment line without "##" and one following space.
+function doc_text(line as Text) returns Text:
+    let trimmed = line.trim_start()
+    let rest = trimmed.slice(2, trimmed.length())
+    return rest.slice(1, rest.length()) if rest.starts_with(" ") else rest
+
+function indent_of(line as Text) returns Int:
+    var count = 0
+    while count < line.length() and line.char_at(count) == " ":
+        count = count + 1
+    return count
+
+## The kind of declaration a line starts ("function", "struct", ...), or "" for another line.
+function declaration_kind(line as Text) returns Text:
+    var rest = line.trim_start()
+    if rest.starts_with("public "): rest = rest.slice(7, rest.length())
+    if rest.starts_with("external "): rest = rest.slice(9, rest.length())
+    for kind in DECLARATION_KINDS:
+        if rest.starts_with(kind + " ") or rest.starts_with(kind + "["): return kind
+    return ""
+
+## The name a declaration line declares.
+function declared_name(line as Text, kind as Text) returns Text:
+    let rest = line.trim_start()
+    match rest.index_of(kind + " "):
+        case some(position):
+            return leading_name(rest.slice(position + kind.length() + 1, rest.length()))
+        case none: return ""
+
+## The name (letters, digits, "_") at the start of the text.
+function leading_name(text as Text) returns Text:
+    var end = 0
+    while end < text.length() and is_name_character(text.char_at(end)):
+        end = end + 1
+    return text.slice(0, end)
+
+function is_name_character(character as Text) returns Bool:
+    if character == "_": return true
+    let lower = character.to_lower()
+    if lower >= "a" and lower <= "z": return true
+    return character >= "0" and character <= "9"
+
+## How much a line opens brackets, outside texts and comments.
+function bracket_change(line as Text) returns Int:
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    for character in line.chars():
+        if escaped:
+            escaped = false
+            continue
+        if quoted:
+            if character == "\\": escaped = true
+            else if character == "\"": quoted = false
+            continue
+        if character == "\"": quoted = true
+        else if character == "#": return depth
+        else if character in ["(", "[", "\{"]: depth = depth + 1
+        else if character in [")", "]", "\}"]: depth = depth - 1
+    return depth
+
+## The last line of the logical line that starts at the index: brackets continue a line.
+function logical_end(lines as List[Text], start as Int) returns Int:
+    var depth = bracket_change(lines[start])
+    var index = start
+    while depth > 0 and index + 1 < lines.length():
+        index = index + 1
+        depth = depth + bracket_change(lines[index])
+    return index
+
+## The last line of the block after a header: the lines indented deeper than the header.
+function block_end(lines as List[Text], header_end as Int, indent as Int) returns Int:
+    var last = header_end
+    var index = header_end + 1
+    while index < lines.length():
+        let line = lines[index]
+        if not line.trim().is_empty():
+            if indent_of(line) <= indent: break
+            last = index
+        index = index + 1
+    return last
+
+function dedent(line as Text, indent as Int) returns Text:
+    if indent_of(line) >= indent: return line.slice(indent, line.length())
+    return line.trim_start()
+
+# ---------------------------------------------------------------- rendering
+
+## Where a declaration is: its first line, the last line of its header, the last line of its
+## block, and its indentation.
+struct Place:
+    start as Int
+    header_end as Int
+    last as Int
+    indent as Int
+
+function render_declaration(
+    lines as List[Text],
+    place as Place,
+    kind as Text,
+    doc as List[Text],
+    level as Int,
+    notes as List[Text],
+    language as Words,
+    var out as List[Text],
+    var counts as List[Int],
+):
+    counts[0] = counts[0] + 1
+    if doc.is_empty(): counts[1] = counts[1] + 1
+    let marks = "#".repeat(level)
+    out.append("{marks} `{declared_name(lines[place.start], kind)}`")
+    out.append("")
+    out.append("```unio")
+    for index in range(place.start, place.header_end + 1):
+        var line = dedent(lines[index], place.indent)
+        if index == place.header_end and kind == "function" and line.ends_with(":"):
+            line = line.slice(0, line.length() - 1)
+        out.append(line)
+    let code_end = out.length()
+    var private_fields = 0
+    if kind in ["struct", "error", "enum"]: private_fields = render_fields(lines, place, kind, out)
+    if out.length() == code_end and out[code_end - 1].ends_with(":"):
+        out[code_end - 1] = out[code_end - 1].slice(0, out[code_end - 1].length() - 1)
+    out.append("```")
+    if not doc.is_empty():
+        out.append("")
+        out.append_all(prose(doc))
+    for note in notes:
+        out.append("")
+        out.append(note)
+    if private_fields > 0:
+        out.append("")
+        out.append(language.private_fields)
+    out.append("")
+    if kind == "interface": render_members(lines, place, true, language, out, counts)
+
+## The visible fields or variants with their comments; returns how many fields are private.
+function render_fields(
+    lines as List[Text],
+    place as Place,
+    kind as Text,
+    var out as List[Text],
+) returns Int:
+    let indent = place.indent + 4
+    var private_fields = 0
+    var comments as List[Text] = []
+    var index = place.header_end + 1
+    while index <= place.last:
+        let line = lines[index]
+        if line.trim().is_empty() or indent_of(line) != indent:
+            index = index + 1
+            continue
+        let end = logical_end(lines, index)
+        let trimmed = line.trim_start()
+        if trimmed.starts_with("##"): comments.append(dedent(line, place.indent))
+        else if kind != "struct" or trimmed.starts_with("public "):
+            out.append_all(comments)
+            for at in range(index, end + 1):
+                out.append(dedent(lines[at], place.indent))
+            comments = []
+        else:
+            private_fields = private_fields + 1
+            comments = []
+        index = end + 1
+    return private_fields
+
+## The functions of an interface (every one) or of an extend block (the public ones, or every one
+## for an implementation of an interface), as entries of the fourth level.
+function render_members(
+    lines as List[Text],
+    place as Place,
+    every as Bool,
+    language as Words,
+    var out as List[Text],
+    var counts as List[Int],
+):
+    let indent = place.indent + 4
+    let is_interface = declaration_kind(lines[place.start]) == "interface"
+    var doc as List[Text] = []
+    var index = place.header_end + 1
+    while index <= place.last:
+        let line = lines[index]
+        if line.trim().is_empty() or indent_of(line) != indent:
+            index = index + 1
+            continue
+        if line.trim_start().starts_with("##"):
+            doc.append(doc_text(line))
+            index = index + 1
+            continue
+        let header_end = logical_end(lines, index)
+        let member = Place(
+            start = index,
+            header_end = header_end,
+            last = block_end(lines, header_end, indent),
+            indent = indent,
+        )
+        let kind = declaration_kind(line)
+        if kind == "function" and (every or line.trim_start().starts_with("public ")):
+            var notes as List[Text] = []
+            if is_interface and lines[header_end].ends_with(":"):
+                notes.append(language.default_method)
+            render_declaration(lines, member, kind, doc, 4, notes, language, out, counts)
+        doc = []
+        index = member.last + 1
+
+function render_extend(
+    lines as List[Text],
+    start as Int,
+    header_end as Int,
+    last as Int,
+    doc as List[Text],
+    language as Words,
+    var out as List[Text],
+    var counts as List[Int],
+):
+    var header_parts as List[Text] = []
+    for index in range(start, header_end + 1):
+        header_parts.append(lines[index].trim())
+    var header = join(header_parts, " ")
+    if header.ends_with(":"): header = header.slice(0, header.length() - 1)
+    var target = header.slice(6, header.length())
+    if target.starts_with("["): target = target.slice(closing_bracket(target) + 1, target.length())
+    target = target.trim()
+    var implemented = ""
+    match target.index_of(" with "):
+        case some(position):
+            implemented = target.slice(position + 6, target.length()).trim()
+            target = target.slice(0, position)
+        case none: pass
+    let every = not implemented.is_empty()
+    var shown = false
+    for index in range(header_end + 1, last + 1):
+        let line = lines[index]
+        if indent_of(line) == 4 and declaration_kind(line) == "function":
+            if every or line.trim_start().starts_with("public "): shown = true
+    if not shown: return
+    if every: out.append("### `{target}` {language.implements} `{implemented}`")
+    else: out.append("### {language.methods_of} `{target}`")
+    out.append("")
+    out.append("```unio")
+    out.append(header)
+    out.append("```")
+    out.append("")
+    if not doc.is_empty():
+        out.append_all(prose(doc))
+        out.append("")
+    let place = Place(start = start, header_end = header_end, last = last, indent = 0)
+    render_members(lines, place, every, language, out, counts)
+
+## The position of the "]" that closes the "[" at the start of the text.
+function closing_bracket(text as Text) returns Int:
+    var depth = 0
+    for index, character in text.chars().enumerate():
+        if character == "[": depth = depth + 1
+        else if character == "]":
+            depth = depth - 1
+            if depth == 0: return index
+    return text.length() - 1
+
+## Documentation comment lines as Markdown. A run of lines indented by four spaces, such as an
+## example after "Example:", becomes a block of code. In the other lines "<" outside code spans is
+## escaped so that it is not read as HTML, and "](" so that Map[K, V](...) is not read as a link.
+function prose(doc as List[Text]) returns List[Text]:
+    var lines as List[Text] = []
+    var code as List[Text] = []
+    for line in doc:
+        if line.starts_with("    "):
+            if code.is_empty() and not lines.is_empty() and lines.last() != some(""):
+                lines.append("")
+            code.append(line.slice(4, line.length()))
+            continue
+        if not code.is_empty():
+            lines.append_all(code_block(code))
+            code = []
+            if not line.is_empty(): lines.append("")
+        lines.append(escape_markdown(line))
+    if not code.is_empty(): lines.append_all(code_block(code))
+    return lines
+
+## A block of example code: fenced, or as HTML when a line has "](", which a Markdown link
+## checker would read as a link even inside a fence.
+function code_block(code as List[Text]) returns List[Text]:
+    if not code.find(function (line): line.contains("](")).is_some():
+        var fenced = ["```unio"]
+        fenced.append_all(code)
+        fenced.append("```")
+        return fenced
+    var html as List[Text] = []
+    for line in code:
+        html.append(
+            line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(
+                "](",
+                "]&#40;",
+            ),
+        )
+    html[0] = "<pre><code>" + html[0]
+    html[html.length() - 1] = html[html.length() - 1] + "</code></pre>"
+    return html
+
+function escape_markdown(line as Text) returns Text:
+    var result as List[Text] = []
+    var code = false
+    for character in line.chars():
+        if character == "`": code = not code
+        if character == "<" and not code: result.append("\\<")
+        else if character == "(" and not code and result.last() == some("]"): result.append("\\(")
+        else: result.append(character)
+    return join(result, "")
+
+## A heading as an anchor in the way GitHub makes one: lower case, punctuation removed, spaces as "-".
+function anchor(heading as Text) returns Text:
+    var result as List[Text] = []
+    for character in heading.to_lower().chars():
+        if character == " ": result.append("-")
+        else if character == "-" or character == "_" or not is_punctuation(character):
+            result.append(character)
+    return join(result, "")
+
+function is_punctuation(character as Text) returns Bool:
+    return "`.,:;!?()[]\{\}<>/\\\"'*+=#$%&@^|~".contains(character)
+
+function render(pages as List[Page], language as Words) returns List[Text]:
+    var out as List[Text] = ["# {language.title}", ""]
+    var declarations = 0
+    var undocumented = 0
+    for page in pages:
+        declarations = declarations + page.declarations
+        undocumented = undocumented + page.undocumented
+    var paragraph as List[Text] = []
+    for piece in language.preamble:
+        if not piece.is_empty(): paragraph.append(piece)
+        else:
+            out.append(join(paragraph, ""))
+            out.append("")
+            paragraph = []
+    out.append(join(paragraph, ""))
+    out.append("")
+    out.append(counted(language, pages.length(), declarations, undocumented))
+    out.append("")
+    out.append("## {language.contents}")
+    out.append("")
+    for page in pages:
+        let heading = section_heading(page, language)
+        out.append("- [{heading}](#{anchor(heading)})")
+    out.append("")
+    for page in pages:
+        out.append("## {section_heading(page, language)}")
+        out.append("")
+        out.append(
+            "{language.source}: [stdlib/{page.relative}]({language.path_to_root}stdlib/{page.relative}). {language.layer}: `{page.layer}`.",
+        )
+        out.append("")
+        if not page.doc.is_empty():
+            out.append_all(prose(page.doc))
+            out.append("")
+        out.append_all(page.body)
+    while out.last() == some(""):
+        let _ = out.remove_last()
+    return out
+
+function section_heading(page as Page, language as Words) returns Text:
+    if page.title.starts_with("`std."): return page.title
+    return "{language.prelude}: {page.title}"
+
+function counted(
+    language as Words,
+    pages as Int,
+    declarations as Int,
+    undocumented as Int,
+) returns Text:
+    if language.language == "ru":
+        return "Файлов: {pages}; публичных объявлений и методов: {declarations}, из них без комментария документации: {undocumented}."
+    return "{pages} files, {declarations} public declarations and methods, {undocumented} of them without a documentation comment."
+
+function words(language as Text) returns Words:
+    if language == "ru":
+        return Words(
+            language = "ru",
+            path = "docs/ru/stdlib-reference.md",
+            title = "Справочник стандартной библиотеки",
+            preamble = [
+                "Версия 0.1-draft. Основная версия на английском: [../stdlib-reference.md](../stdlib-reference.md). ",
+                "Этот файл создаётся программой [tools/reference.unio](../../tools/reference.unio) из комментариев ",
+                "документации [stdlib/](../../stdlib) (требование Д-3); не правьте его вручную. После изменения ",
+                "библиотеки создайте его заново командой ",
+                "`unio run tools/reference.unio -- stdlib ru > docs/ru/stdlib-reference.md`; шаг CI ",
+                "«Generated references are up to date» не проходит, пока файл устарел. Обзор библиотеки, её ",
+                "слоёв и общих правил: [stdlib.md](stdlib.md).",
+                "",
+                "Комментарии документации в исходных текстах библиотеки пишутся на английском языке, поэтому здесь ",
+                "они приведены без перевода; переведены заголовки и пояснения. Каждое публичное объявление ",
+                "библиотеки показано с сигнатурой и комментарием документации в порядке исходного файла: сначала ",
+                "прелюдии слоёв `core`, `alloc` и `std`, затем модули по имени. Закрытые объявления опущены; ",
+                "методы блока `extend` показаны, если они публичны или реализуют интерфейс. Про структуру с ",
+                "закрытыми полями это сказано: её создают только функции её модуля.",
+            ],
+            contents = "Содержание",
+            prelude = "Прелюдия",
+            source = "Исходный текст",
+            layer = "Слой",
+            methods_of = "Методы",
+            implements = "реализует",
+            private_fields = "У структуры есть закрытые поля: её создают только функции её модуля.",
+            default_method = "Есть реализация по умолчанию.",
+            path_to_root = "../../",
+        )
+    return Words(
+        language = "en",
+        path = "docs/stdlib-reference.md",
+        title = "Standard library reference",
+        preamble = [
+            "Version 0.1-draft. Russian localization: [ru/stdlib-reference.md](ru/stdlib-reference.md). ",
+            "This file is generated by [tools/reference.unio](../tools/reference.unio) from the documentation ",
+            "comments of [stdlib/](../stdlib) (requirement D-3); do not edit it by hand. After a change to the ",
+            "library, regenerate it with ",
+            "`unio run tools/reference.unio -- stdlib en > docs/stdlib-reference.md`; the CI step ",
+            "\"Generated references are up to date\" fails while it is stale. The overview of the library, ",
+            "its layers and its common rules is [stdlib.md](stdlib.md).",
+            "",
+            "Every public declaration of the library is listed with its signature and its documentation comment, ",
+            "in the order of its source file: the preludes of the layers `core`, `alloc` and `std` first, then ",
+            "the modules by name. Private declarations are left out; the methods of an `extend` block are ",
+            "listed when they are public or implement an interface. A struct with private fields says so: it ",
+            "is built only by the functions of its module.",
+        ],
+        contents = "Contents",
+        prelude = "Prelude",
+        source = "Source",
+        layer = "Layer",
+        methods_of = "Methods of",
+        implements = "implements",
+        private_fields = "The struct has private fields: only the functions of its module build it.",
+        default_method = "Has a default implementation.",
+        path_to_root = "../",
+    )
+
+test "kinds and names of declaration lines":
+    assert declaration_kind(
+        "public external function exists(path as Path) returns Bool",
+    ) == "function"
+    assert declaration_kind("extend[T] List[T]:") == "extend"
+    assert declaration_kind("    public var done as Bool = false") == ""
+    assert declared_name("public struct Counterexample[T]:", "struct") == "Counterexample"
+    assert declared_name("public let MINIMUM_INT as Int = 0", "let") == "MINIMUM_INT"
+
+test "brackets continue a line, outside texts and comments":
+    assert bracket_change("public function read_bytes(") == 1
+    assert bracket_change("let x = \"(\" # [") == 0
+    assert logical_end(["f(", "    a,", ") returns Int:", "    pass"], 0) == 2
+
+test "the codes of the catalog and the rules of the grammar":
+    let catalog = [
+        "pub const X: &[&str] = &[\"E0009\"];",
+        "pub const CODES: &[&str] = &[",
+        "    \"E0001\", \"E0002\",",
+        "];",
+        "\"E0003\"",
+    ]
+    assert catalog_codes(catalog) == ["E0001", "E0002"]
+    assert grammar_rules(
+        ["file            = [ module_header ] ;", "  (* x = y *)", "param == x"],
+    ) == [
+        "file",
+    ]
+    let problems = reference_problems(
+        "r.md",
+        ["| `E0001` | a |", "| `E0004` | b |", "`file`"],
+        ["E0001", "E0002"],
+        ["file", "param"],
+    )
+    assert problems == [
+        "r.md: code E0002 of the catalog is not listed",
+        "r.md: code E0004 is not in the catalog",
+        "r.md: grammar rule `param` is not described",
+    ]
+
+test "a page lists public declarations with their comments":
+    let source = [
+        "## A module.",
+        "unsafe module",
+        "",
+        "## A point.",
+        "public struct Point:",
+        "    ## Across.",
+        "    public x as Int",
+        "    hidden as Int",
+        "",
+        "struct Private:",
+        "    a as Int",
+        "",
+        "## Shapes.",
+        "public interface Shape:",
+        "    function area(self) returns Int",
+        "",
+        "    ## Twice the area.",
+        "    function double(self) returns Int:",
+        "        return 2 * self.area()",
+        "",
+        "extend Point:",
+        "    ## Moved.",
+        "    public function moved(",
+        "        self,",
+        "        by as Int,",
+        "    ) returns Point:",
+        "        return self",
+        "",
+        "    function helper(self):",
+        "        pass",
+    ]
+    let page = read_page("std/shapes.unio", source, words("en"))
+    assert page.title == "`std.shapes`"
+    assert page.doc == ["A module."]
+    assert page.declarations == 5
+    assert page.undocumented == 1
+    let text = join(page.body, "\n")
+    assert text.contains("public struct Point:\n    ## Across.\n    public x as Int\n```")
+    assert text.contains("The struct has private fields")
+    assert not text.contains("Private")
+    assert text.contains(
+        "#### `double`\n\n```unio\nfunction double(self) returns Int\n```\n\nTwice the area.\n\nHas a default implementation.",
+    )
+    assert text.contains("### Methods of `Point`")
+    assert text.contains("public function moved(\n    self,\n    by as Int,\n) returns Point\n```")
+    assert not text.contains("helper")
+
+test "prose escapes what Markdown would read as HTML or a link, and fences examples":
+    assert prose(["a <b> `c<d>` Map[K, V](x)"]) == ["a \\<b> `c<d>` Map[K, V]\\(x)"]
+    let example = prose(["The ratio.", "Example:", "    assert PI < 3.2", "Then more."])
+    assert example == [
+        "The ratio.",
+        "Example:",
+        "",
+        "```unio",
+        "assert PI < 3.2",
+        "```",
+        "",
+        "Then more.",
+    ]
+    assert prose(["    f[T](x)"]) == ["<pre><code>f[T]&#40;x)</code></pre>"]
+    assert anchor("Prelude: `core/prelude.unio`") == "prelude-corepreludeunio"
+    assert module_name("std/builtin/path.unio") == ""
+    assert module_name("alloc/json.unio") == "std.json"

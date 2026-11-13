@@ -6,6 +6,10 @@ public error ContextError:
     cause as Error
 
 ## Attach an operation to an error without flattening its cause to text.
+## Example:
+##     let wrapped = context("reading configuration", ExampleError(message = "missing field"))
+##     assert wrapped.operation == "reading configuration"
+##     assert wrapped.cause.diagnostic_code() == ExampleError(message = "").diagnostic_code()
 public function context(operation as Text, cause as Error) returns ContextError:
     return ContextError(operation = operation, cause = cause)
 

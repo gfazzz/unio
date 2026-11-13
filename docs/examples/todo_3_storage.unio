@@ -1,0 +1,73 @@
+## Step 3 of the guide (docs/guide.md, chapter 5): the tasks in a JSON file, within the
+## permissions of unio.toml.
+##
+## Usage:
+##     unio run todo_3_storage.unio
+
+import std.env
+import std.files
+import std.json as json
+
+struct Task:
+    public id as Int
+    public title as Text
+    public var done as Bool = false
+
+error StorageError:
+    path as Path
+    reason as Text
+
+## Storage path: $TODO_FILE, otherwise ~/.todo.json, or ./.todo.json without a home directory.
+function storage_path() returns Path:
+    match env.get("TODO_FILE"):
+        case some(value): return Path(value)
+        case none: return (env.home_dir() or Path(".")).join(".todo.json")
+
+## The tasks of a JSON text; the path only names the file in the error.
+function decode_tasks(path as Path, text as Text) returns List[Task] fails with StorageError:
+    let value = try json.parse(text) on ParseError as e:
+        fail StorageError(path = path, reason = "corrupted JSON: {e.message}")
+    return try json.decode[List[Task]](value) on DecodeError as e:
+        fail StorageError(path = path, reason = e.message)
+
+function load_tasks(path as Path) returns List[Task] fails with StorageError:
+    if not files.exists(path): return []
+    let text = try files.read_text(path) on IoError as e:
+        fail StorageError(path = path, reason = e.reason)
+    return try decode_tasks(path, text)
+
+function save_tasks(path as Path, tasks as List[Task]) fails with StorageError:
+    let text = try json.encode_checked(tasks, pretty = true) on EncodeError as e:
+        fail StorageError(path = path, reason = e.message)
+    try files.write_text(path, text) on IoError as e:
+        fail StorageError(path = path, reason = e.reason)
+
+public function main() returns Int:
+    let path = storage_path()
+    let tasks = try load_tasks(path) on StorageError as e:
+        print_error("Storage {e.path}: {e.reason}")
+        return 1
+    print("{tasks.length()} task(s) in {path}")
+    return 0
+
+test "tasks come back from their JSON text":
+    let tasks = [Task(id = 1, title = "buy bread"), Task(id = 2, title = "call", done = true)]
+    let text = try json.encode_checked(tasks) on EncodeError as e:
+        assert_fail(e.message)
+    let back = try decode_tasks(Path("test.json"), text) on StorageError as e:
+        assert_fail(e.reason)
+    assert back == tasks
+
+test "a missing field takes its default":
+    let text = "[\{\"id\": 7, \"title\": \"x\"\}]"
+    let back = try decode_tasks(Path("t.json"), text) on StorageError as e:
+        assert_fail(e.reason)
+    assert back == [Task(id = 7, title = "x")]
+
+test "a corrupted file is a storage error that names the file":
+    try:
+        decode_tasks(Path("broken.json"), "[\{")
+        assert_fail("expected an error")
+    on StorageError as e:
+        assert e.path == Path("broken.json")
+        assert e.reason.starts_with("corrupted JSON")

@@ -1,0 +1,246 @@
+## Глава «От классов к Unio» руководства (docs/ru/guide.md, глава 8) в виде программы:
+## каждая часть заменяет одно применение классов и проверена своими тестами.
+##
+## Использование:
+##     unio run classes.unio
+
+from std.text import join
+
+# ---------------------------------------------------------------- 1. класс: struct и extend
+
+## Банковский счёт. Баланс меняется только через deposit и withdraw: поля, которые его хранят,
+## закрыты, поэтому другой модуль не может ни создать Account, ни изменить их напрямую.
+struct Account:
+    public owner as Text
+    var balance as Int = 0
+    var history as List[Int] = []
+
+error Overdraft:
+    needed as Int
+    available as Int
+
+extend Account:
+    ## Конструктор класса становится функцией типа: Account.open("Анна").
+    public function open(owner as Text) returns Account:
+        return Account(owner = owner)
+
+    public function current_balance(self) returns Int:
+        return self.balance
+
+    ## var self: метод меняет счёт, и место у вызывающего должно быть var.
+    public function deposit(var self, amount as Int):
+        self.balance = self.balance + amount
+        self.history.append(amount)
+
+    public function withdraw(var self, amount as Int) fails with Overdraft:
+        if amount > self.balance: fail Overdraft(needed = amount, available = self.balance)
+        self.balance = self.balance - amount
+        self.history.append(-amount)
+
+# ---------------------------------------------------------------- 2. базовый класс: интерфейс
+
+## То, что объявил бы базовый класс Shape. У describe есть реализация по умолчанию, общая для
+## всех фигур; тип может её заменить.
+interface Shape:
+    function area(self) returns Float
+    function name(self) returns Text
+
+    function describe(self) returns Text:
+        return "{self.name()} площадью {self.area()}"
+
+struct Rectangle:
+    public width as Float
+    public height as Float
+
+struct Square:
+    public side as Float
+
+extend Rectangle with Shape:
+    function area(self) returns Float:
+        return self.width * self.height
+
+    function name(self) returns Text:
+        return "прямоугольник"
+
+extend Square with Shape:
+    function area(self) returns Float:
+        return self.side * self.side
+
+    function name(self) returns Text:
+        return "квадрат"
+
+    ## Заменяет реализацию по умолчанию, как это сделало бы переопределение.
+    function describe(self) returns Text:
+        return "квадрат со стороной {self.side}"
+
+## Список интерфейсного типа хранит значения разных типов; каждый вызов попадает в
+## реализацию собственного типа значения.
+function total_area(shapes as List[Shape]) returns Float:
+    var total = 0.0
+    for shape in shapes:
+        total = total + shape.area()
+    return total
+
+# ---------------------------------------------------------------- 3. наследование: композиция
+
+struct Person:
+    public name as Text
+    public email as Text
+
+## Сотрудник здесь не разновидность человека: он его содержит.
+struct Employee:
+    public person as Person
+    public team as Text
+
+function greeting(person as Person) returns Text:
+    return "Здравствуйте, {person.name}"
+
+extend Employee:
+    ## Делегирование записано явно, и читатель видит, откуда берётся имя.
+    public function name(self) returns Text:
+        return self.person.name
+
+# ---------------------------------------------------------------- 4. общие объекты: номера и словари
+
+struct Book:
+    public id as Int
+    public title as Text
+    public var borrower as Option[Int] = none
+
+struct Member:
+    public id as Int
+    public name as Text
+
+error NotFound:
+    what as Text
+    id as Int
+
+## Книги и читатели ссылаются друг на друга по номеру, а не держат друг друга: библиотека
+## владеет обоими словарями, и каждое изменение проходит через неё.
+struct Library:
+    var books as Map[Int, Book] = {}
+    var members as Map[Int, Member] = {}
+
+extend Library:
+    public function new() returns Library:
+        return Library()
+
+    public function add_book(var self, id as Int, title as Text):
+        self.books[id] = Book(id = id, title = title)
+
+    public function add_member(var self, id as Int, name as Text):
+        self.members[id] = Member(id = id, name = name)
+
+    public function lend(var self, book_id as Int, member_id as Int) fails with NotFound:
+        if member_id not in self.members: fail NotFound(what = "читатель", id = member_id)
+        match self.books.get(book_id):
+            case some(book):
+                var lent = book
+                lent.borrower = some(member_id)
+                self.books[book_id] = lent
+            case none: fail NotFound(what = "книга", id = book_id)
+
+    public function borrowed_by(self, member_id as Int) returns List[Text]:
+        return [book.title for book in self.books.values() if book.borrower == some(member_id)]
+
+# ---------------------------------------------------------------- 5. типы предметной области: проверенные обёртки
+
+## Сетевой порт. Поле закрыто, поэтому каждый Port создан функцией from_int и лежит в допустимых пределах.
+struct Port:
+    number as Int
+
+error InvalidPort:
+    value as Int
+
+extend Port:
+    public function from_int(value as Int) returns Port fails with InvalidPort:
+        if value < 1 or value > 65535: fail InvalidPort(value = value)
+        return Port(number = value)
+
+    public function value(self) returns Int:
+        return self.number
+
+## Размер в байтах: функции, которая принимает ByteCount, нельзя по ошибке передать число элементов.
+struct ByteCount:
+    public bytes as Int
+
+extend ByteCount:
+    public function kibibytes(count as Int) returns ByteCount:
+        return ByteCount(bytes = count * 1024)
+
+public function main() returns Int:
+    var account = Account.open("Анна")
+    account.deposit(100)
+    try account.withdraw(30) on Overdraft as e:
+        print_error("нельзя снять {e.needed}: доступно {e.available}")
+        return 1
+    print("{account.owner}: {account.current_balance()}")
+    let shapes as List[Shape] = [Rectangle(width = 2.0, height = 3.0), Square(side = 2.0)]
+    for shape in shapes:
+        print(shape.describe())
+    let employee = Employee(
+        person = Person(name = "Борис", email = "boris@example.org"),
+        team = "инструменты",
+    )
+    print("{greeting(employee.person)}, команда {employee.team}")
+    var library = Library.new()
+    library.add_book(1, "Дюна")
+    library.add_member(7, "Анна")
+    try library.lend(1, 7) on NotFound as e:
+        print_error("нет: {e.what} {e.id}")
+        return 1
+    print("У Анны: {join(library.borrowed_by(7), ", ")}")
+    return 0
+
+test "счёт отказывает в перерасходе и сохраняет баланс":
+    var account = Account.open("Анна")
+    account.deposit(50)
+    try:
+        account.withdraw(80)
+        assert_fail("ожидался перерасход")
+    on Overdraft as e: assert e.available == 50
+    assert account.current_balance() == 50
+
+test "интерфейсные значения вызывают свой тип, а реализацию по умолчанию можно заменить":
+    let shapes as List[Shape] = [Rectangle(width = 2.0, height = 3.0), Square(side = 2.0)]
+    assert total_area(shapes) == 10.0
+    assert shapes[0].describe() == "прямоугольник площадью 6.0"
+    assert shapes[1].describe() == "квадрат со стороной 2.0"
+
+test "композиция: сотрудник делегирует человеку, которого содержит":
+    let employee = Employee(
+        person = Person(name = "Борис", email = "b@example.org"),
+        team = "инструменты",
+    )
+    assert employee.name() == "Борис"
+    assert greeting(employee.person) == "Здравствуйте, Борис"
+
+test "библиотека меняет книги через их номера":
+    var library = Library.new()
+    library.add_book(1, "Дюна")
+    library.add_book(2, "Эмма")
+    library.add_member(7, "Анна")
+    try library.lend(2, 7) on NotFound as e:
+        assert_fail("нет: {e.what} {e.id}")
+    assert library.borrowed_by(7) == ["Эмма"]
+    try:
+        library.lend(3, 7)
+        assert_fail("ожидалась NotFound")
+    on NotFound as e: assert e.what == "книга"
+
+test "значение, взятое из библиотеки, — копия":
+    var library = Library.new()
+    library.add_book(1, "Дюна")
+    var copy = library.books[1]
+    copy.borrower = some(7)
+    assert library.books[1].borrower == none
+
+test "порт проверяется один раз, там, где он создаётся":
+    let port = try Port.from_int(8080) on InvalidPort as e:
+        assert_fail("{e.value} отклонён")
+    assert port.value() == 8080
+    try:
+        Port.from_int(70000)
+        assert_fail("ожидалась InvalidPort")
+    on InvalidPort as e: assert e.value == 70000
+    assert ByteCount.kibibytes(2) == ByteCount(bytes = 2048)

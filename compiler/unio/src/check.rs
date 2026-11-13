@@ -287,6 +287,7 @@ fn conversions(program: &mut Program) {
             break;
         }
     }
+    program.conversion_params = needed;
     let mut reported = HashSet::new();
     for (module, span, ty, (owner, field)) in found {
         if reported.insert((module, span.start.offset)) {
@@ -2185,7 +2186,12 @@ impl<'a> Checker<'a> {
                 return;
             }
             let (a, e) = (self.p.show(&a), self.p.show(&e));
-            self.err("E0061", span, catalog::type_mismatch(&e, &a));
+            if self.silent == 0 {
+                let mut diagnostic =
+                    Diagnostic::error("E0061", span, catalog::type_mismatch(&e, &a));
+                diagnostic.expected = Some(e);
+                self.p.error(self.module, diagnostic);
+            }
         }
     }
 
@@ -2577,7 +2583,39 @@ impl<'a> Checker<'a> {
                         (0..params.len()).find(|j| params[*j].named_only && assigned[*j].is_none())
                     {
                         let label = params[j].name.clone().unwrap_or_default();
-                        self.err("E0040", arg.value.span, catalog::missing_label(&label));
+                        // The fix inserts the label only when the call leaves one named-only
+                        // parameter without its name and has one positional argument too many:
+                        // otherwise the argument could be for another one (RFC 0001).
+                        let given: Vec<&str> = args
+                            .iter()
+                            .filter_map(|a| a.name.as_ref().map(|n| n.text.as_str()))
+                            .collect();
+                        let open = params
+                            .iter()
+                            .filter(|q| {
+                                q.named_only
+                                    && !q.name.as_deref().is_some_and(|n| given.contains(&n))
+                            })
+                            .count();
+                        let positional = args.iter().filter(|a| a.name.is_none()).count();
+                        let open = if positional == plain.len() + 1 {
+                            open
+                        } else {
+                            0
+                        };
+                        let at = arg.value.span;
+                        let mut diagnostic =
+                            Diagnostic::error("E0040", at, catalog::missing_label(&label));
+                        if open == 1 && !label.is_empty() {
+                            diagnostic.fixes.push(Fix {
+                                span: Span::new(at.start, at.start),
+                                new_text: format!("{label} = "),
+                                description: catalog::insert_label(&label),
+                            });
+                        }
+                        if self.silent == 0 {
+                            self.p.error(self.module, diagnostic);
+                        }
                         reported = true;
                         assigned[j] = Some(arg);
                     } else {
@@ -2966,7 +3004,24 @@ impl<'a> Checker<'a> {
             let collides = found.len() > 1 || BUILTIN_TYPE_NAMES.contains(&name) || own;
             if collides {
                 let enum_name = self.p.defs[first.0].name.clone();
-                self.err("E0072", span, catalog::variant_collision(name, &enum_name));
+                let mut diagnostic =
+                    Diagnostic::error("E0072", span, catalog::variant_collision(name, &enum_name));
+                // The full form is the fix when it is unambiguous: one enum has the variant and
+                // its name means that enum here (R-9, the migration of concept 0.4).
+                let visible = matches!(
+                    self.p.lookup(self.module, &enum_name),
+                    Some((_, Symbol::Def(d))) if d == first.0
+                );
+                if found.len() == 1 && visible {
+                    diagnostic.fixes.push(Fix {
+                        span,
+                        new_text: format!("{enum_name}.{name}"),
+                        description: catalog::write_variant_in_full(name, &enum_name),
+                    });
+                }
+                if self.silent == 0 {
+                    self.p.error(self.module, diagnostic);
+                }
             }
         }
         Some(first)

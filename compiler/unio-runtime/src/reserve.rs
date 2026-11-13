@@ -321,6 +321,48 @@ unsafe fn reserve_dealloc(start: usize, p: *mut u8, layout: Layout) {
     }
 }
 
+thread_local! {
+    /// How many fallible reservations ([`fallible`]) this thread is inside.
+    static FALLIBLE: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Runs `work`, in which an allocation the system refuses returns null to the caller, as
+/// `Vec::try_reserve` needs, instead of ending the program. The runtime's reservations for
+/// input-driven sizes go through here and turn the refusal into exhaustion themselves.
+pub fn fallible<T>(work: impl FnOnce() -> T) -> T {
+    FALLIBLE.with(|f| f.set(f.get() + 1));
+    let result = work();
+    FALLIBLE.with(|f| f.set(f.get() - 1));
+    result
+}
+
+/// Set once the program is ending after a refused allocation, so that the exit cannot recurse.
+static REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// The result of the system allocator: a refusal outside [`fallible`] is exhaustion of the heap
+/// (C-18, L-17a, R-2), which ends the program with code 102 and the preallocated diagnostic
+/// instead of the abort of `handle_alloc_error`. No user code runs after it, `release` included.
+#[inline]
+fn checked(p: *mut u8) -> *mut u8 {
+    if p.is_null() {
+        refused();
+    }
+    p
+}
+
+#[cold]
+#[inline(never)]
+fn refused() {
+    if FALLIBLE.try_with(|f| f.get()).unwrap_or(0) != 0 {
+        return;
+    }
+    if REFUSED.swap(true, Ordering::SeqCst) {
+        // The exit itself needed memory: nothing more can be written.
+        std::process::abort();
+    }
+    crate::fault::emergency_exit(crate::fault::Exhaustion::Heap);
+}
+
 /// The global allocator: the system allocator, except while this thread's reserve is open.
 pub struct ReserveAllocator;
 
@@ -333,7 +375,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                 return p;
             }
         }
-        System.alloc(layout)
+        checked(System.alloc(layout))
     }
 
     #[inline]
@@ -345,7 +387,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                 return p;
             }
         }
-        System.alloc_zeroed(layout)
+        checked(System.alloc_zeroed(layout))
     }
 
     #[inline]
@@ -362,7 +404,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
     #[inline]
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if OPEN.load(Ordering::Relaxed) == 0 && REGISTERED.load(Ordering::Relaxed) == 0 {
-            return System.realloc(p, layout, new_size);
+            return checked(System.realloc(p, layout, new_size));
         }
         let owned = owner(p);
         match owned {
@@ -372,7 +414,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                     return q;
                 }
             }
-            None if route() == 0 => return System.realloc(p, layout, new_size),
+            None if route() == 0 => return checked(System.realloc(p, layout, new_size)),
             None => {}
         }
         // Into the open reserve, or out of a reserve: a new block, then the copy.
@@ -661,5 +703,40 @@ mod tests {
         let after: Vec<u8> = Vec::with_capacity(100);
         assert!(!contains(after.as_ptr()));
         drop(reserve);
+    }
+
+    /// C-18, L-17a, R-2: an allocation the system refuses outside the fallible paths ends the
+    /// program with code 102 and the preallocated diagnostic, not with an abort. The test runs
+    /// itself again as a child that asks for half the address space.
+    #[test]
+    fn a_refused_allocation_ends_with_102_and_the_prepared_message() {
+        if std::env::var_os("UNIO_TEST_REFUSED_ALLOCATION").is_some() {
+            let huge: Vec<u8> = Vec::with_capacity(isize::MAX as usize / 2);
+            std::hint::black_box(&huge);
+            unreachable!("the system gave half the address space");
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "reserve::tests::a_refused_allocation_ends_with_102_and_the_prepared_message",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("UNIO_TEST_REFUSED_ALLOCATION", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(102), "{stderr}");
+        assert!(
+            stderr.contains(crate::fault::Exhaustion::Heap.message()),
+            "{stderr}"
+        );
+    }
+
+    /// The fallible paths still receive the refusal and handle it themselves.
+    #[test]
+    fn a_fallible_reservation_receives_the_refusal() {
+        let mut data: Vec<u8> = Vec::new();
+        assert!(fallible(|| data.try_reserve_exact(isize::MAX as usize / 2)).is_err());
     }
 }

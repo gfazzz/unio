@@ -33,6 +33,10 @@ pub const BINDINGS: &[(&str, ExternFn)] = &[
     ("std.text.from_code_point", from_code_point),
     ("std.text.split", text_split),
     ("std.text.join", text_join),
+    ("std.text.to_nfc", text_to_nfc),
+    ("std.text.to_nfd", text_to_nfd),
+    ("std.text.graphemes", text_graphemes),
+    ("std.text.unicode_version", unicode_version),
     ("Bytes", bytes_new),
     ("Bytes.length", bytes_length),
     ("Bytes.to_text", bytes_to_text),
@@ -432,6 +436,37 @@ fn from_code_point(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let code = int(runtime, arguments, 0)?;
     let character = u32::try_from(code).ok().and_then(char::from_u32);
     Ok(Value::option(character.map(|c| Value::text(c.to_string()))))
+}
+
+/// Normalization Form C of the text (docs/language-contracts.md, S-18).
+fn text_to_nfc(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let result = Value::text(super::unicode::nfc(t.as_str()));
+    runtime.check_heap()?;
+    Ok(result)
+}
+
+/// Normalization Form D of the text.
+fn text_to_nfd(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let result = Value::text(super::unicode::nfd(t.as_str()));
+    runtime.check_heap()?;
+    Ok(result)
+}
+
+/// The extended grapheme clusters of the text (UAX #29), in order.
+fn text_graphemes(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let t = text(runtime, arguments, 0)?;
+    let items = super::unicode::graphemes(t.as_str())
+        .into_iter()
+        .map(Value::text)
+        .collect();
+    text_list(runtime, items)
+}
+
+/// The version of the Unicode Character Database of normalization and grapheme clusters.
+fn unicode_version(_: &mut Runtime, _: &mut [Value]) -> Outcome {
+    Ok(Value::text(super::unicode_tables::UNICODE_VERSION))
 }
 
 // ---------------------------------------------------------------- Bytes

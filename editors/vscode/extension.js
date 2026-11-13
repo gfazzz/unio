@@ -1,15 +1,20 @@
 // The VS Code and Cursor extension of Unio: highlighting comes from the grammars of
 // package.json; this file starts the language server `unio lsp` (T-10) and connects it to the
-// editor. Every analysis runs in a sandboxed worker of the server (SB-13); the extension only
-// passes the texts of the open documents and shows the results.
+// editor, and runs the tests of .unio files from the Testing view with `unio test` (T-11).
+// Every analysis runs in a sandboxed worker of the server (SB-13), and every test in the
+// sandbox of its package; the extension only passes texts and shows the results.
 "use strict";
 
 const vscode = require("vscode");
 const { Client } = require("./client");
+const testing = require("./testing");
 
 let client = null;
 let output = null;
 let diagnostics = null;
+// The diagnostics of the server behind those of the editor: their data names the revision of
+// the document they were made for, and their fixes (T-13).
+const original = new WeakMap();
 
 const selector = [{ language: "unio", scheme: "file" }];
 
@@ -93,6 +98,7 @@ function start(context) {
             uri,
             params.diagnostics.map((d) => {
                 const item = new vscode.Diagnostic(range(d.range), d.message, severity(d.severity));
+                original.set(item, d);
                 item.source = d.source || "unio";
                 if (d.code) {
                     item.code = d.codeDescription
@@ -134,6 +140,177 @@ function ask(method, params) {
         output.appendLine(`${method}: ${error.message}`);
         return null;
     }) : Promise.resolve(null);
+}
+
+// ---------------------------------------------------------------- tests (T-11)
+
+function unioCommand() {
+    const config = vscode.workspace.getConfiguration("unio");
+    return config.get("server.path", "unio") || "unio";
+}
+
+/** The arguments of the sandbox that `unio test` shares with the server: --policy and the like. */
+function sandboxArguments() {
+    const config = vscode.workspace.getConfiguration("unio");
+    return config.get("server.arguments", []).filter((a) => !a.startsWith("--lang"));
+}
+
+function setUpTests(context) {
+    const controller = vscode.tests.createTestController("unio", "Unio");
+    context.subscriptions.push(controller);
+
+    // The tests of one file, found in its text: test blocks and documentation examples.
+    function refresh(uri, text) {
+        const key = uri.toString();
+        const found = testing.discover(text);
+        if (found.length === 0) {
+            controller.items.delete(key);
+            return;
+        }
+        let file = controller.items.get(key);
+        if (!file) {
+            file = controller.createTestItem(key, vscode.workspace.asRelativePath(uri), uri);
+            controller.items.add(file);
+        }
+        file.children.replace(
+            found.map((t) => {
+                const item = controller.createTestItem(`${key}::${t.name}`, t.name, uri);
+                item.range = new vscode.Range(t.line, 0, t.line, 0);
+                item.description = t.kind === "doc" ? "documentation example" : undefined;
+                return item;
+            })
+        );
+    }
+
+    async function refreshFile(uri) {
+        try {
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            refresh(uri, Buffer.from(bytes).toString("utf8"));
+        } catch {
+            controller.items.delete(uri.toString());
+        }
+    }
+
+    controller.resolveHandler = async (item) => {
+        if (!item) {
+            const files = await vscode.workspace.findFiles("**/*.unio", "**/{node_modules,target}/**");
+            await Promise.all(files.map(refreshFile));
+        }
+    };
+
+    const watcher = vscode.workspace.createFileSystemWatcher("**/*.unio");
+    context.subscriptions.push(
+        watcher,
+        watcher.onDidCreate(refreshFile),
+        watcher.onDidChange(refreshFile),
+        watcher.onDidDelete((uri) => controller.items.delete(uri.toString())),
+        vscode.workspace.onDidChangeTextDocument((event) => {
+            if (isUnio(event.document)) {
+                refresh(event.document.uri, event.document.getText());
+            }
+        })
+    );
+
+    async function run(request, token) {
+        const run = controller.createTestRun(request);
+        // The files to run, each with the tests asked for (all when the file was asked for).
+        const plan = new Map();
+        const add = (item) => {
+            const file = item.parent || item;
+            if (!plan.has(file.id)) {
+                plan.set(file.id, { file, tests: new Set() });
+            }
+            if (item.parent) {
+                plan.get(file.id).tests.add(item);
+            } else {
+                item.children.forEach((child) => plan.get(file.id).tests.add(child));
+            }
+        };
+        if (request.include) {
+            request.include.forEach(add);
+        } else {
+            controller.items.forEach(add);
+        }
+        for (const { file, tests } of plan.values()) {
+            if (token.isCancellationRequested) {
+                break;
+            }
+            const wanted = [...tests].filter((t) => !(request.exclude || []).includes(t));
+            wanted.forEach((t) => run.started(t));
+            const path = file.uri.fsPath;
+            const folder = vscode.workspace.getWorkspaceFolder(file.uri);
+            // One test asked for: its name filters the run; otherwise the whole file runs.
+            const name = wanted.length === 1 && wanted.length < file.children.size ? wanted[0].label : null;
+            const done = await testing.runTests(unioCommand(), path, name, {
+                cwd: folder ? folder.uri.fsPath : undefined,
+                extra: sandboxArguments(),
+                token,
+            });
+            if (done.stderr) {
+                run.appendOutput(done.stderr.replace(/\n/g, "\r\n"));
+            }
+            const broken = done.results.find((r) => r.name === null);
+            for (const t of wanted) {
+                const result = done.results.find((r) => r.name === t.label);
+                if (result && result.output) {
+                    run.appendOutput(result.output.replace(/\n/g, "\r\n"), undefined, t);
+                }
+                if (result && result.passed) {
+                    run.passed(t, result.duration);
+                } else if (result) {
+                    const message = new vscode.TestMessage(testing.failureMessage(result));
+                    message.location = new vscode.Location(t.uri, t.range);
+                    run.failed(t, message, result.duration);
+                } else if (broken) {
+                    run.errored(t, new vscode.TestMessage("the file does not compile; see the Problems view"));
+                } else {
+                    run.skipped(t);
+                }
+            }
+        }
+        run.end();
+    }
+
+    controller.createRunProfile("Run", vscode.TestRunProfileKind.Run, run, true);
+}
+
+/** The fixes of the server for the diagnostics of a range, for the revision they were made for. */
+function codeActions() {
+    return {
+        async provideCodeActions(document, r, context) {
+            const asked = context.diagnostics.map((d) => original.get(d)).filter((d) => d);
+            if (!client || asked.length === 0) {
+                return [];
+            }
+            // A diagnostic of an earlier revision has no fix until the checks ran again.
+            if (asked.some((d) => d.data && d.data.revision !== undefined && d.data.revision !== document.version)) {
+                return [];
+            }
+            const actions = await ask("textDocument/codeAction", {
+                textDocument: { uri: document.uri.toString() },
+                range: {
+                    start: { line: r.start.line, character: r.start.character },
+                    end: { line: r.end.line, character: r.end.character },
+                },
+                context: { diagnostics: asked },
+            });
+            return (actions || []).flatMap((a) => {
+                const action = new vscode.CodeAction(a.title, vscode.CodeActionKind.QuickFix);
+                const edit = new vscode.WorkspaceEdit();
+                for (const change of (a.edit && a.edit.documentChanges) || []) {
+                    if (change.textDocument.version !== document.version) {
+                        return [];
+                    }
+                    for (const e of change.edits) {
+                        edit.replace(vscode.Uri.parse(change.textDocument.uri), range(e.range), e.newText);
+                    }
+                }
+                action.edit = edit;
+                action.diagnostics = context.diagnostics;
+                return [action];
+            });
+        },
+    };
 }
 
 function activate(context) {
@@ -234,6 +411,9 @@ function activate(context) {
                 );
             },
         }),
+        vscode.languages.registerCodeActionsProvider(selector, codeActions(), {
+            providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
+        }),
         // The link of a diagnostic code: the explanation of `unio explain CODE`.
         vscode.workspace.registerTextDocumentContentProvider("unio-explain", {
             async provideTextDocumentContent(uri) {
@@ -254,6 +434,7 @@ function activate(context) {
         })
     );
     start(context);
+    setUpTests(context);
 }
 
 function deactivate() {

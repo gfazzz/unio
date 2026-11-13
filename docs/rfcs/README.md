@@ -29,3 +29,4 @@ An RFC (request for comments) is how the syntax, the semantics, the keyword set,
 | [0006](0006-compile-limits-apart-from-program-limits.md) | Compile limits apart from program limits | accepted (implemented in the tools; macOS and Windows checks pending in CI) |
 | [0007](0007-reference-counting-for-0-1.md) | Reference counting instead of a tracing GC in 0.1 | accepted (2026-11-12; implemented; the CI step pending its first run) |
 | [0008](0008-checking-the-manifest.md) | `unio check` checks the manifest (E0088) | accepted (2026-11-12; implemented) |
+| [0009](0009-clock-and-randomness-as-derived-effects.md) | The clock and randomness as derived effects | accepted (2026-11-13; implemented) |

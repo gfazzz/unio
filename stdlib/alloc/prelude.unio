@@ -2,6 +2,8 @@
 
 extend Range:
     ## Allocates a list containing every integer of the range.
+    ## Example:
+    ##     assert range(1, 4).to_list() == [1, 2, 3]
     public function to_list(self) returns List[Int]:
         var numbers as List[Int] = []
         var cursor = self.iterator()

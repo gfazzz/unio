@@ -1,0 +1,6 @@
+# The largest Int is a literal; the smallest is written from it, as MINIMUM_INT is.
+public function main():
+    let largest = 9223372036854775807
+    let smallest = -9223372036854775807 - 1
+    let mask = 0x7FFF_FFFF_FFFF_FFFF
+    print("{largest} {smallest} {mask == largest}")

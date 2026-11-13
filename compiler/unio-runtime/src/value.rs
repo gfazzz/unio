@@ -886,6 +886,12 @@ impl OrderedMap {
         self.entries[position].as_ref().map(|(_, v)| v)
     }
 
+    /// The value under the key, to change in place, as `items[key].field = x` does.
+    pub fn get_mut(&mut self, key: &Value) -> Option<&mut Value> {
+        let position = *self.index.get(&Key(key.clone()))?;
+        self.entries[position].as_mut().map(|(_, v)| v)
+    }
+
     /// Sets the value; an existing key keeps its position.
     pub fn put(&mut self, key: Value, value: Value) {
         match self.index.get(&Key(key.clone())) {

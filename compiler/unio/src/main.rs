@@ -7,8 +7,11 @@
 // The language server: the protocol here, its analyses in `unio::lsp` (T-10, SB-13).
 #[path = "lsp/server.rs"]
 mod lsp_server;
+
+mod api_diff;
 mod packages;
 mod publish;
+mod repl_tool;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -21,14 +24,17 @@ use unio::sandbox_cli;
 const USAGE: &str = "Usage:
     unio check [--diagnostics=json] [--lang=en|ru] [--profile=application|core] FILE...
     unio fmt [--check] FILE...
+    unio fmt --migrate [--from=VERSION] [--check] [FILE...]
     unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]
     unio build [--release] [--policy FILE] [--allow-weaker-sandbox] FILE [-o OUT]
     unio build --print-toolchain
-    unio test [--json] [--policy FILE] [--allow-weaker-sandbox] [FILTER] FILE...
+    unio test [--json] [--seed N] [--policy FILE] [--allow-weaker-sandbox] [FILTER] FILE...
     unio outline [--json] FILE
     unio symbol [--json] MODULE.NAME
+    unio api-diff [--json] [--callers DIR]... OLD [NEW]
     unio parse --ast FILE
     unio explain CODE
+    unio repl [--policy FILE] [--allow-weaker-sandbox] [--lang=en|ru]
     unio lsp [--policy FILE] [--allow-weaker-sandbox] [--lang=en|ru]
     unio add ALIAS [VERSION] (--path DIR | --package OWNER/NAME [--registry NAME] |
              --archive FILE|URL --sha384 HEX) [--unsafe-ok] [--offline]
@@ -92,12 +98,24 @@ fn main() -> ExitCode {
         Some("registry") => return publish::registry_command(&arguments[1..]),
         Some("publish") => return publish::publish(&arguments[1..]),
         Some("release") => return publish::release(&arguments[1..]),
+        Some("api-diff") => return api_diff::command(&arguments, &arguments[1..]),
+        Some("repl") => return repl_tool::command(&arguments[1..]),
         _ => {}
     }
     let (sandbox, arguments) = match sandbox_cli::take(&arguments) {
         Ok(taken) => taken,
         Err(problem) => return usage(&problem),
     };
+    // `--seed N` is `--seed=N` (T-12).
+    let mut arguments = arguments;
+    if let Some(i) = arguments.iter().position(|a| a == "--seed") {
+        match arguments.get(i + 1).cloned() {
+            Some(value) => {
+                arguments.splice(i..i + 2, [format!("--seed={value}")]);
+            }
+            None => return usage("--seed needs a number"),
+        }
+    }
     let mut lang = std::env::var("UNIO_LANG")
         .ok()
         .and_then(|v| Lang::parse(&v))
@@ -105,6 +123,9 @@ fn main() -> ExitCode {
     let mut json = false;
     let mut ast = false;
     let mut check_only = false;
+    let mut migrate = false;
+    let mut from: Option<String> = None;
+    let mut seed: Option<i64> = None;
     let mut profile = unio::effects::Profile::Application;
     let mut positional = Vec::new();
     for argument in &arguments {
@@ -131,6 +152,15 @@ fn main() -> ExitCode {
             ast = true;
         } else if argument == "--check" {
             check_only = true;
+        } else if let Some(value) = argument.strip_prefix("--seed=") {
+            match value.parse::<i64>() {
+                Ok(n) => seed = Some(n),
+                Err(_) => return usage(&format!("--seed needs a whole number, not '{value}'")),
+            }
+        } else if argument == "--migrate" {
+            migrate = true;
+        } else if let Some(value) = argument.strip_prefix("--from=") {
+            from = Some(value.to_string());
         } else if argument == "--json" {
             json = true;
         } else if argument == "-h" || argument == "--help" {
@@ -157,6 +187,21 @@ fn main() -> ExitCode {
         "parse" if ast && files.len() == 1 => {
             isolated(&arguments, for_files, || parse(&files[0], lang))
         }
+        "fmt" if migrate && files.is_empty() => {
+            print!("{}", unio::migrate::list());
+            ExitCode::SUCCESS
+        }
+        "fmt" if migrate => isolated(
+            &arguments,
+            || {
+                let mut spec = for_files()?;
+                if !check_only {
+                    spec.formats = format_targets(&paths);
+                }
+                Ok(spec)
+            },
+            || fmt_migrate(files, check_only, from.as_deref(), lang),
+        ),
         "fmt" => isolated(
             &arguments,
             || {
@@ -168,7 +213,7 @@ fn main() -> ExitCode {
             },
             || fmt(files, check_only, lang),
         ),
-        "test" => test(&arguments, files, json, lang, &sandbox),
+        "test" => test(&arguments, files, json, lang, &sandbox, seed),
         "outline" if files.len() == 1 => {
             isolated(&arguments, for_files, || outline(&files[0], json, lang))
         }
@@ -342,6 +387,55 @@ fn fmt(files: &[String], check_only: bool, lang: Lang) -> ExitCode {
                 eprint!("{}", analysis.render_text(lang));
                 failed = true;
             }
+        }
+    }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `unio fmt --migrate` (R-9): applies the registered migrations of the language, then formats.
+fn fmt_migrate(files: &[String], check_only: bool, from: Option<&str>, lang: Lang) -> ExitCode {
+    let migrations = match unio::migrate::selected(from) {
+        Ok(migrations) => migrations,
+        Err(problem) => return usage(&problem),
+    };
+    for path in files {
+        if let Err(message) = read(path) {
+            eprintln!("{message}");
+            return ExitCode::from(2);
+        }
+    }
+    let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    let mut failed = false;
+    for migrated in unio::migrate::migrate(&paths, &migrations) {
+        let path = migrated.path.display().to_string();
+        let formatted = match unio::format::format_source(&migrated.text) {
+            Ok(formatted) => formatted,
+            Err(_) => {
+                let analysis = unio::check_source(&path, &migrated.text);
+                eprint!("{}", analysis.render_text(lang));
+                failed = true;
+                continue;
+            }
+        };
+        for change in &migrated.applied {
+            println!(
+                "{path}:{}:{}: {}: {}",
+                change.line, change.column, change.id, change.new_text
+            );
+        }
+        if formatted == migrated.source {
+            continue;
+        }
+        if check_only {
+            println!("{path}");
+            failed = true;
+        } else if let Err(e) = worker::replace_file(Path::new(&path), &formatted) {
+            eprintln!("unio: {path}: {e}");
+            return ExitCode::from(2);
         }
     }
     if failed {
@@ -801,6 +895,31 @@ fn json_text(s: &str) -> String {
     out
 }
 
+/// The replay record of a counterexample (T-12): the scheme, the seeds, the values, and the
+/// versions of the compiler and of the library it was found with.
+fn property_json(p: &unio::interp::property::Report, file: &str, test: &str) -> String {
+    let library = match unio::program::trusted_stdlib() {
+        Some(dir) if unio::vfs::is_builtin(&dir) => {
+            format!("embedded in unio {}", env!("CARGO_PKG_VERSION"))
+        }
+        Some(dir) => dir.display().to_string(),
+        None => "none".to_string(),
+    };
+    format!(
+        "{{\"scheme\": {}, \"seed\": {}, \"case_index\": {}, \"sample_seed\": {}, \"original\": {}, \"minimal\": {}, \"shrink_attempts\": {}, \"compiler\": {}, \"library\": {}, \"replay\": {}}}",
+        json_text(unio::interp::property::SCHEME),
+        p.seed,
+        p.case_index,
+        p.sample_seed,
+        json_text(&p.original),
+        json_text(&p.minimal),
+        p.shrink_attempts,
+        json_text(concat!("unio ", env!("CARGO_PKG_VERSION"))),
+        json_text(&library),
+        json_text(&format!("unio test --seed {} {} {file}", p.seed, json_text(test)))
+    )
+}
+
 /// What the compile step of `unio test` found for one file.
 enum Compiled {
     /// Nothing to report or run.
@@ -831,7 +950,26 @@ fn test_compile(files: Vec<PathBuf>, filter: Option<String>, lang: Lang) -> Exit
         files: Vec::new(),
     };
     out.u32(files.len() as u32);
-    for file in files {
+    // The examples of the documentation comments run as tests of their module (T-13): the
+    // module is loaded with them appended, here and, from the sources returned, for the run.
+    let mut overlay = Vec::new();
+    let mut line_maps = Vec::new();
+    for file in &files {
+        let augmented = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|source| unio::doctest::augment(&source));
+        match (augmented, unio_runtime::sandbox::canonical(file)) {
+            (Some((text, map)), Ok(canonical)) => {
+                overlay.push((canonical, text));
+                line_maps.push(map);
+            }
+            _ => line_maps.push(Vec::new()),
+        }
+    }
+    if !overlay.is_empty() {
+        unio::vfs::overlay(overlay);
+    }
+    for (file, line_map) in files.into_iter().zip(line_maps) {
         // As `unio::check_files_for_test`, with the sources of the same load for the run.
         let path = file.clone();
         let filter = filter.clone();
@@ -875,7 +1013,10 @@ fn test_compile(files: Vec<PathBuf>, filter: Option<String>, lang: Lang) -> Exit
                 let mine: Vec<String> = errors
                     .iter()
                     .filter(|d| (*s..=*e).contains(&d.span.start.line))
-                    .map(|d| format!("{}:{}: {}", d.span.start.line, d.code, d.message.get(lang)))
+                    .map(|d| {
+                        let line = unio::doctest::original_line(&line_map, d.span.start.line);
+                        format!("{line}:{}: {}", d.code, d.message.get(lang))
+                    })
                     .collect();
                 (!mine.is_empty()).then(|| (*i, mine.join("\n")))
             })
@@ -926,6 +1067,7 @@ fn test(
     json: bool,
     lang: Lang,
     sandbox: &sandbox_cli::Options,
+    seed: Option<i64>,
 ) -> ExitCode {
     let (filter, files) = test_files(arguments);
     if files.is_empty() {
@@ -967,11 +1109,18 @@ fn test(
             }
             Compiled::Tests(path, failing) => (path, failing),
         };
+        // The lines of the examples of documentation comments, for the traces of their tests.
+        let line_map = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|source| unio::doctest::augment(&source))
+            .map(|(_, map)| map)
+            .unwrap_or_default();
         let filter = filter.clone();
         let plan = plan.clone();
         let results = on_run_stack(move || {
             // SB-1: each file's tests run in the sandbox of its package.
             let _sandbox = sandbox_cli::enter_or_exit(&plan, index);
+            unio::interp::property::set_seed(seed);
             let program = unio::load_for_test(&[path], filter.as_deref());
             let module = program.modules.iter().position(|m| m.report).unwrap_or(0);
             let interp = unio::interp::Interp::new(program);
@@ -997,6 +1146,7 @@ fn test(
                         message: format!("the test does not compile:\n{message}\n"),
                         output: String::new(),
                         millis: 0,
+                        properties: Vec::new(),
                     });
                     continue;
                 }
@@ -1004,7 +1154,14 @@ fn test(
             }
             results
         });
-        for r in results {
+        for mut r in results {
+            if r.name.starts_with("doc: ") {
+                for (augmented, original) in &line_map {
+                    r.message = r
+                        .message
+                        .replace(&format!(":{augmented})"), &format!(":{original})"));
+                }
+            }
             if r.passed {
                 passed += 1;
             } else {
@@ -1018,16 +1175,39 @@ fn test(
                     for line in r.message.lines().chain(r.output.lines()) {
                         println!("     {line}");
                     }
+                    // What reproduces a property that failed (T-12).
+                    for p in &r.properties {
+                        println!(
+                            "     property {}: seed {}, case {}, sample seed {}, original {}, minimal {} after {} shrink attempts",
+                            unio::interp::property::SCHEME,
+                            p.seed,
+                            p.case_index,
+                            p.sample_seed,
+                            p.original,
+                            p.minimal,
+                            p.shrink_attempts
+                        );
+                        println!(
+                            "     replay: unio test --seed {} {} {display}",
+                            p.seed,
+                            json_text(&r.name)
+                        );
+                    }
                 }
             }
             records.push(format!(
-                "{{\"file\": {}, \"name\": {}, \"status\": \"{}\", \"time_ms\": {}, \"output\": {}, \"message\": {}}}",
+                "{{\"file\": {}, \"name\": {}, \"status\": \"{}\", \"time_ms\": {}, \"output\": {}, \"message\": {}, \"properties\": [{}]}}",
                 json_text(&display),
                 json_text(&r.name),
                 if r.passed { "passed" } else { "failed" },
                 r.millis,
                 json_text(&r.output),
-                json_text(&r.message)
+                json_text(&r.message),
+                r.properties
+                    .iter()
+                    .map(|p| property_json(p, &display, &r.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }

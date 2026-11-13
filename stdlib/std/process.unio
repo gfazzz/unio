@@ -39,6 +39,12 @@ public struct Output:
 ## deadline. Each of stdout and stderr holds at most 16 MiB (16_777_216 bytes); more fails with
 ## kind OutputTooLarge and stops the tree. Captured output counts against the heap limit of the
 ## policy, and exceeding it ends the program with code 102.
+## Example:
+##     try:
+##         let output = try run("git", ["--version"], timeout_seconds = 10)
+##         if output.status == 0: assert output.stdout.starts_with("git")
+##     on ProcessError as e:
+##         assert e.program == "git"
 public external function run(
     program as Text,
     arguments as List[Text],

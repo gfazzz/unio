@@ -1,15 +1,60 @@
-## Operations that combine or split several texts. Methods of a single text are in builtin/text.unio.
+## Operations on texts as a whole (requirements S-1, S-18): joining and splitting, characters from
+## code points, explicit Unicode normalization and grapheme clusters. Methods of a single text,
+## such as length, slice and replace, are in builtin/text.unio.
+##
+## Text never normalizes by itself: equality compares the exact scalars, so "\u{E9}" and
+## "e\u{301}" differ until both are normalized with the same form. Normalization and grapheme
+## clusters use the Unicode Character Database of unicode_version(), pinned in the runtime; a newer
+## version may cluster new characters differently, while the normalization of an assigned
+## character never changes (the stability policy of Unicode).
 unsafe module
 
 ## The parts with the separator between each two of them.
+## Example:
+##     assert join(["a", "b", "c"], ", ") == "a, b, c"
+##     assert join([], "-") == ""
 public external function join(parts as List[Text], separator as Text) returns Text
 
 ## The text cut at every occurrence of the separator; an empty separator is a fault.
 ## split("a.b", ".") is ["a", "b"] and split("", ".") is [""].
+## Example:
+##     assert split("a..b", ".") == ["a", "", "b"]
 public external function split(text as Text, separator as Text) returns List[Text]
 
 ## The character with the code point; none for a surrogate or a value above 0x10FFFF.
+## Example:
+##     assert from_code_point(0x41) == some("A") and from_code_point(0xD800) == none
 public external function from_code_point(code as Int) returns Option[Text]
+
+## Normalization Form C (canonical composition, Unicode Standard Annex #15): the canonical
+## decomposition, then each character combined with the preceding starter where Unicode composes
+## them. Canonically equivalent texts have the same NFC; use it before comparing or storing text
+## that may come in different spellings. The result may be shorter than the text.
+## Example:
+##     assert to_nfc("e\u{301}") == "\u{E9}"
+##     assert to_nfc("\u{E9}") == to_nfc("e\u{301}")
+public external function to_nfc(text as Text) returns Text
+
+## Normalization Form D (canonical decomposition): every character replaced by its canonical
+## decomposition, Hangul syllables by their jamo, and the combining marks in canonical order. The
+## result may be longer than the text.
+## Example:
+##     assert to_nfd("\u{E9}") == "e\u{301}"
+##     assert to_nfd("\u{E9}").length() == 2
+public external function to_nfd(text as Text) returns Text
+
+## The extended grapheme clusters of the text (Unicode Standard Annex #29): what a reader sees as
+## one character, such as a letter with its marks, a flag or a family emoji, each as a Text. The
+## clusters joined give the text again. The cost is O(n) time and space, like the scalar index.
+## Example:
+##     assert graphemes("e\u{301}x") == ["e\u{301}", "x"]
+##     assert graphemes("\u{1F1FA}\u{1F1F8}") == ["\u{1F1FA}\u{1F1F8}"]
+public external function graphemes(text as Text) returns List[Text]
+
+## The version of the Unicode Character Database that to_nfc, to_nfd and graphemes use.
+## Example:
+##     assert unicode_version() == "15.0.0"
+public external function unicode_version() returns Text
 
 test "join and split are inverse":
     assert split(join(["a", "b", "c"], ", "), ", ") == ["a", "b", "c"]
@@ -23,3 +68,44 @@ test "split keeps empty parts":
 
 function split_at_empty():
     let _ = split("a", "")
+
+test "normalization is explicit and canonical":
+    let composed = "caf\u{E9}"
+    let decomposed = "cafe\u{301}"
+    assert composed != decomposed
+    assert to_nfc(decomposed) == composed and to_nfd(composed) == decomposed
+    assert to_nfc(to_nfd(composed)) == composed
+    # Canonical order of marks: dot below (class 220) before acute (230).
+    assert to_nfd("q\u{301}\u{323}") == "q\u{323}\u{301}"
+    assert to_nfc("q\u{301}\u{323}") == "q\u{323}\u{301}"
+    # Hangul syllables are composed and decomposed by the algorithm of the standard.
+    assert to_nfd("\u{D55C}") == "\u{1112}\u{1161}\u{11AB}"
+    assert to_nfc("\u{1112}\u{1161}\u{11AB}") == "\u{D55C}"
+    # Composition exclusions stay decomposed; singletons are replaced.
+    assert to_nfc("\u{958}") == "\u{915}\u{93C}"
+    assert to_nfc("\u{212B}") == "\u{C5}"
+    # Normalization does not fold case or compatibility characters.
+    assert to_nfc("\u{FB01}") == "\u{FB01}" and to_nfc("E\u{301}") == "\u{C9}"
+    assert to_nfc("") == "" and to_nfd("ascii") == "ascii"
+
+test "grapheme clusters keep what a reader sees as one character":
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+    assert family.length() == 7
+    assert graphemes(family) == [family]
+    assert graphemes("\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}\u{1F1E9}") == [
+        "\u{1F1FA}\u{1F1F8}",
+        "\u{1F1EB}\u{1F1F7}",
+        "\u{1F1E9}",
+    ]
+    assert graphemes("a\r\nb") == ["a", "\r\n", "b"]
+    assert graphemes("\u{1F44D}\u{1F3FD}!") == ["\u{1F44D}\u{1F3FD}", "!"]
+    assert graphemes("\u{1112}\u{1161}\u{11AB}") == ["\u{1112}\u{1161}\u{11AB}"]
+    assert graphemes("") == []
+    let mixed = "Zoë, e\u{301}\u{1F469}\u{200D}\u{1F4BB}"
+    assert join(graphemes(mixed), "") == mixed
+    assert graphemes(mixed).length() == 7
+
+test "case conversion is locale-independent and may change length":
+    assert "\u{DF}".to_upper() == "SS"
+    assert "\u{130}".to_lower() == "i\u{307}"
+    assert "ΣΑΣ".to_lower() == "σας"

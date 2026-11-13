@@ -1,0 +1,309 @@
+## Randomness (requirement S-1), in two kinds that are kept apart.
+##
+## A Generator gives pseudo-random numbers. It is a value: seeded with seeded(n), it gives the same
+## sequence on every platform and in every run, which makes tests and simulations reproducible;
+## from_entropy() seeds it from the random source of the operating system instead. The generator
+## is MRG32k3a (P. L'Ecuyer, "Good parameters and implementations for combined multiple recursive
+## random number generators", Operations Research 47(1), 1999), with a period of about 2^191,
+## computed in Int without overflow. It is fast and statistically good, but it is not for
+## cryptography: its future output follows from past output. Never use it for keys, tokens,
+## passwords or anything an attacker must not guess.
+##
+## secure_bytes and secure_int are the only functions of the library fit for keys and secrets.
+## They read the random source of the operating system at every call (getentropy on Linux and
+## macOS, BCryptGenRandom on Windows), and when the system cannot give randomness they fail with
+## RandomError; they never fall back to a weaker generator.
+##
+## Effects (docs/semantics.md 8.2, RFC 0009): obtaining randomness from outside the program is the
+## derived effect random, which from_entropy, secure_bytes and secure_int have; it needs no
+## permission. A Generator made by seeded has no effect: its seed and its state are explicit, and
+## drawing a number changes the state as the change of a var value it is (the methods take
+## var self), which the checker accounts as a mutation, not as an effect.
+##
+## Tests: code that needs randomness takes a Generator, and a test passes seeded(n). Nothing can
+## replace the random source of the system with a seeded one: there is no global switch, variable
+## or policy for it, so from_entropy and the secure functions are never silently predictable.
+unsafe module
+
+let M1 as Int = 4294967087
+
+let M2 as Int = 4294944443
+
+let TWO_31 as Int = 2147483648
+
+let TWO_62 as Int = 4611686018427387904
+
+## The state of the generator: two recurrences of order three.
+public struct Generator:
+    var s10 as Int
+    var s11 as Int
+    var s12 as Int
+    var s20 as Int
+    var s21 as Int
+    var s22 as Int
+
+## A generator whose sequence depends only on the seed: different seeds give different states.
+## Example:
+##     var a = seeded(42)
+##     var b = seeded(42)
+##     assert a.next_int(0, 1000) == b.next_int(0, 1000)
+public function seeded(seed as Int) returns Generator:
+    # The seed as three parts (31, 31 and 2 bits), which keeps different seeds apart.
+    var low = seed % TWO_31
+    if low < 0: low = low + TWO_31
+    let rest = (seed - low) / TWO_31
+    var middle = rest % TWO_31
+    if middle < 0: middle = middle + TWO_31
+    let high = (rest - middle) / TWO_31 + 2
+    var generator = Generator(
+        s10 = low,
+        s11 = middle,
+        s12 = high + 1,
+        s20 = (middle * 69069 + low) % M2,
+        s21 = (low * 1103515 + high) % M2,
+        s22 = 12345,
+    )
+    for _ in range(0, 16):
+        let _ = generator.step()
+    return generator
+
+## A generator seeded from 64 bits of the random source of the operating system, different in every
+## run. It has the effect random.
+## Example:
+##     var generator = from_entropy()
+##     assert generator.next_float() < 1.0
+public function from_entropy() returns Generator:
+    return seeded(entropy())
+
+## 64 bits from the random source of the operating system; a system without one is a fault.
+external function entropy() returns Int
+
+## The random source of the operating system could not give randomness.
+public error RandomError:
+    reason as Text
+
+## count bytes from the random source of the operating system, fit for keys, nonces and tokens.
+## A count below 0 or above 1048576 is a fault; a system that cannot give randomness fails with
+## RandomError, never with weaker bytes. It has the effect random.
+## Example:
+##     let key = try secure_bytes(32) on RandomError as e:
+##         assert_fail(e.reason)
+##     assert key.length() == 32
+public external function secure_bytes(count as Int) returns Bytes fails with RandomError
+
+## An Int in low..high, high excluded, each equally likely, from the random source of the operating
+## system: for secret choices such as a one-time code. low >= high is a fault; a system that cannot
+## give randomness fails with RandomError. It has the effect random.
+## Example:
+##     let code = try secure_int(0, 1000000) on RandomError as e:
+##         assert_fail(e.reason)
+##     assert code >= 0 and code < 1000000
+public external function secure_int(low as Int, high as Int) returns Int fails with RandomError
+
+extend Generator:
+    ## The next output of MRG32k3a, in 0..M1.
+    function step(var self) returns Int:
+        var p1 = (1403580 * self.s11 - 810728 * self.s10) % M1
+        if p1 < 0: p1 = p1 + M1
+        self.s10 = self.s11
+        self.s11 = self.s12
+        self.s12 = p1
+        var p2 = (527612 * self.s22 - 1370589 * self.s20) % M2
+        if p2 < 0: p2 = p2 + M2
+        self.s20 = self.s21
+        self.s21 = self.s22
+        self.s22 = p2
+        let difference = p1 - p2
+        return difference + M1 if difference < 0 else difference
+
+    ## 31 uniform bits: the outputs that would make some values more likely are skipped.
+    function next_bits_31(var self) returns Int:
+        while true:
+            let value = self.step()
+            if value < 2147483439 or value >= TWO_31: return value % TWO_31
+        return 0
+
+    ## 62 uniform bits.
+    function next_bits_62(var self) returns Int:
+        return self.next_bits_31() * TWO_31 + self.next_bits_31()
+
+    ## Any Int, each of the 2^64 equally likely.
+    function next_any_int(var self) returns Int:
+        let high = self.next_bits_31() - 1073741824
+        let middle = self.next_bits_31()
+        let low = self.next_bits_31() % 4
+        return (high * TWO_31 + middle) * 4 + low
+
+    ## An Int in low..high, high excluded, each equally likely. low >= high is a fault.
+    ## Example:
+    ##     var generator = seeded(7)
+    ##     let die = generator.next_int(1, 7)
+    ##     assert die >= 1 and die <= 6
+    public function next_int(var self, low as Int, high as Int) returns Int:
+        if low >= high: assert_fail("Generator.next_int: low must be less than high")
+        match high.checked_subtract(low):
+            case some(width):
+                if width <= TWO_62:
+                    let limit = TWO_62 - TWO_62 % width
+                    while true:
+                        let value = self.next_bits_62()
+                        if value < limit: return low + value % width
+            case none: pass
+        while true:
+            let value = self.next_any_int()
+            if value >= low and value < high: return value
+        return low
+
+    ## A Float in 0.0..1.0, 1.0 excluded, from 53 uniform bits.
+    ## Example:
+    ##     var generator = seeded(1)
+    ##     let x = generator.next_float()
+    ##     assert x >= 0.0 and x < 1.0
+    public function next_float(var self) returns Float:
+        let bits = self.next_bits_31() * 4194304 + self.next_bits_31() % 4194304
+        return bits.to_float() / 9007199254740992.0
+
+    ## true or false, each with probability one half.
+    ## Example:
+    ##     var generator = seeded(3)
+    ##     let coin = generator.next_bool()
+    ##     assert coin or not coin
+    public function next_bool(var self) returns Bool:
+        return self.next_bits_31() % 2 == 1
+
+    ## true with the given probability; 0.0 or less never, 1.0 or more always.
+    ## Example:
+    ##     var generator = seeded(5)
+    ##     assert generator.chance(1.0) and not generator.chance(0.0)
+    public function chance(var self, probability as Float) returns Bool:
+        return self.next_float() < probability
+
+    ## An item of the list, each equally likely; none for an empty list.
+    ## Example:
+    ##     var generator = seeded(9)
+    ##     assert generator.choose(["a", "b"]) in [some("a"), some("b")]
+    public function choose[T](var self, items as List[T]) returns Option[T]:
+        if items.is_empty(): return none
+        return some(items[self.next_int(0, items.length())])
+
+    ## The items in a random order, each order equally likely (Fisher–Yates).
+    ## Example:
+    ##     var generator = seeded(11)
+    ##     assert generator.shuffled([1, 2, 3]).sorted() == [1, 2, 3]
+    public function shuffled[T](var self, items as List[T]) returns List[T]:
+        var result = items
+        var index = result.length() - 1
+        while index > 0:
+            let other = self.next_int(0, index + 1)
+            let item = result[index]
+            result[index] = result[other]
+            result[other] = item
+            index = index - 1
+        return result
+
+test "a seed fixes the sequence on every platform":
+    var generator = seeded(12345)
+    var values as List[Int] = []
+    for _ in range(0, 5):
+        values.append(generator.step())
+    var again = seeded(12345)
+    for value in values:
+        assert again.step() == value
+    var other = seeded(12346)
+    assert other.step() != values[0]
+
+test "the first outputs of a seed are fixed":
+    var generator = seeded(0)
+    assert [generator.next_int(0, 1000) for _ in range(0, 5)] == FIRST_OUTPUTS_OF_SEED_0
+
+let FIRST_OUTPUTS_OF_SEED_0 as List[Int] = [844, 981, 105, 640, 913]
+
+test "the recurrence is MRG32k3a":
+    # The published generator started with every state value 12345 gives 0.1270111220... first.
+    var generator = Generator(
+        s10 = 12345,
+        s11 = 12345,
+        s12 = 12345,
+        s20 = 12345,
+        s21 = 12345,
+        s22 = 12345,
+    )
+    assert generator.step() == 545508589
+    assert generator.step() == 1368065410
+    assert generator.step() == 1327943761
+
+test "seeds that differ only in high bits give different sequences":
+    var seen = Set[Int]()
+    for seed in [0, 2147483648, 4611686018427387904, MINIMUM_INT, MAXIMUM_INT, -1, 1]:
+        var generator = seeded(seed)
+        seen.insert(generator.next_any_int())
+    assert seen.length() == 7
+
+test "bounded integers stay in range and cover it":
+    var generator = seeded(99)
+    var counts = [0, 0, 0, 0, 0, 0]
+    for _ in range(0, 6000):
+        let value = generator.next_int(1, 7)
+        assert value >= 1 and value <= 6
+        counts[value - 1] = counts[value - 1] + 1
+    for count in counts:
+        assert count > 850 and count < 1150
+    for _ in range(0, 100):
+        let wide = generator.next_int(MINIMUM_INT, MAXIMUM_INT)
+        assert wide < MAXIMUM_INT
+        let top = generator.next_int(MAXIMUM_INT - 1, MAXIMUM_INT)
+        assert top == MAXIMUM_INT - 1
+    expect_fault(empty_range)
+
+function empty_range():
+    var generator = seeded(1)
+    let _ = generator.next_int(5, 5)
+
+test "floats are in the unit interval and spread over it":
+    var generator = seeded(2024)
+    var below_half = 0
+    for _ in range(0, 4000):
+        let x = generator.next_float()
+        assert x >= 0.0 and x < 1.0
+        if x < 0.5: below_half = below_half + 1
+    assert below_half > 1850 and below_half < 2150
+
+test "shuffling keeps every item and choosing picks one":
+    var generator = seeded(5)
+    let items = ["a", "b", "c", "d", "e"]
+    let mixed = generator.shuffled(items)
+    assert mixed.sorted() == items.sorted()
+    assert generator.choose(items) != none
+    let nothing as List[Text] = []
+    assert generator.choose(nothing) == none
+    assert generator.shuffled(nothing) == []
+
+test "secure randomness reads the system at every call":
+    let first = try secure_bytes(16) on RandomError as e:
+        assert_fail(e.reason)
+    let second = try secure_bytes(16) on RandomError as e:
+        assert_fail(e.reason)
+    assert first.length() == 16 and second.length() == 16
+    assert first != second
+    let empty = try secure_bytes(0) on RandomError as e:
+        assert_fail(e.reason)
+    assert empty.is_empty()
+    for _ in range(0, 50):
+        let value = try secure_int(-3, 3) on RandomError as e:
+            assert_fail(e.reason)
+        assert value >= -3 and value < 3
+    expect_fault(negative_count)
+    expect_fault(empty_secure_range)
+
+function negative_count():
+    let _ = try secure_bytes(-1) on RandomError as e:
+        assert_fail(e.reason)
+
+function empty_secure_range():
+    let _ = try secure_int(1, 1) on RandomError as e:
+        assert_fail(e.reason)
+
+test "entropy seeds differ between generators":
+    var first = from_entropy()
+    var second = from_entropy()
+    assert first.next_any_int() != second.next_any_int()

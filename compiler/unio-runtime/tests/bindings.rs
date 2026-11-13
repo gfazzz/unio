@@ -89,7 +89,40 @@ fn bindings_and_declarations_agree() {
     assert!(extra.is_empty(), "bound but not declared: {extra:?}");
     assert_eq!(
         declared.len(),
-        83,
-        "docs/runtime.md, section 7.1, counts 83 externals"
+        115,
+        "docs/runtime.md, section 7.1, counts 115 externals"
     );
+}
+
+/// R-5: the checklist of the two-person review lists every external the runtime binds, once,
+/// and nothing else, in English and in Russian (docs/extern-review.md).
+#[test]
+fn the_review_checklist_lists_every_external() {
+    let bound: BTreeSet<String> = unio_runtime::bindings()
+        .keys()
+        .map(|k| k.to_string())
+        .collect();
+    for document in ["docs/extern-review.md", "docs/ru/extern-review.md"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(document);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut listed = BTreeSet::new();
+        for line in text.lines() {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            if cells.len() > 3 && cells[1].parse::<usize>().is_ok() {
+                let name = cells[2].trim_matches('`').to_string();
+                assert!(
+                    listed.insert(name.clone()),
+                    "{document}: {name} is listed twice"
+                );
+            }
+        }
+        let missing: Vec<_> = bound.difference(&listed).collect();
+        let extra: Vec<_> = listed.difference(&bound).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "{document}: bound but not listed: {missing:?}; listed but not bound: {extra:?}"
+        );
+    }
 }

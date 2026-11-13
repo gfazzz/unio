@@ -2,25 +2,64 @@
 unsafe module
 
 ## The smallest Int.
+## Example:
+##     assert MINIMUM_INT == -9223372036854775807 - 1
 public let MINIMUM_INT as Int = -9223372036854775807 - 1
 
 ## The largest Int.
+## Example:
+##     assert MAXIMUM_INT.checked_add(1) == none
 public let MAXIMUM_INT as Int = 9223372036854775807
 
 extend Int:
     ## Sum, or none on overflow.
+    ## Example:
+    ##     assert 2.checked_add(3) == some(5) and MAXIMUM_INT.checked_add(1) == none
     public external function checked_add(self, other as Int) returns Option[Int]
 
     ## Difference, or none on overflow.
+    ## Example:
+    ##     assert 2.checked_subtract(3) == some(-1) and MINIMUM_INT.checked_subtract(1) == none
     public external function checked_subtract(self, other as Int) returns Option[Int]
 
     ## Product, or none on overflow.
+    ## Example:
+    ##     assert 6.checked_multiply(7) == some(42) and MAXIMUM_INT.checked_multiply(2) == none
     public external function checked_multiply(self, other as Int) returns Option[Int]
 
     ## Quotient truncated toward zero, or none when other is 0 or the result does not fit.
+    ## Example:
+    ##     assert 7.checked_divide(2) == some(3) and 1.checked_divide(0) == none
     public function checked_divide(self, other as Int) returns Option[Int]:
         if other == 0 or (self == MINIMUM_INT and other == -1): return none
         return some(self / other)
 
-    ## The nearest Float.
+    ## The nearest Float (round to nearest, ties to even).
+    ## Example:
+    ##     assert 3.to_float() == 3.0
     public external function to_float(self) returns Float
+
+    ## The absolute value; MINIMUM_INT, whose absolute value does not fit, is a fault like overflow.
+    ## Example:
+    ##     assert (-5).abs() == 5 and 5.abs() == 5
+    public function abs(self) returns Int:
+        return -self if self < 0 else self
+
+    ## The absolute value, or none for MINIMUM_INT.
+    ## Example:
+    ##     assert (-5).checked_abs() == some(5) and MINIMUM_INT.checked_abs() == none
+    public function checked_abs(self) returns Option[Int]:
+        if self == MINIMUM_INT: return none
+        return some(self.abs())
+
+    ## -1 for a negative number, 0 for zero, 1 for a positive number.
+    ## Example:
+    ##     assert (-8).sign() == -1 and 0.sign() == 0 and 3.sign() == 1
+    public function sign(self) returns Int:
+        if self < 0: return -1
+        return 0 if self == 0 else 1
+
+test "absolute values and signs":
+    assert MAXIMUM_INT.abs() == MAXIMUM_INT and (MINIMUM_INT + 1).abs() == MAXIMUM_INT
+    assert MINIMUM_INT.checked_abs() == none
+    assert MINIMUM_INT.sign() == -1
