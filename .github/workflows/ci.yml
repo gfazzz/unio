@@ -545,6 +545,8 @@ jobs:
             for file in $files; do
               if grep -a -q -i -F -e "$needle" "$file"; then
                 echo "::error::$file holds the path $needle"
+              # The strings that hold it, so that the source of the path can be found.
+              if command -v strings >/dev/null; then strings -a "$file" | grep -i -F -e "$needle" | sort | uniq -c | sort -rn | head -20; fi
                 found=1
               fi
             done
