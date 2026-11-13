@@ -1,6 +1,6 @@
 # What Unio takes from other languages, and what it declines
 
-Version: 0.3. Changes from 0.2: Ruby and Python brevity, RFC 0002. Changes from 0.1: RFC 0001 and precise cache contracts. Status: decisions recorded in `docs/concept.md` 0.14 and `docs/requirements.md` 0.13. This document keeps the reasoning in one place so that the same proposals are not re-argued.
+Version: 0.4. Changes from 0.3: Zero (Vercel Labs), compared after a reader's question. Changes from 0.2: Ruby and Python brevity, RFC 0002. Changes from 0.1: RFC 0001 and precise cache contracts. Status: decisions recorded in `docs/concept.md` 0.14 and `docs/requirements.md` 0.13. This document keeps the reasoning in one place so that the same proposals are not re-argued.
 
 The test for every borrowing is the principle of the concept: clear code, explicit behavior, controlled resources. A feature is taken only if it strengthens readability, explicitness, verifiability before execution, or fitness for AI. A feature that is powerful but gives a second way to write the same thing is declined.
 
@@ -68,4 +68,15 @@ Python: required labels and sorting keys; Ruby: a small complete collection API;
 | Idea | Decision | Where |
 |---|---|---|
 | Automatic reference counting instead of a tracing collector | Accepted for the interpreter of S5. Values never share mutable state and closures capture copies, so no value can reach itself and reference counting frees everything without a cycle collector; it also tells copy-on-write when a value is unshared, and it has no collection pauses. Whether the native runtime keeps it instead of the tracing collector of C-13 is decided by the measurements of S6, and a change of C-13 needs an RFC. | runtime.md 3, C-13 |
+
+## 10. Zero
+
+Zero (Zerolang, Vercel Labs, v0.3.4, Apache-2.0) is an experimental language that is also designed for AI agents. Compared from its README (github.com/vercel-labs/zerolang) after a reader asked; nothing here was taken from its compiler or documentation beyond that page.
+
+| Idea | Decision | Where |
+|---|---|---|
+| The semantic graph is the program: `zero.graph` is the compiler input, `.0` text files are projections for humans, and agents edit through `zero query` and checked `zero patch` operations | Declined. In Unio the text is the source of truth, because the program is written for a reader who is not its author and is reviewed with ordinary tools (diffs, pull requests). What the graph gives an agent, Unio gives as tool output over the text: `unio outline` for the shape of a file, `unio symbol` for a signature, effects, calls, usages, and content hash, and JSON diagnostics with fixes as patches. | concept 1, 7; C-11, C-11a |
+| An edit made against a stale graph hash is refused before the store is written | Partly in place: `unio symbol` gives every declaration a content hash over its body and everything it references, so an agent can name the exact version it read. Refusing an edit whose base hash is stale is not in 0.1; if it is needed, it belongs to the tools (a patch command that checks the C-11a hash), not to the language. | C-11a |
+| Capabilities passed as a value (`main(world: World)`, `world.out.write(...)`) | Declined in this form. Unio declares permissions once in the manifest, derives the effects of each function from its calls, rejects standard library use beyond the manifest, and enforces the manifest with the sandbox of the operating system. A capability parameter on every function that reaches the system is visible, but it repeats the manifest in every signature, the same cost that declined the `Context` of Odin. | concept 6; section 2 |
+| Agent instructions shipped with the compiler and matched to its version (`zero skills`) | Unio keeps the same material in `docs/ai.md`: the JSON formats, the recommended loop, and prompts. Shipping it with the toolchain, matched to its version, is a candidate for the tools, not a decision. | docs/ai.md |
 
