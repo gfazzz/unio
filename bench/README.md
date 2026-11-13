@@ -10,6 +10,8 @@ python3 bench/run.py --native             # also the executables of unio build -
 python3 bench/run.py --native --check-go  # the limits against Go of RFC 0003
 python3 bench/run.py --native --only empty --check-startup  # start-up of 7.1, at most 5 ms
 python3 bench/run.py --native --only free --check-free      # pause of freeing at once, RFC 0007
+python3 bench/run.py --only package --check-compile         # check and build of 10,000 lines, 7.1
+python3 bench/run.py --native --only copies --check-copies  # the cost of copies, L-11b
 ```
 
 With `--native`, each Unio program is also built with `unio build --release` into `bench/build/` and measured as "Unio native"; the ratios and `--check-floor` then refer to the native executable, and the interpreter stays in its own column.
@@ -27,6 +29,8 @@ The runner uses only the Python standard library. It generates the inputs into `
 | empty | [empty/](empty/) | nothing: the start of an empty program |
 | free | [free/](free/) | build about 100 MB of records (wide) or a chain of a million nested values (deep) and drop it at once |
 | tools | [../tools/](../tools/) | the project checkers in Unio against their Python references |
+| package | [package/](package/) | `unio check` and a full `unio build --release` of a generated package of 10,000 lines |
+| copies | [copies/](copies/) | the cost of a change of a list, a map, or a struct, shared or not, in place or through a copy |
 
 ## Rules of the comparison
 
@@ -36,6 +40,8 @@ The runner uses only the Python standard library. It generates the inputs into `
 - RFC 0003 adds limits for native executables against Go: at most 2x Go's time and at most 2x Go's peak memory plus 8 MB, with parity as the target; wc and loop are gated for 0.1, every benchmark for 0.2. `--check-go` exits with 1 when a gated benchmark is above a limit.
 - The start of an empty program (7.1: at most 5 ms) is the median of 101 runs, because one start takes a few milliseconds and a single run is noise; the best run and the spread are recorded too. It is timed by the launcher below, from its fork to the end of the program, so that the start of the launcher by Python is not counted. `--check-startup` exits with 1 when the native executable's median is above 5 ms; CI runs it on Linux x86-64.
 - The pause of freeing a structure at once (plan section 12, closure condition 3; RFC 0007) is the counterpart of a GC pause under reference counting. The program of free/ prints a line, drops the whole structure by one assignment, and prints another; the runner times the drop between the two lines as they arrive on a pipe, since the language has no clock. Each case runs 7 times in `unio run` and, with `--native`, as an executable; the median and the worst are reported with the peak memory. `--check-free` exits with 1 when the median pause of wide is above 1 ms per MB of peak memory, the row of 7.1 that RFC 0007 (accepted) put in place of "GC pause at a 100 MB heap at most 10 ms".
+- The compile time of 7.1 (`unio check` of a 10,000-line package at most 1 s, a full `--release` build of it at most 30 s) is measured on a package that [package/generate.py](package/generate.py) writes into `bench/data/package/`: at least 10,000 lines that are not blank (about 11,500 lines in all) in 53 modules, in the style `unio fmt` keeps. Two shared modules declare an interface with a default method, errors, generic structs with methods, and generic functions with constraints; each of 25 units has a model module (enums with fields, structs, errors, implementations of the interface, methods that fail and handle errors, test blocks) and a service module that imports its model, the model and the service of the unit before it, and the shared modules, so the imports form a chain through the package; `main.unio` imports every service. The generator uses only the Python standard library, and the package depends only on the number of lines. `unio check main.unio` and `unio build --release main.unio` run 5 times each in the package with its cache (`target/`) removed before every run, so each build is a full one; the median is compared with the limit, and the best run and the peak memory are recorded. The executable must print what `unio run` prints. `--check-compile` exits with 1 when a median is above its limit; CI runs it on Linux x86-64.
+- The cost of copies (L-11b: values are shared until changed; a change copies only the changed level; a change of an unshared value happens in place; appending to an unshared list takes amortized constant time) is measured by the program of [copies/](copies/), timed like free/: it prints a line after building its value and another after the changes. Each case runs at a size and at ten times the size, 5 times each in `unio run` and, with `--native`, as an executable, and the cost of one change is the median time divided by the number of changes. The cases in place (append, a list element, an append through a `var` parameter, a map put) and of one level (a field of a copy of a struct that holds a large list; row 0 of a copy of 64 rows whose other rows are large) must not cost more with the size of what they do not change: `--check-copies` exits with 1 when the cost at ten times the size is above 3 times the cost at the size, where a copy of the unchanged part would make it about 10. The cases that copy by design (an element of a copy of a list, a put into a copy of a map, an append to a list passed by value) record the cost per element copied. CI runs it on Linux x86-64.
 - Peak memory is the peak resident set size of each process, the smallest of the runs. It is measured by [peak_rss.c](peak_rss.c), a small launcher built with the system C compiler, because Linux counts the memory of the process that starts a program into the program's peak, and Python would add about 13 MB to every number. Without a C compiler, memory is not measured.
 
 ## Status
@@ -78,3 +84,26 @@ Freeing a structure at once (`python3 bench/run.py --only free --native`, 7 runs
 | deep: a chain of 1,000,000 nested enum values | 229 MB (234 MB `unio run`) | 92 to 108 ms | 91 to 118 ms | 0.33 to 0.51 ms |
 
 The pause at 100 MB is about five times the 10 ms of the former GC-pause row of 7.1; RFC 0007 bounds it per megabyte freed (1 ms per MB) for 0.1 and leaves incremental freeing as the mitigation for later. Before the change, freeing recursed once per level of nesting: on an 8 MiB stack a chain of nested lists aborted the process between 120,000 and 160,000 levels; on the 1 GiB stack of `unio run` and executables, 10,000,000 links still passed (a pause of 1.15 s). CI runs it on Linux x86-64 with `--check-free` (step "Pause of freeing a structure at once (RFC 0007)" of the job `benchmarks`).
+
+Compile time of a 10,000-line package and the cost of copies (`python3 bench/run.py --only package,copies --native --check-compile --check-copies`, Linux x86-64, 2026-11-13, measured locally while other builds ran on the machine; not yet run in CI). The package had 10,077 lines that are not blank (11,663 lines, 55 modules) in that run; the generator now writes 10,016 (11,542 lines, 53 modules).
+
+| Command | Median of 5 | Best | Peak memory | Limit of 7.1 |
+|---|---:|---:|---:|---:|
+| `unio check main.unio` | 0.194 s | 0.177 s | 39.8 MB | 1 s |
+| `unio build --release main.unio`, without the cache | 2.554 s | 2.419 s | 120.9 MB | 30 s |
+
+Both are within their limits by a wide margin, so no change of the compiler was needed. For scale: the same build from the cache of the package takes 0.47 s, and a package of 50,000 lines checks in 1.04 s and builds in 11.2 s (one run each), so both grow about linearly.
+
+| Case | Kind | `unio run`, per change at the size and at ten times it | Native | |
+|---|---|---:|---:|---|
+| append | in place | 117 ns, 123 ns (1.05x) | 177 ns, 185 ns (1.04x) | gated |
+| list_in_place | in place | 227 ns, 235 ns (1.03x) | 35 ns, 41 ns (1.17x) | gated |
+| list_var_parameter | in place | 168 ns, 219 ns (1.30x) | 221 ns, 180 ns (0.81x) | gated |
+| map_in_place | in place | 159 ns, 210 ns (1.32x) | 233 ns, 322 ns (1.38x) | gated |
+| struct_field | one level | 260 ns, 269 ns (1.03x) | 147 ns, 160 ns (1.09x) | gated |
+| nested_row | one level | 1.06 µs, 1.23 µs (1.17x) | 1.17 µs, 1.20 µs (1.02x) | gated |
+| list_copy | copy | 8.0 ns per element | 8.2 ns per element | recorded |
+| map_copy | copy | 43 ns per entry | 40 ns per entry | recorded |
+| list_by_value | copy | 7.1 ns per element | 7.2 ns per element | recorded |
+
+Every change in place or of one level stays within 1.4x at ten times the size (the gate is 3x), so a change does not copy what it does not change. A copy of a list of `Int` costs about 7 to 8 ns per element and a copy of a map about 40 ns per entry, in the interpreter and natively alike: copies and changes of collections go through the runtime in both. Natively, an append (177 ns) costs more than in the interpreter (117 ns).

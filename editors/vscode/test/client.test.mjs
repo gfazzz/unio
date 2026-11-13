@@ -43,6 +43,14 @@ const executable = ["debug", "release"]
     .map((profile) => join(repository, "compiler", "target", profile, process.platform === "win32" ? "unio.exe" : "unio"))
     .find((path) => existsSync(path));
 
+// CI sets UNIO_REQUIRE_PREREQUISITES=1 (.github/workflows/ci.yml, job `editors`, which builds
+// `unio`): there a missing `unio` fails this test instead of skipping it.
+const required = process.env.UNIO_REQUIRE_PREREQUISITES === "1";
+
+test("a unio built from this checkout is present where CI requires it", { skip: !required && "UNIO_REQUIRE_PREREQUISITES is not 1" }, () => {
+    assert.ok(executable, "no unio in compiler/target/debug or compiler/target/release: build it with cargo build --release -p unio");
+});
+
 test("a session with unio lsp: diagnostics of a buffer, then shutdown", { skip: !executable && "no unio built in compiler/target" }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "unio-vscode-"));
     try {

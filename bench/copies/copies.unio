@@ -1,0 +1,149 @@
+## Benchmark (h): the cost of copies of values (requirement L-11b).
+##
+## Usage: copies CASE SIZE OPS
+##
+## Each case builds its value of SIZE elements, prints "built", performs OPS changes, and prints
+## "done" with a sum of what it read, so that no change can be left out. The runner
+## (bench/run.py, benchmark copies) times the changes between the two lines, since the language
+## has no clock. The cases:
+##
+## - append: OPS appends to an unshared list (amortized constant time each).
+## - list_in_place: OPS element changes of an unshared list of SIZE (in place).
+## - list_var_parameter: OPS appends through a var parameter to a list of SIZE (in place).
+## - map_in_place: OPS puts into an unshared map of SIZE keys (in place).
+## - struct_field: OPS changes of a field of a copy of a struct that holds a list of SIZE; only
+##   the struct is copied, the list stays shared.
+## - nested_row: OPS changes of row 0 of a copy of 64 rows, the other rows SIZE long; only the
+##   outer list and the changed row are copied, the other rows stay shared.
+## - list_copy: OPS changes of an element of a copy of a list of SIZE; each copies the list.
+## - map_copy: OPS puts into a copy of a map of SIZE keys; each copies the map.
+## - list_by_value: OPS calls of a function that appends to its copy of a list of SIZE.
+import std.args
+
+struct Holder:
+    items as List[Int]
+    var count as Int = 0
+
+function numbers(size as Int) returns List[Int]:
+    var items as List[Int] = []
+    for i in range(0, size):
+        items.append(i)
+    return items
+
+function keyed(size as Int) returns Map[Int, Int]:
+    var map as Map[Int, Int] = {}
+    for i in range(0, size):
+        map.put(i, i)
+    return map
+
+function append_one(var items as List[Int], value as Int):
+    items.append(value)
+
+function appended_length(items as List[Int], value as Int) returns Int:
+    var local = items
+    local.append(value)
+    return local.length()
+
+function append(ops as Int) returns Int:
+    var items as List[Int] = []
+    for i in range(0, ops):
+        items.append(i)
+    return items.length()
+
+function list_in_place(size as Int, ops as Int) returns Int:
+    var items = numbers(size)
+    print("built")
+    var sum = 0
+    for i in range(0, ops):
+        let index = i % size
+        items[index] = i
+        sum = sum + items[index]
+    return sum
+
+function list_var_parameter(size as Int, ops as Int) returns Int:
+    var items = numbers(size)
+    print("built")
+    for i in range(0, ops):
+        append_one(items, i)
+    return items.length()
+
+function map_in_place(size as Int, ops as Int) returns Int:
+    var map = keyed(size)
+    print("built")
+    for i in range(0, ops):
+        map.put(i % size, i)
+    return map.length()
+
+function struct_field(size as Int, ops as Int) returns Int:
+    let holder = Holder(items = numbers(size))
+    print("built")
+    var sum = 0
+    for i in range(0, ops):
+        var copy = holder
+        copy.count = i
+        sum = sum + copy.count + copy.items.length()
+    return sum
+
+function nested_row(size as Int, ops as Int) returns Int:
+    var rows as List[List[Int]] = [[0]]
+    for _ in range(1, 64):
+        rows.append(numbers(size))
+    let table = rows
+    print("built")
+    var sum = 0
+    for i in range(0, ops):
+        var copy = table
+        copy[0][0] = i
+        sum = sum + copy[0][0]
+    return sum
+
+function list_copy(size as Int, ops as Int) returns Int:
+    let items = numbers(size)
+    print("built")
+    var sum = 0
+    for i in range(0, ops):
+        var copy = items
+        copy[0] = i
+        sum = sum + copy[0]
+    return sum
+
+function map_copy(size as Int, ops as Int) returns Int:
+    let map = keyed(size)
+    print("built")
+    var sum = 0
+    for i in range(0, ops):
+        var copy = map
+        copy.put(0, i)
+        sum = sum + (copy.get(0) or 0)
+    return sum
+
+function list_by_value(size as Int, ops as Int) returns Int:
+    let items = numbers(size)
+    print("built")
+    var sum = 0
+    for i in range(0, ops):
+        sum = sum + appended_length(items, i)
+    return sum
+
+public function main() returns Int:
+    let words = args.list()
+    let mode = words.get(0) or ""
+    let size = (words.get(1) or "").to_int() or 0
+    let ops = (words.get(2) or "").to_int() or 0
+    var result = 0
+    if mode == "append":
+        print("built")
+        result = append(ops)
+    else if mode == "list_in_place": result = list_in_place(size, ops)
+    else if mode == "list_var_parameter": result = list_var_parameter(size, ops)
+    else if mode == "map_in_place": result = map_in_place(size, ops)
+    else if mode == "struct_field": result = struct_field(size, ops)
+    else if mode == "nested_row": result = nested_row(size, ops)
+    else if mode == "list_copy": result = list_copy(size, ops)
+    else if mode == "map_copy": result = map_copy(size, ops)
+    else if mode == "list_by_value": result = list_by_value(size, ops)
+    else:
+        print_error("usage: copies CASE SIZE OPS")
+        return 2
+    print("done {result}")
+    return 0
