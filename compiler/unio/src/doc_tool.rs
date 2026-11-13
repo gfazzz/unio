@@ -254,7 +254,14 @@ fn replace(path: &Path, text: &str) -> std::io::Result<()> {
 
 /// The command that opens the index: `BROWSER`, else the opener of the system.
 fn opener(index: &Path) -> (String, Vec<String>) {
-    let page = index.to_string_lossy().into_owned();
+    // A canonical path on Windows begins with \\?\, which programs that open documents do not
+    // take: the plain form names the same file.
+    let shown = index.to_string_lossy();
+    let page = shown
+        .strip_prefix(r"\\?\")
+        .filter(|rest| !rest.starts_with("UNC\\"))
+        .unwrap_or(&shown)
+        .to_string();
     if let Some(browser) = std::env::var("BROWSER")
         .ok()
         .filter(|b| !b.trim().is_empty())

@@ -287,6 +287,27 @@ fn run(program: &str, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Unmounts a file system, trying again while it is busy: an XFS state just checked can stay
+/// busy for a moment (umount gave status 32 on the runner, run 43456804573). A mount that does
+/// not go away fails the trial with the last error.
+fn unmount(point: &Path) {
+    let mut last = String::new();
+    for _ in 0..50 {
+        let _ = Command::new("sync").status();
+        let output = Command::new("umount").arg(point).output().unwrap();
+        if output.status.success() {
+            return;
+        }
+        last = format!(
+            "{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("umount {}: {last}", point.display());
+}
+
 fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }
@@ -936,7 +957,7 @@ fn make_base(file_system: &str, base: &Path, mount_point: &Path) {
     fs::write(data.join("a.txt"), content("a", 0)).unwrap();
     fs::write(data.join("neighbour.txt"), "neighbour").unwrap();
     fs::write(data.join("in-place.txt"), content("p", 0)).unwrap();
-    run("umount", &[text(mount_point)]);
+    unmount(mount_point);
 }
 
 /// Runs the program on the mounted device and marks each durable commit it reports.
@@ -1033,7 +1054,7 @@ fn replay(file_system: &str, base: &Path, log: &[Entry], work: &Path) -> Result<
             ));
         }
         let result = check_state(&mount_point, &required);
-        run("umount", &[text(&mount_point)]);
+        unmount(&mount_point);
         let seen = result.map_err(|e| format!("after entry {k} of {}: {e}", log.len()))?;
         summary.states += 1;
         summary.a_contents.insert(seen.a);
@@ -1077,7 +1098,7 @@ fn trial(kind: Kind, file_system: &str) {
     run_program(&recorder, &root);
     write_in_place(&root);
     recorder.mark("end");
-    run("umount", &[text(&root)]);
+    unmount(&root);
     let (log_path, final_image) = recorder.finish();
     let log = read_log(&log_path).unwrap();
     // The whole log on the base image gives the device the run left: no write is missing.

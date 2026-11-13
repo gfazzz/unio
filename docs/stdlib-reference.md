@@ -2491,7 +2491,10 @@ assert arguments.get("config") == some("app.toml")
 #### `checked_get`
 
 ```unio
-public function checked_get(self, name as Text) returns Option[Text] fails with DeclarationError
+public function checked_get(
+    self,
+    name as Text,
+) returns Option[Text] fails with DeclarationError
 ```
 
 The value of an option or positional as get gives it, or DeclarationError for a name that is
@@ -2546,7 +2549,10 @@ assert arguments.values("tag") == ["a", "b"]
 #### `checked_values`
 
 ```unio
-public function checked_values(self, name as Text) returns List[Text] fails with DeclarationError
+public function checked_values(
+    self,
+    name as Text,
+) returns List[Text] fails with DeclarationError
 ```
 
 The values as values gives them, or DeclarationError for a name that is not declared: the
@@ -3111,7 +3117,11 @@ assert "{amount.round(2, Rounding.Down)}" == "2.67"
 #### `checked_round`
 
 ```unio
-public function checked_round(self, places as Int, rounding as Rounding) returns Option[Decimal]
+public function checked_round(
+    self,
+    places as Int,
+    rounding as Rounding,
+) returns Option[Decimal]
 ```
 
 The value rounded to at most places digits after the point, or none for negative places:
@@ -3229,7 +3239,11 @@ assert from_int(-1).divide_rounded(from_int(3), 4, Rounding.HalfEven).to_fixed(2
 #### `checked_to_fixed`
 
 ```unio
-public function checked_to_fixed(self, places as Int, rounding as Rounding) returns Option[Text]
+public function checked_to_fixed(
+    self,
+    places as Int,
+    rounding as Rounding,
+) returns Option[Text]
 ```
 
 The text with exactly places digits after the point, or none for negative places: the safe
@@ -5154,7 +5168,10 @@ assert code >= 0 and code < 1000000
 ### `checked_secure_int`
 
 ```unio
-public function checked_secure_int(low as Int, high as Int) returns Option[Int] fails with RandomError
+public function checked_secure_int(
+    low as Int,
+    high as Int,
+) returns Option[Int] fails with RandomError
 ```
 
 An Int as secure_int gives it, or none when low >= high: the safe form of secure_int. It has the
