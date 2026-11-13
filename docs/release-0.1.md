@@ -30,7 +30,7 @@ All on one fixed commit, after the blockers above:
 
 1. **The CI matrix is green on every job** ([ci.yml](../.github/workflows/ci.yml)): Linux x86-64, Linux arm64, macOS arm64 and Windows x86-64, including the sandbox suites SB-8 and SB-15 (R-7a), the control set (R-10 check A), the benchmarks and limits against Go (RFC 0003), the pause of freeing (RFC 0007), the pinned toolchain records, the release build, the installed `unio` without a checkout, and the independent reproducible build.
 2. **The sanitizers** ([sanitizers.yml](../.github/workflows/sanitizers.yml)): the runtime under ASan and MSan and every Unio test through an ASan build.
-3. **24 hours of fuzzing** ([fuzz.yml](../.github/workflows/fuzz.yml), started by hand): five stages of 300 minutes on the same commit, every target its full time, and the `fuzz-evidence` report saying "met" (R-1). It is copied to `bench/results/` with the release.
+3. **24 hours of fuzzing** ([fuzz.yml](../.github/workflows/fuzz.yml); it needs no person and can be started automatically on the fixed candidate): five stages of 300 minutes on the same commit, every target its full time, and the `fuzz-evidence` report saying "met" (R-1). It is copied to `bench/results/` with the release.
 4. **The local checks** of [AGENTS.md](../AGENTS.md) and [compiler/README.md](../compiler/README.md) for anyone preparing a change: `cargo fmt --check`, `cargo clippy --all-targets -D warnings` for the three host targets, `cargo test --workspace`, `unio fmt --check`, `unio check` and `unio test` over the sources, and the four Python checks.
 
 ## What only people can do
@@ -38,7 +38,7 @@ All on one fixed commit, after the blockers above:
 - **Review the external functions (R-5).** Two people review all 115 external functions of the standard library against [extern-review.md](extern-review.md), on the full SHA of the candidate, record their findings, and check the fixes again. The automatic part (sanitizers) is not a substitute; the release is not published while either reviewer column is pending.
 - **Sign the release with the release key.** The production key is kept offline and never given to CI (CI signs only with a key of its run). The release manager signs the verified bytes after installation and reproducibility are shown, and the published set is checked against the public key from an independent trusted channel ([packages.md](packages.md), [cryptography.md](cryptography.md)).
 - **Decide deferrals.** A requirement that is not met by the release is either fixed or deferred by an RFC that the project lead accepts; nothing is deferred by default.
-- **Run the release.** Start the fuzzing workflow on the final candidate, check its evidence, publish the release notes with the results of 7.1 and of R-10.
+- **Publish the release.** Publish the release notes with the results of 7.1, of R-10 and of the fuzzing evidence. The release is signed by the holder of the release key, who controls it.
 
 ## Help that is welcome
 
