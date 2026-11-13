@@ -127,6 +127,48 @@ impl Slot {
     }
 }
 
+/// The block size from which glibc maps a block of its own instead of taking it from its heap:
+/// its default, 128 KiB.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MMAP_THRESHOLD: i32 = 128 * 1024;
+
+/// The free space at the top of a heap of glibc above which a free gives memory back to the
+/// system: the most its own adjustment reaches on 64-bit machines, 64 MiB (twice its largest
+/// mmap threshold). Fixing the mmap threshold would otherwise leave it at 128 KiB, and giving
+/// back the top of the heap of a thread's arena reads `/proc/sys/vm/overcommit_memory` first,
+/// a system call that the core filter of S-12 forbids (`compiler/unio/tests/layers.rs`).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const TRIM_THRESHOLD: i32 = 64 * 1024 * 1024;
+
+/// Fixes the mmap threshold of glibc before a program runs (RFC 0007, the pause of freeing at
+/// once, `bench/free/`). glibc raises the threshold to the size of each mapped block that is
+/// freed, so the threshold of a program depended on what ran before it in the process: after
+/// the front end of `unio run` freed a buffer of about 1 MB, the buffers of the program's large
+/// lists and maps came from the heap of the allocator instead, and freeing one of them during a
+/// drop consolidated every small block freed before it, about 60 ms for the 100 MB of the
+/// benchmark, which doubled the pause (1.2 ms per MB on CI against the bound of 1). A fixed
+/// threshold also stops the dynamic adjustment, so the pause no longer depends on the history
+/// of the process; the trim threshold is fixed with it ([`TRIM_THRESHOLD`]). `mallopt` makes no
+/// system call and counts nothing. Elsewhere the allocator of the system has no such threshold.
+fn fix_mmap_threshold() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            extern "C" {
+                fn mallopt(param: i32, value: i32) -> i32;
+            }
+            const M_TRIM_THRESHOLD: i32 = -1;
+            const M_MMAP_THRESHOLD: i32 = -3;
+            // SAFETY: mallopt takes two integers and only changes a parameter of the allocator.
+            unsafe {
+                mallopt(M_TRIM_THRESHOLD, TRIM_THRESHOLD);
+                mallopt(M_MMAP_THRESHOLD, MMAP_THRESHOLD);
+            }
+        });
+    }
+}
+
 /// The bytes a layout requests: its size rounded up to its alignment.
 #[inline]
 pub fn requested(layout: Layout) -> usize {
@@ -283,6 +325,7 @@ impl Meter {
     /// # Panics
     /// When more than 1,024 runtimes are alive at once in the process.
     pub fn start(limit: Option<usize>) -> Meter {
+        fix_mmap_threshold();
         // Taking a slot allocates nothing, so nothing is counted before the meter is set.
         let slot = (0..METERS)
             .find(|&i| {

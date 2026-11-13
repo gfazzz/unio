@@ -93,8 +93,11 @@ pub fn sources_digest(files: &[(PathBuf, String)]) -> String {
 }
 
 /// The directory of `unio.toml` nearest above the file, by the canonical path of the file.
+/// The compile step of `unio build` looks its key up in the worker, where on Windows
+/// `std::fs::canonicalize` is refused inside the AppContainer (docs/runtime.md 9.4): the path
+/// is normalized as the sandbox does it, or no key was made there and nothing was stored.
 pub fn package_root(file: &Path) -> Option<PathBuf> {
-    let absolute = std::fs::canonicalize(file).ok()?;
+    let absolute = unio_runtime::sandbox::canonical(file).ok()?;
     absolute
         .parent()?
         .ancestors()
