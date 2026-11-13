@@ -5,6 +5,7 @@
 | [concept.md](concept.md) | Refined language concept: syntax, types, errors, memory, modules, security, working with AI; settled decisions and their rationale |
 | [requirements.md](requirements.md) | Requirements specification for release 0.1 "Core": scope, language, compiler, library, tooling, acceptance |
 | [plan.md](plan.md) | Work plan: stages, exit criteria, roles, risks, metrics, later releases |
+| [release-0.1.md](release-0.1.md) | Release 0.1: open blockers, the checks a candidate must pass, and the tasks only people can do |
 | [status.md](status.md) | Implementation status: every requirement of 0.1 with its implementation, check, platforms, and known limits; updated with each change |
 | [cryptography.md](cryptography.md) | Post-quantum policy: algorithms, trust, compatibility, and acceptance |
 | [extern-review.md](extern-review.md) | Review of the external functions of the standard library: every one with its declaration, binding, authority, and what two reviewers check (R-5), and the sanitizer runs |
