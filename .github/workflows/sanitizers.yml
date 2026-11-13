@@ -59,11 +59,15 @@ jobs:
           # The workers of the tool limit their address space to compile.memory_bytes, and the
           # shadow memory of a sanitizer is far larger; the operator's policy lifts the limit.
           printf '[compile]\nmemory_bytes = 9_223_372_036_854_775_807\n' > policy.toml
+      # The test of the allocator's overhead measures glibc malloc through mallinfo2; a
+      # sanitizer replaces malloc with its own allocator, so the figures mean nothing here
+      # (MemorySanitizer reports the result as uninitialized). It runs in ci.yml on Linux.
       - name: Runtime tests under AddressSanitizer
         run: |
           RUSTFLAGS="-Zsanitizer=address -Clink-arg=$RUNNER_TEMP/sanitizers/options.o" \
           CARGO_TARGET_DIR=target/asan \
-            cargo "+$NIGHTLY" test --locked -p unio-runtime --tests --target "$TARGET"
+            cargo "+$NIGHTLY" test --locked -p unio-runtime --tests --target "$TARGET" -- \
+              --skip heap::tests::the_overhead_of_the_allocator_is_measured
       - name: Every test block, run by unio under AddressSanitizer
         working-directory: .
         run: |
@@ -75,4 +79,5 @@ jobs:
         run: |
           RUSTFLAGS="-Zsanitizer=memory -Zsanitizer-memory-track-origins -Clink-arg=$RUNNER_TEMP/sanitizers/options.o" \
           CARGO_TARGET_DIR=target/msan \
-            cargo "+$NIGHTLY" test --locked -Zbuild-std -p unio-runtime --tests --target "$TARGET"
+            cargo "+$NIGHTLY" test --locked -Zbuild-std -p unio-runtime --tests --target "$TARGET" -- \
+              --skip heap::tests::the_overhead_of_the_allocator_is_measured
