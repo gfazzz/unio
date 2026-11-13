@@ -981,19 +981,20 @@ pub fn start(
     let deadline = Duration::from_secs(spec.limits.wall_seconds);
     let mut pause = Duration::from_micros(200);
     let mut stopped: Option<String> = None;
-    let status = loop {
+    // The status of the worker and the CPU time it used, read when it is reaped.
+    let ended: Option<(std::process::ExitStatus, Duration)> = loop {
         // The worker has ended but is not reaped yet: what is left of its tree is stopped
         // while the number of its process group still belongs to it.
         match tree::has_exited(&mut child) {
             Ok(true) => {
                 process_tree.stop();
-                break child.wait().ok();
+                break reap(&mut child);
             }
             Ok(false) => {}
             Err(_) => {
                 process_tree.stop();
                 let _ = child.kill();
-                break child.wait().ok();
+                break reap(&mut child);
             }
         }
         if started.elapsed() >= deadline {
@@ -1009,11 +1010,13 @@ pub fn start(
         if stopped.is_some() {
             process_tree.stop();
             let _ = child.kill();
-            break child.wait().ok();
+            break reap(&mut child);
         }
         std::thread::sleep(pause);
         pause = (pause * 2).min(Duration::from_millis(10));
     };
+    let status = ended.map(|(status, _)| status);
+    let cpu_time = ended.map(|(_, cpu)| cpu);
     let data = out_thread.join().unwrap_or_default();
     let tail = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).into_owned();
     if stopped.is_none() && status.is_some_and(|s| s.code().is_none() || !s.success()) {
@@ -1032,18 +1035,11 @@ pub fn start(
             ));
         }
     }
-    #[cfg(unix)]
     if stopped.is_none() {
-        use std::os::unix::process::ExitStatusExt;
-        // The system ends a worker that spent its processor time (`RLIMIT_CPU`, whose soft and
-        // hard limits are equal) with SIGKILL (Linux) or SIGXCPU; it cannot have spent it in
-        // less wall time, since it computes on one thread at a time.
-        const SIGKILL: i32 = 9;
-        const SIGXCPU: i32 = 24;
-        if let (Some(seconds), Some(SIGKILL | SIGXCPU)) =
-            (spec.limits.cpu_seconds, status.and_then(|s| s.signal()))
+        if let (Some(seconds), Some(status), Some(cpu)) =
+            (spec.limits.cpu_seconds, status, cpu_time)
         {
-            if started.elapsed() >= Duration::from_secs(seconds) {
+            if spent_cpu_limit(status, cpu, seconds) {
                 stopped = Some(format!(
                     "it used more than the CPU time limit of {seconds} s"
                 ));
@@ -1065,12 +1061,131 @@ pub fn start(
         }),
         None => {
             eprintln!(
-                "unio: error: the worker of the tool ended abnormally ({})",
-                status.map_or_else(|| "unknown".to_string(), |s| s.to_string())
+                "unio: error: the worker of the tool ended abnormally ({}{})",
+                status.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+                cpu_time.map_or_else(String::new, |cpu| format!(
+                    ", after {:.3} s of CPU time",
+                    cpu.as_secs_f64()
+                ))
             );
             Err(EXIT_ABNORMAL)
         }
     }
+}
+
+/// Whether a worker that ended with `status` after `cpu` of processor time was ended by the CPU
+/// limit of `seconds`, which the system enforces: on Linux and macOS `RLIMIT_CPU` (soft and
+/// hard limits equal) ends it with SIGKILL (Linux) or SIGXCPU (macOS) once its user and system
+/// time reach the limit; on Windows its Job Object ends it once its user time reaches the
+/// limit. The decision rests on the CPU time the worker used, as the system accounted it when
+/// it was reaped, never on wall time: a worker spends its CPU time on several threads, so it
+/// can reach the limit in less wall time, and a worker killed by anything else (another
+/// process, the out-of-memory killer) well before its limit is not reported as over it. The
+/// time reported to the parent trails the time the limit counts: the kernel samples it at ticks
+/// and scales user and system time apart (Linux reported 0.994 s to 0.999 s for a worker it
+/// killed at a limit of 1 s), hence a margin of 5 % of the limit.
+fn spent_cpu_limit(status: std::process::ExitStatus, cpu: Duration, seconds: u64) -> bool {
+    let limit = Duration::from_secs(seconds);
+    let reached = cpu >= limit - limit / 20;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        const SIGKILL: i32 = 9;
+        const SIGXCPU: i32 = 24;
+        reached && matches!(status.signal(), Some(SIGKILL | SIGXCPU))
+    }
+    #[cfg(not(unix))]
+    {
+        reached && !status.success()
+    }
+}
+
+/// Reaps the worker: its status and the processor time it used (user and system time on Unix,
+/// from `wait4`; user time on Windows, which its Job Object limits, from `GetProcessTimes`).
+#[cfg(unix)]
+fn reap(child: &mut tree::Child) -> Option<(std::process::ExitStatus, Duration)> {
+    use std::os::unix::process::ExitStatusExt;
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Timeval {
+        seconds: i64,
+        #[cfg(target_os = "macos")]
+        microseconds: i32,
+        #[cfg(target_os = "macos")]
+        _padding: i32,
+        #[cfg(not(target_os = "macos"))]
+        microseconds: i64,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Rusage {
+        user: Timeval,
+        system: Timeval,
+        // The other fields of struct rusage: fourteen longs on Linux and macOS.
+        rest: [i64; 14],
+    }
+    extern "C" {
+        fn wait4(pid: i32, status: *mut i32, options: i32, usage: *mut Rusage) -> i32;
+    }
+    let pid = i32::try_from(child.id()).ok()?;
+    let mut raw = 0i32;
+    let mut usage = Rusage::default();
+    loop {
+        // SAFETY: the pid is our child, not reaped yet (`tree::has_exited` waits with
+        // WNOWAIT); status and usage are writable structures of the sizes wait4 writes.
+        let result = unsafe { wait4(pid, &mut raw, 0, &mut usage) };
+        if result == pid {
+            break;
+        }
+        if result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return None;
+    }
+    let time = |t: Timeval| {
+        Duration::from_secs(u64::try_from(t.seconds).unwrap_or(0))
+            + Duration::from_micros(u64::try_from(t.microseconds).unwrap_or(0))
+    };
+    Some((
+        std::process::ExitStatus::from_raw(raw),
+        time(usage.user) + time(usage.system),
+    ))
+}
+
+#[cfg(windows)]
+fn reap(child: &mut tree::Child) -> Option<(std::process::ExitStatus, Duration)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetProcessTimes(
+            process: *mut std::ffi::c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+    }
+    let status = child.wait().ok()?;
+    let (mut c, mut e, mut k, mut u) = Default::default();
+    // SAFETY: the process handle belongs to the child and stays open after it ended; four
+    // FILETIME outputs.
+    let read = unsafe { GetProcessTimes(child.as_raw_handle(), &mut c, &mut e, &mut k, &mut u) };
+    let user = if read == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_nanos(((u64::from(u.high) << 32) | u64::from(u.low)).saturating_mul(100))
+    };
+    Some((status, user))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn reap(child: &mut tree::Child) -> Option<(std::process::ExitStatus, Duration)> {
+    child.wait().ok().map(|status| (status, Duration::ZERO))
 }
 
 /// Starts the worker: the same executable with [`ARG`], the role, and the arguments, with
@@ -1295,6 +1410,7 @@ mod probe {
                     .map(|s| s.to_string())
                     .map_err(|e| e.to_string()),
                 "fork" => fork(),
+                "kill" => kill_self(),
                 "connect" => std::net::TcpStream::connect(argument)
                     .map(|_| String::new())
                     .map_err(|e| e.to_string()),
@@ -1358,5 +1474,51 @@ mod probe {
     #[cfg(not(unix))]
     fn fork() -> Result<String, String> {
         Err("no fork on this system".into())
+    }
+
+    /// Ends the worker with SIGKILL, as a signal from outside would: a kill that is not the
+    /// CPU limit of the system (tests/workers.rs).
+    #[cfg(unix)]
+    fn kill_self() -> Result<String, String> {
+        extern "C" {
+            fn raise(signal: i32) -> i32;
+        }
+        report("kill", Ok("killing".into()));
+        // SAFETY: SIGKILL ends this process; nothing runs after it.
+        unsafe {
+            raise(9);
+        }
+        Err(std::io::Error::last_os_error().to_string())
+    }
+
+    #[cfg(not(unix))]
+    fn kill_self() -> Result<String, String> {
+        Err("no signals on this system".into())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::spent_cpu_limit;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::time::Duration;
+
+    /// Only the signals of the CPU limit, after the CPU time of the limit, are its end: a kill
+    /// before it, an exit with a code, or another signal is not, however long the worker ran.
+    #[test]
+    fn the_cpu_limit_is_told_by_the_cpu_time_and_the_signal() {
+        let killed = ExitStatus::from_raw(9);
+        let xcpu = ExitStatus::from_raw(24);
+        let ms = Duration::from_millis;
+        assert!(spent_cpu_limit(killed, ms(1000), 1));
+        assert!(spent_cpu_limit(killed, ms(994), 1));
+        assert!(spent_cpu_limit(xcpu, ms(1200), 1));
+        assert!(!spent_cpu_limit(killed, ms(200), 1));
+        assert!(!spent_cpu_limit(killed, ms(9000), 10));
+        assert!(!spent_cpu_limit(xcpu, ms(0), 1));
+        // An exit with code 1 and a SIGTERM after the limit's CPU time.
+        assert!(!spent_cpu_limit(ExitStatus::from_raw(256), ms(2000), 1));
+        assert!(!spent_cpu_limit(ExitStatus::from_raw(15), ms(2000), 1));
     }
 }

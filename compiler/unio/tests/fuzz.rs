@@ -3,6 +3,9 @@
 //! found them.
 
 mod common;
+#[cfg(unix)]
+#[path = "../fuzz/supervisor.rs"]
+mod supervisor;
 #[path = "../fuzz/targets.rs"]
 mod targets;
 
@@ -196,4 +199,118 @@ fn every_fuzz_target_runs() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- the supervisor of the fuzzer
+
+/// A worker of the supervisor's protocol in `sh`, which behaves as `mode` says: `ok` runs inputs
+/// until the end and counts them, `die-early` exits with an error before it writes an input,
+/// `crash` aborts on its first input, `idle` ends at once with success, running nothing.
+#[cfg(unix)]
+const FAKE_WORKER: &str = r#"
+mode=$1 id=$2 target=$3 work=$4 until=$5
+dir="$work/scratch-$id"
+mkdir -p "$dir"
+case "$mode" in
+die-early) echo "fake worker $id: died before any input" >&2; exit 3 ;;
+idle) exit 0 ;;
+esac
+n=0
+while [ "$(date +%s)" -lt "$until" ]; do
+    n=$((n + 1))
+    printf 'input %s of %s\n' "$n" "$target" > "$dir/current"
+    if [ "$mode" = crash ]; then echo "fake worker $id: crashing" >&2; kill -ABRT $$; fi
+    printf 'execs %s\ncorpus 1\nedges 2\ncounters 10\nfindings 0\ncpu_ms 0\n' "$n" > "$dir/stats"
+    sleep 0.1
+done
+"#;
+
+/// Runs the supervisor for three seconds on the targets `a` and `b`, the worker of each in the
+/// mode given; the result and the summary.
+#[cfg(unix)]
+fn supervised(name: &str, jobs: usize, modes: [&'static str; 2]) -> (Result<bool, String>, String) {
+    let work = scratch(&format!("supervisor-{name}"));
+    let config = supervisor::Config {
+        targets: vec!["a".to_string(), "b".to_string()],
+        jobs,
+        seconds: 3,
+        timeout: std::time::Duration::from_secs(60),
+        min_share: 0.8,
+        work: work.clone(),
+        command: vec!["fuzz".to_string(), "run".to_string()],
+    };
+    let result = supervisor::run(&config, &|spec| {
+        let mode = if spec.target == "a" {
+            modes[0]
+        } else {
+            modes[1]
+        };
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(FAKE_WORKER)
+            .arg("sh")
+            .arg(mode)
+            .arg(spec.id.to_string())
+            .arg(spec.target)
+            .arg(spec.work)
+            .arg(spec.until.to_string());
+        command
+    });
+    let summary = std::fs::read_to_string(work.join("summary.json")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&work);
+    (result, summary)
+}
+
+/// A run of workers that do their work ends with success, and its summary accounts for every
+/// target: its workers, wall time, executions.
+#[cfg(unix)]
+#[test]
+fn fuzz_supervisor_accounts_for_every_target() {
+    let (result, summary) = supervised("ok", 2, ["ok", "ok"]);
+    assert_eq!(result, Ok(true), "{summary}");
+    assert!(summary.contains("\"ok\": true,\n"), "{summary}");
+    for target in ["a", "b"] {
+        let at = summary
+            .find(&format!("\"{target}\": {{\"ok\": true"))
+            .unwrap_or_else(|| panic!("{target} in {summary}"));
+        let entry = &summary[at..];
+        assert!(!entry.contains("\"execs\": 0,"), "{summary}");
+        assert!(entry.contains("\"workers\": ["), "{summary}");
+    }
+    assert!(summary.contains("\"failures\": []"), "{summary}");
+}
+
+/// A worker that dies before it writes its input leaves nothing to record: the death itself is
+/// the finding, and the run fails.
+#[cfg(unix)]
+#[test]
+fn fuzz_worker_dying_before_its_input_fails_the_run() {
+    let (result, summary) = supervised("die-early", 2, ["ok", "die-early"]);
+    assert_eq!(result, Ok(false), "{summary}");
+    assert!(summary.contains("with no input to record"), "{summary}");
+    assert!(summary.contains("b-crash-noinput-w1-"), "{summary}");
+    assert!(summary.contains("\"a\": {\"ok\": true"), "{summary}");
+}
+
+/// A worker that aborts on an input leaves the input as a finding.
+#[cfg(unix)]
+#[test]
+fn fuzz_worker_crash_is_a_finding() {
+    let (result, summary) = supervised("crash", 2, ["crash", "ok"]);
+    assert_eq!(result, Ok(false), "{summary}");
+    assert!(summary.contains("\"findings\": [\"a-crash-"), "{summary}");
+}
+
+/// A target whose worker ran nothing, or not for its share of the time, fails the run, and so
+/// does a run with fewer workers than targets.
+#[cfg(unix)]
+#[test]
+fn fuzz_target_without_its_time_fails_the_run() {
+    let (result, summary) = supervised("idle", 2, ["idle", "ok"]);
+    assert_eq!(result, Ok(false), "{summary}");
+    assert!(summary.contains("worker 0 (a): ran no input"), "{summary}");
+    assert!(summary.contains("seconds required"), "{summary}");
+    let (result, _) = supervised("few", 1, ["ok", "ok"]);
+    assert!(result.unwrap_err().contains("fewer than the 2 targets"));
 }

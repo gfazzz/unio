@@ -1,8 +1,19 @@
 ## Pure path manipulation (requirement S-1). Path itself and its methods components, is_absolute,
 ## name, extension, parent, join and normalize are in the prelude (builtin/path.unio); this module
 ## adds the operations on names and prefixes. Everything here is lexical, like Path.normalize: it
-## never reads the file system, follows no link, and proves nothing about access. "/" separates
-## names on every platform, "\\" also on Windows (S-19).
+## never reads the file system, follows no link, and proves nothing about access (S-19).
+##
+## The platform contract (docs/stdlib.md, "Paths on each platform"):
+## - Separators: "/" separates names on every platform, "\\" also on Windows; on Linux and macOS
+##   "\\" is an ordinary character of a name. Path.join, and so with_name, with_extension and
+##   join_all, insert the separator of the platform; parent and normalize write "/".
+## - Anchors: a path may begin with an anchor, the first of its components. On Linux and macOS it
+##   is "/" (or "//"), and such a path is absolute. On Windows a drive with a root ("C:\\a",
+##   "C:/a") and a UNC share ("\\\\server\\share\\a") are absolute; a rooted path ("\\a", "/a",
+##   relative to the root of the current drive) and a drive-relative path ("C:a", relative to the
+##   current directory of drive C) have anchors too, "/" and "C:", but are not absolute.
+## - A path without an anchor is relative to the current directory: only such a path starts
+##   with "." (starts_with), and only it has "." as a base (relative_to).
 
 ## The name without its extension: "report" for "dir/report.txt", ".profile" for ".profile".
 ## Example:
@@ -17,7 +28,7 @@ public function stem(path as Path) returns Text:
 ## The path with the extension of its name replaced, or removed when extension is empty. A path
 ## without a name, such as a root, stays as it is.
 ## Example:
-##     assert "{with_extension(Path("dir/report.txt"), "md")}" == "dir/report.md"
+##     assert with_extension(Path("dir/report.txt"), "md") == Path("dir").join("report.md")
 ##     assert "{with_extension(Path("notes"), "txt")}" == "notes.txt"
 public function with_extension(path as Path, extension as Text) returns Path:
     if path.name().is_empty(): return path
@@ -26,7 +37,7 @@ public function with_extension(path as Path, extension as Text) returns Path:
 
 ## The path with its last name replaced; a path without a name, such as a root, gets the name.
 ## Example:
-##     assert "{with_name(Path("dir/old.txt"), "new.txt")}" == "dir/new.txt"
+##     assert with_name(Path("dir/old.txt"), "new.txt") == Path("dir").join("new.txt")
 public function with_name(path as Path, name as Text) returns Path:
     if path.name().is_empty(): return path.join(name)
     match path.parent():
@@ -36,22 +47,23 @@ public function with_name(path as Path, name as Text) returns Path:
         case none: return Path(name)
 
 ## Whether the components of base begin the components of path, compared exactly, after
-## Path.normalize. A lexical test, not a containment check for access: ".." and links are not
-## resolved.
+## Path.normalize, anchors included. A lexical test, not a containment check for access: ".." and
+## links are not resolved. A base of "." begins exactly the paths without an anchor: not "/a", and
+## on Windows neither "\\a" nor "C:a", which are relative but not to the current directory.
 ## Example:
 ##     assert starts_with(Path("/srv/data/a.txt"), Path("/srv"))
 ##     assert not starts_with(Path("/srv2/a.txt"), Path("/srv"))
 public function starts_with(path as Path, base as Path) returns Bool:
     let names = path.normalize().components()
     let prefix = base.normalize().components()
-    if prefix == ["."]: return not path.is_absolute()
+    if prefix == ["."]: return not anchored(names)
     if prefix.length() > names.length(): return false
     return names.slice(0, prefix.length()) == prefix
 
 ## The path relative to base when base begins it (see starts_with); none otherwise. The result of
 ## a path equal to base is ".".
 ## Example:
-##     assert relative_to(Path("/srv/data/a.txt"), Path("/srv")) == some(Path("data/a.txt"))
+##     assert relative_to(Path("/srv/data/a.txt"), Path("/srv")) == some(Path("data").join("a.txt"))
 ##     assert relative_to(Path("/srv"), Path("/home")) == none
 public function relative_to(path as Path, base as Path) returns Option[Path]:
     if not starts_with(path, base): return none
@@ -62,7 +74,7 @@ public function relative_to(path as Path, base as Path) returns Option[Path]:
 
 ## The base with each part joined in turn, as Path.join does; "." as a base is dropped.
 ## Example:
-##     assert "{join_all(Path("a"), ["b", "c.txt"])}" == "a/b/c.txt"
+##     assert join_all(Path("a"), ["b", "c.txt"]) == Path("a").join("b").join("c.txt")
 ##     assert "{join_all(Path("."), [])}" == "."
 public function join_all(base as Path, parts as List[Text]) returns Path:
     var result = base
@@ -76,19 +88,32 @@ public function join_all(base as Path, parts as List[Text]) returns Path:
 
 ## Whether the path is not absolute; on Windows "C:file" and "\\file" are relative too.
 ## Example:
-##     assert is_relative(Path("a/b")) and not is_relative(Path("/a"))
+##     assert is_relative(Path("a/b")) and is_relative(Path("C:a")) and is_relative(Path("\\a"))
+##     # Absolute: "/a" on Linux and macOS, "C:\\a" on Windows.
+##     assert not is_relative(Path("/a")) or not is_relative(Path("C:\\a"))
 public function is_relative(path as Path) returns Bool:
     return not path.is_absolute()
+
+## Whether the components begin with an anchor: a component that is a path without a name, such
+## as "/", "C:", "C:/" or "//server/share/". A name of a component is never empty.
+function anchored(components as List[Text]) returns Bool:
+    match components.get(0):
+        case some(first): return Path(first).name().is_empty()
+        case none: return false
+
+## Whether paths follow the rules of Windows: Path.join inserts "\\" there.
+function on_windows() returns Bool:
+    return Path("a").join("b").to_text() == "a\\b"
 
 test "names and extensions":
     assert stem(Path("archive.tar.gz")) == "archive.tar"
     assert stem(Path("README")) == "README"
     assert stem(Path("name.")) == "name"
     assert stem(Path("/")) == ""
-    assert "{with_extension(Path("a/b.txt"), "")}" == "a/b"
+    assert with_extension(Path("a/b.txt"), "") == Path("a").join("b")
     assert "{with_extension(Path("/"), "txt")}" == "/"
     assert "{with_name(Path("file"), "other")}" == "other"
-    assert "{with_name(Path("./file"), "other")}" == "./other"
+    assert with_name(Path("./file"), "other") == Path(".").join("other")
     assert "{with_name(Path("/"), "etc")}" == "/etc"
 
 test "prefixes are compared by whole names":
@@ -101,4 +126,41 @@ test "prefixes are compared by whole names":
     assert starts_with(Path("link/../x"), Path("link"))
     assert relative_to(Path("a/b"), Path("a/b")) == some(Path("."))
     assert relative_to(Path("a/b"), Path(".")) == some(Path("a/b"))
-    assert relative_to(Path("/x/y/z"), Path("/x")) == some(Path("y/z"))
+    assert relative_to(Path("/x/y/z"), Path("/x")) == some(Path("y").join("z"))
+
+test "the anchors of each platform are not under the current directory":
+    let windows = on_windows()
+    # The same on every platform: "/" begins a root, and a name is no anchor.
+    assert not starts_with(Path("/a"), Path("."))
+    assert not starts_with(Path("//server/share/a"), Path("."))
+    assert starts_with(Path("./a"), Path("."))
+    assert starts_with(Path("."), Path("."))
+    assert relative_to(Path("/a"), Path(".")) == none
+    # Rooted, drive-relative, drive-absolute and UNC forms: anchors on Windows, names elsewhere.
+    for text in ["\\a", "\\", "C:a", "C:", "C:\\a", "C:/a", "\\\\server\\share\\a"]:
+        assert starts_with(Path(text), Path(".")) == (not windows)
+        assert anchored(Path(text).components()) == windows
+    assert (relative_to(Path("C:a"), Path(".")) == none) == windows
+    assert not anchored(Path("a/b").components()) and not anchored(Path(".").components())
+
+test "what is absolute on each platform":
+    let windows = on_windows()
+    assert is_relative(Path("a/b")) and is_relative(Path("./a"))
+    # Rooted and drive-relative paths are relative on Windows; elsewhere "/a" is absolute.
+    assert is_relative(Path("/a")) == windows
+    assert is_relative(Path("\\a"))
+    assert is_relative(Path("C:a"))
+    # A drive with a root and a UNC share are absolute on Windows only.
+    assert is_relative(Path("C:\\a")) == (not windows)
+    assert is_relative(Path("C:/a")) == (not windows)
+    assert is_relative(Path("\\\\server\\share\\a")) == (not windows)
+    assert not is_relative(Path("//server/share/a"))
+
+test "Windows anchors keep their drive in prefixes":
+    if not on_windows(): return
+    assert starts_with(Path("C:a\\b"), Path("C:"))
+    assert not starts_with(Path("C:\\a"), Path("C:"))
+    assert not starts_with(Path("D:a"), Path("C:"))
+    assert relative_to(Path("C:a\\b"), Path("C:")) == some(Path("a").join("b"))
+    let share = Path("\\\\server\\share\\a\\b")
+    assert relative_to(share, Path("//server/share")) == some(Path("a").join("b"))

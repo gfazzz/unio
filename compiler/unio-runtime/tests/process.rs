@@ -128,7 +128,7 @@ fn output_over_the_limit_is_an_error() {
 #[test]
 fn captured_output_counts_against_the_heap_limit() {
     let mut rt = Runtime::new(vec![]);
-    rt.heap_limit = Some(unio_runtime::reserve::RESERVE_BYTES + (1 << 20));
+    rt.set_heap_limit(Some(unio_runtime::reserve::RESERVE_BYTES + (1 << 20)));
     let arguments = Value::list(vec![
         Value::text("-c"),
         Value::text("4000000"),
@@ -169,8 +169,9 @@ fn a_child_that_writes_far_more_than_the_limit_is_stopped_at_it() {
 #[test]
 fn the_output_on_its_way_counts_against_the_heap_limit() {
     let mut rt = Runtime::new(vec![]);
-    rt.heap_limit =
-        Some(unio_runtime::reserve::RESERVE_BYTES + unio_runtime::externs::process::IN_FLIGHT / 2);
+    rt.set_heap_limit(Some(
+        unio_runtime::reserve::RESERVE_BYTES + unio_runtime::externs::process::IN_FLIGHT / 2,
+    ));
     let outcome = call(
         &mut rt,
         "std.process.run",

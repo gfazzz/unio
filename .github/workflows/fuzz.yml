@@ -17,9 +17,23 @@ name: fuzz
 #
 # A finding (a panic, an abort, an overflow of the stack, a signal, or an input with no result
 # within 60 seconds) fails the stage and is uploaded as the artifact `fuzz-findings-N`, the
-# input with a `.txt` that names the reason. Its minimized input
+# input with a `.txt` that names the reason. So does a worker that dies before it wrote an input
+# (its output is kept), and a target that ran no input or less than 95 percent of the stage
+# (the supervisor, compiler/unio/fuzz/supervisor.rs). Its minimized input
 # (`fuzz minimize --target T FILE`) becomes a regression test in
 # compiler/unio/tests/data/fuzz/TARGET/, which `tests/fuzz.rs` runs on every change.
+#
+# The evidence: every stage keeps its corpus (`fuzz-corpus-N`), its findings
+# (`fuzz-findings-N`), and its report (`fuzz-stage-N`: the summary of the supervisor with the
+# wall time, processor time, and executions of every target, the totals of every worker, the
+# log, and stage.json and stage.md with the commit, the commands, the runner image, and the
+# toolchain, also shown as the job summary), all for 90 days, the longest GitHub keeps them.
+# Stages 2 to 5 fail when the corpus of the stage before cannot be restored: they never start
+# over silently. The job `evidence` then checks that all five stages ran on the same commit for
+# the full 300 minutes each with no finding, and that every target was fuzzed for at least 24
+# hours in all, and uploads one report, `fuzz-evidence` (fuzz-DATE.json and fuzz-DATE.md in the
+# form of bench/results/, compiler/unio/fuzz/evidence.py); it fails otherwise, so a run with
+# fewer minutes is a trial, not evidence.
 
 on:
   schedule:
@@ -59,26 +73,64 @@ jobs:
       - name: The pinned Rust toolchain (compiler/rust-toolchain.toml)
         run: sh .github/scripts/pinned_toolchain.sh
       - name: The corpus of the stage before
+        id: restore
         if: matrix.previous != ''
-        continue-on-error: true
+        # No continue-on-error: a stage that cannot continue from the corpus of the stage
+        # before fails instead of starting over.
         uses: actions/download-artifact@v4
         with:
           name: fuzz-corpus-${{ matrix.previous }}
           path: ${{ runner.temp }}/fuzz/corpus
+      - name: The restored corpus is not empty
+        if: matrix.previous != ''
+        run: |
+          count=$(find "$RUNNER_TEMP/fuzz/corpus" -type f | wc -l)
+          echo "restored $count inputs from stage ${{ matrix.previous }}"
+          test "$count" -gt 0
       - name: Build the fuzzer with the coverage instrumentation
         run: echo "FUZZ=$(sh compiler/unio/fuzz/build.sh)" >> "$GITHUB_ENV"
       - name: Fuzz every target (R-1)
+        id: fuzz
         run: |
           minutes="${{ github.event.inputs.minutes }}"
-          "$FUZZ" run --minutes "${minutes:-300}" --jobs 6 --timeout 60 --work "$RUNNER_TEMP/fuzz"
+          echo "MINUTES=${minutes:-300}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/fuzz-report"
+          set -o pipefail
+          "$FUZZ" run --minutes "${minutes:-300}" --jobs 6 --timeout 60 --min-share 0.95 \
+            --work "$RUNNER_TEMP/fuzz" 2>&1 | tee "$RUNNER_TEMP/fuzz-report/fuzz.log"
+      - name: The report of the stage
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-report"
+          cp "$RUNNER_TEMP"/fuzz/stats-* "$RUNNER_TEMP/fuzz/summary.json" "$RUNNER_TEMP/fuzz-report/" || true
+          if [ -z "${{ matrix.previous }}" ]; then
+            restored=first
+          elif [ "${{ steps.restore.outcome }}" = success ]; then
+            restored=yes
+          else
+            restored=no
+          fi
+          python3 compiler/unio/fuzz/evidence.py stage --stage ${{ matrix.stage }} \
+            --work "$RUNNER_TEMP/fuzz" --minutes "${MINUTES:-300}" --restored "$restored" \
+            --command "sh compiler/unio/fuzz/build.sh" \
+            --command "fuzz run --minutes ${MINUTES:-300} --jobs 6 --timeout 60 --min-share 0.95 --work \$RUNNER_TEMP/fuzz" \
+            --out "$RUNNER_TEMP/fuzz-report"
+      - name: Keep the report of the stage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-stage-${{ matrix.stage }}
+          path: ${{ runner.temp }}/fuzz-report
+          retention-days: 90
+          if-no-files-found: error
       - name: Keep the corpus for the next stage
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-corpus-${{ matrix.stage }}
           path: ${{ runner.temp }}/fuzz/corpus
-          retention-days: 14
-          if-no-files-found: warn
+          retention-days: 90
+          if-no-files-found: error
       - name: Keep the findings
         if: always()
         uses: actions/upload-artifact@v4
@@ -87,3 +139,33 @@ jobs:
           path: ${{ runner.temp }}/fuzz/crashes
           retention-days: 90
           if-no-files-found: ignore
+
+  evidence:
+    name: evidence of R-1, all five stages
+    needs: fuzz
+    # Also after a failed stage, so that the report says what is missing.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: The reports of the stages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fuzz-stage-*
+          path: ${{ runner.temp }}/stages
+      - name: Check the stages and write the report
+        run: |
+          python3 compiler/unio/fuzz/evidence.py aggregate --stages "$RUNNER_TEMP/stages" \
+            --sha "$GITHUB_SHA" --count 5 --minutes 300 --hours 24 --out "$RUNNER_TEMP/evidence"
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-evidence
+          path: ${{ runner.temp }}/evidence
+          retention-days: 90
+          if-no-files-found: error

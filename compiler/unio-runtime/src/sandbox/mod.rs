@@ -17,7 +17,9 @@
 //! writer process started before the sandbox applies does every write-class operation of
 //! `std.files` and checks the write scopes itself (`writer.rs`, docs/runtime.md 9.2).
 //!
-//! Limits of the policy: the heap through the runtime's own accounting (code 102), wall and
+//! Limits of the policy: the heap through the count of the global allocator of the runtime
+//! (code 102, `heap.rs`), backed by the limit of the address space on Linux and the memory
+//! limit of a Job Object on Windows (RFC 0010, docs/runtime.md 3.5), wall and
 //! CPU time through a watchdog thread (code 102), the number of processes through the runtime,
 //! and the size of written files through the runtime and `RLIMIT_FSIZE`.
 
@@ -1270,6 +1272,16 @@ fn apply_os(
     })
 }
 
+/// The Job Object behind the heap limit, once per process: a process limit of a job can only
+/// be set for the whole process, and `unio test` enters the sandbox once per file (RFC 0010).
+#[cfg(windows)]
+fn program_memory_backstop(heap: u64) -> Result<(), String> {
+    static APPLIED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    APPLIED
+        .get_or_init(|| worker::limit_program_memory(backstop_bytes(heap)))
+        .clone()
+}
+
 /// Windows: the thread of the program impersonates a token of a fresh AppContainer that holds
 /// grants on exactly the read scopes and the listed programs; a second AppContainer holds the
 /// write grants for the writes of the runtime; children are created in the first one
@@ -1283,6 +1295,9 @@ fn apply_os(
     _stop: &Arc<AtomicBool>,
 ) -> Result<Applied, Refused> {
     working_directory();
+    if let Some(heap) = sandbox.limits.heap_bytes {
+        program_memory_backstop(heap).map_err(Refused)?;
+    }
     let program = windows::Program::enter(&sandbox.permissions).map_err(|e| {
         Refused(format!(
             "the AppContainer of the program cannot be set up: {e}"
@@ -1421,8 +1436,9 @@ fn process_cpu_time() -> Duration {
     Duration::ZERO
 }
 
-/// Applies the limit of the size of written files to a child before it runs the program;
-/// the limit of CPU time too, since a child has its own CPU time.
+/// Applies the limit of CPU time to a child before it runs the program, since a child has its
+/// own CPU time, and gives it back the address space that the backstop of the heap limit took
+/// from the program (RFC 0010).
 #[cfg(unix)]
 pub fn limit_child(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -1430,12 +1446,14 @@ pub fn limit_child(command: &mut std::process::Command) {
         return;
     };
     let cpu = a.sandbox.limits.cpu_seconds;
-    if cpu.is_none() {
+    if cpu.is_none() && a.sandbox.limits.heap_bytes.is_none() {
         return;
     }
-    // SAFETY: the closure only calls setrlimit, which is async-signal-safe.
+    // SAFETY: the closure only calls getrlimit and setrlimit, which are async-signal-safe.
     unsafe {
         command.pre_exec(move || {
+            // The heap limit is the program's: the child gets its address space back.
+            release_backstop();
             if let Some(seconds) = cpu {
                 set_limit(RLIMIT_CPU, seconds)?;
             }
@@ -1475,18 +1493,109 @@ const RLIMIT_FSIZE: i32 = 1;
 #[cfg(unix)]
 const RLIMIT_CORE: i32 = 4;
 
+/// The allowance of the limit of the operating system over the heap limit of a program (RFC
+/// 0010, docs/runtime.md 3.5): mappings made after the sandbox applies besides the heap (the
+/// stacks and arenas of the allocator of the threads `process.run` starts, libraries the system
+/// loads), 512 MiB of address space, which costs no memory unless it is used.
+pub const BACKSTOP_ALLOWANCE: u64 = 512 * 1024 * 1024;
+
+/// What the limit of the operating system allows above what the process maps when the sandbox
+/// applies: the heap limit twice, once for the heap and once for what the allocator adds to it
+/// (headers, size classes, freed pages it keeps; measured at most 0.6 of the heap for blocks of
+/// values, docs/runtime.md 3.5), and [`BACKSTOP_ALLOWANCE`].
+pub fn backstop_bytes(heap: u64) -> u64 {
+    heap.saturating_mul(2).saturating_add(BACKSTOP_ALLOWANCE)
+}
+
+/// Whether this process lowered its limit of the address space behind the heap limit.
+#[cfg(target_os = "linux")]
+static BACKSTOP: AtomicBool = AtomicBool::new(false);
+
+/// In a child before it runs its program: gives the limit of the address space back up to the
+/// hard limit, which the backstop of the program left as it was. Async-signal-safe; a failure
+/// leaves the child with the limit of the program.
+#[cfg(target_os = "linux")]
+pub(crate) fn release_backstop() {
+    if BACKSTOP.load(Ordering::Relaxed) {
+        let _ = raise_soft_limit(linux::RLIMIT_AS);
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn release_backstop() {}
+
+#[repr(C)]
+#[cfg(unix)]
+struct RLimit {
+    current: u64,
+    maximum: u64,
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn getrlimit(resource: i32, limit: *mut RLimit) -> i32;
+    fn setrlimit(resource: i32, limit: *const RLimit) -> i32;
+}
+
+/// Lowers the soft limit of a resource to `value`, keeping the hard limit.
+#[cfg(target_os = "linux")]
+fn set_soft_limit(resource: i32, value: u64) -> std::io::Result<()> {
+    let mut old = RLimit {
+        current: 0,
+        maximum: 0,
+    };
+    // SAFETY: getrlimit and setrlimit read and write one struct rlimit.
+    unsafe {
+        if getrlimit(resource, &mut old) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let new = RLimit {
+            current: value.min(old.maximum),
+            maximum: old.maximum,
+        };
+        if setrlimit(resource, &new) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Raises the soft limit of a resource to its hard limit.
+#[cfg(target_os = "linux")]
+fn raise_soft_limit(resource: i32) -> std::io::Result<()> {
+    let mut old = RLimit {
+        current: 0,
+        maximum: 0,
+    };
+    // SAFETY: getrlimit and setrlimit read and write one struct rlimit; both are
+    // async-signal-safe.
+    unsafe {
+        if getrlimit(resource, &mut old) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        old.current = old.maximum;
+        if setrlimit(resource, &old) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// The soft limit of a resource, for tests.
+#[cfg(all(test, target_os = "linux"))]
+fn soft_limit(resource: i32) -> u64 {
+    let mut old = RLimit {
+        current: 0,
+        maximum: 0,
+    };
+    // SAFETY: getrlimit writes one struct rlimit.
+    unsafe { getrlimit(resource, &mut old) };
+    old.current
+}
+
 /// Sets a soft and hard resource limit; a limit can only be lowered.
 #[cfg(unix)]
 fn set_limit(resource: i32, value: u64) -> std::io::Result<()> {
-    #[repr(C)]
-    struct RLimit {
-        current: u64,
-        maximum: u64,
-    }
-    extern "C" {
-        fn getrlimit(resource: i32, limit: *mut RLimit) -> i32;
-        fn setrlimit(resource: i32, limit: *const RLimit) -> i32;
-    }
     let mut old = RLimit {
         current: 0,
         maximum: 0,
@@ -1551,6 +1660,54 @@ fn program_paths(program: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 0010: the heap limit of a program is backed by the limit of the address space, so
+    /// that memory the count of the allocator does not see cannot grow without bound: beyond
+    /// the backstop the system refuses it, and the program ends with code 102 and the prepared
+    /// diagnostic. The test runs itself again as a child, which lowers its own limit.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_heap_limit_is_backed_by_the_address_space() {
+        if std::env::var_os("UNIO_TEST_BACKSTOP").is_some() {
+            let heap = 64 << 20;
+            let mapped = || {
+                let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
+                statm
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    * 4096
+            };
+            let before = mapped();
+            linux::backstop(heap).unwrap();
+            let soft = soft_limit(linux::RLIMIT_AS);
+            assert!(soft >= before + backstop_bytes(heap), "{soft}");
+            assert!(soft <= mapped() + backstop_bytes(heap), "{soft}");
+            assert_eq!(backstop_bytes(heap), 2 * heap + BACKSTOP_ALLOWANCE);
+            // A block outside the count of the heap, larger than the backstop allows.
+            let huge = crate::heap::outside(|| Vec::<u8>::with_capacity(soft as usize));
+            std::hint::black_box(&huge);
+            unreachable!("the system gave {soft} bytes beyond the backstop");
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sandbox::tests::the_heap_limit_is_backed_by_the_address_space",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("UNIO_TEST_BACKSTOP", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(102), "{stderr}");
+        assert!(
+            stderr.contains(crate::fault::Exhaustion::Heap.message()),
+            "{stderr}"
+        );
+    }
 
     #[cfg(unix)]
     fn places() -> Places {

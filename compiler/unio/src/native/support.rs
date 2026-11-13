@@ -1445,13 +1445,10 @@ pub unsafe extern "C" fn unio_rt_list_push(acc: *mut Value, v: *mut Value) {
     }
 }
 
-/// Ends a comprehension: the list's size is counted and the heap limit checked.
+/// Ends a comprehension: the heap limit is checked (the allocator counted the list as it grew).
 #[no_mangle]
-pub unsafe extern "C" fn unio_rt_list_done(ctx: *mut Ctx, acc: *mut Value) -> i32 {
+pub unsafe extern "C" fn unio_rt_list_done(ctx: *mut Ctx, _acc: *mut Value) -> i32 {
     let mut c = cx(ctx);
-    if let Value::List(l) = &mut *acc {
-        Rc::make_mut(l).recount();
-    }
     match c.rt.check_heap() {
         Ok(()) => 0,
         Err(e) => c.fail(e),

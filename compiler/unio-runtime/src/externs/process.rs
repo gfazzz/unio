@@ -18,13 +18,13 @@
 //! - each captured stream holds at most [`OUTPUT_LIMIT`] bytes, and what is captured counts
 //!   against the heap limit before it is stored. Between the pipes and the call the output
 //!   passes through a bounded queue: a reader stops reading while its chunks are not taken, so
-//!   at most [`IN_FLIGHT`] bytes are on the way, and they count against the heap limit for the
-//!   whole call. Output over the limit ends the call at once and stops the tree; the readers
+//!   at most [`IN_FLIGHT`] bytes are on the way. The readers count into the heap of the program
+//!   ([`crate::heap::Share`]), so their chunks are counted where they are allocated, and the
+//!   call keeps room for them before it starts and whenever it grows a buffer. Output over the limit ends the call at once and stops the tree; the readers
 //!   then end at their next chunk.
 
 use super::{int, text, texts, ExternFn};
 use crate::fault::{Outcome, Unwind};
-use crate::heap::{Counted, Measure};
 use crate::runtime::Runtime;
 use crate::sandbox::tree;
 use crate::value::Value;
@@ -59,15 +59,6 @@ type Message = (usize, Option<Vec<u8>>);
 /// The bounded queue from the readers of the pipes to the call.
 fn queue() -> (mpsc::SyncSender<Message>, mpsc::Receiver<Message>) {
     mpsc::sync_channel(QUEUE)
-}
-
-/// What the output on the way takes of the heap, counted for the whole call.
-struct InFlight;
-
-impl Measure for InFlight {
-    fn measure(&self) -> usize {
-        IN_FLIGHT
-    }
 }
 
 fn process_error(program: &str, kind: &str, reason: impl Into<String>) -> Unwind {
@@ -105,9 +96,10 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         .unwrap_or(started + Duration::from_secs(u32::MAX.into()));
     crate::sandbox::may_run(program)
         .map_err(|reason| process_error(program, "PermissionDenied", reason))?;
-    // The output on the way counts against the heap limit before the child starts.
+    // The output on the way must fit in the heap before the child starts; its chunks are
+    // counted where the readers allocate them, in the heap of the program (crate::heap).
     runtime.reserve_heap(IN_FLIGHT)?;
-    let in_flight = Counted::new(InFlight);
+    let share = runtime.heap_share();
     let mut child = spawn(program, &args).map_err(|e| {
         let kind = match e.kind() {
             ErrorKind::NotFound => "NotFound",
@@ -145,7 +137,10 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         let sender = sender.clone();
         let spawned = thread::Builder::new()
             .name("unio-process-output".into())
-            .spawn(move || read_pipe(stream, pipe, sender));
+            .spawn(move || {
+                share.join();
+                read_pipe(stream, pipe, sender)
+            });
         if spawned.is_err() {
             return Err(process_error(
                 program,
@@ -156,7 +151,7 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }
     drop(sender);
     // The captured outputs count against the heap limit like values do.
-    let mut captured = [Counted::new(Vec::<u8>::new()), Counted::new(Vec::new())];
+    let mut captured = [Vec::<u8>::new(), Vec::new()];
     let mut open = 2;
     let mut status: Option<ExitStatus> = None;
     loop {
@@ -211,10 +206,12 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
                         .len()
                         .min(OUTPUT_LIMIT - buffer.len())
                         .max(chunk.len());
+                    // Room for the chunks still on the way is kept as well.
+                    runtime.reserve_heap(more.saturating_add(IN_FLIGHT))?;
                     super::reserve(runtime, buffer, more)?;
                 }
                 buffer.extend_from_slice(&chunk);
-                buffer.recount();
+                drop(chunk);
                 runtime.check_heap()?;
             }
             Ok((_, None)) => open -= 1,
@@ -224,11 +221,10 @@ fn run(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     }
     let status = status.expect("the loop ends after the program ended");
     running.finished = true;
-    drop(in_flight);
     let [out, err] = captured;
-    let out = String::from_utf8(take(out))
+    let out = String::from_utf8(out)
         .map_err(|_| process_error(program, "InvalidOutput", "standard output is not UTF-8"))?;
-    let err = String::from_utf8(take(err))
+    let err = String::from_utf8(err)
         .map_err(|_| process_error(program, "InvalidOutput", "standard error is not UTF-8"))?;
     let result = Value::record(
         "Output",
@@ -300,13 +296,6 @@ fn spawn(program: &str, args: &[String]) -> std::io::Result<Child> {
         command.container = container;
         w::spawn(&command)
     })
-}
-
-/// The bytes of a counted buffer; the value that receives them counts them again.
-fn take(mut buffer: Counted<Vec<u8>>) -> Vec<u8> {
-    let data = std::mem::take(&mut *buffer);
-    buffer.recount();
-    data
 }
 
 /// Reads a pipe in chunks until its end and sends them through the bounded queue, waiting

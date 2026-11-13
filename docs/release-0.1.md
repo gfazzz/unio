@@ -17,10 +17,10 @@ Release 0.1 "Core" is **not published and is blocked**. This page lists what sta
 | Windows: `bcrypt.lib` missing when linking native executables | fixed, awaiting CI: the system libraries are those rustc reports, checked by a test; a native test of the secure random functions |
 | Windows: `std.path` tests assume POSIX paths; `starts_with(path, ".")` mishandles `\a` and `C:a` | fixed, awaiting CI: the platform contract of `std.path` written in [stdlib.md](stdlib.md) and tested on each platform |
 | Linux arm64: a CPU-limit kill reported by wall time as a fault (101 instead of 102) | fixed, awaiting CI: classification by the CPU time the system recorded for the worker |
-| `limits.heap_bytes` counts an estimate of some values | a hard limit: the allocator counts every byte of the program's thread, with an OS limit behind it (decision of 2026-11-13) |
+| `limits.heap_bytes` counts an estimate of some values | fixed, awaiting CI: a hard limit by [RFC 0010](rfcs/0010-a-hard-heap-limit.md); the allocator counts every block the program requests, with an OS limit behind it on Linux and Windows |
 | macOS: the process limit is a search every 5 ms, so a short excess is possible | descendants may not start processes when a limit is set (an RFC, decision of 2026-11-13) |
 | Sandbox tests that return early when Python or a C compiler is missing count as passed; two worker-isolation tests do not run on Windows; Windows tests and CI still allow the weaker sandbox | a missing prerequisite fails a release check; the tests run on Windows; the weaker mode is forbidden in release checks |
-| The fuzzer could report "no findings" after a worker died before recording its input | fixed: such a death fails the run; every target must work its full time; a final job checks all stages |
+| The fuzzer could report "no findings" after a worker died before recording its input | fixed, awaiting the 24-hour run: such a death fails the run; every target must work its full time; a final job checks all stages |
 | Release artifacts and installation do not cover Linux arm64; the independent build is compared only on Linux x86-64 | to be extended to every shipped platform, or the shipped set stated explicitly |
 | [status.md](status.md) still names an older snapshot and has rows that disagree with the code | every partial row is confirmed with evidence, fixed, or deferred by an accepted RFC; no deferral is assumed |
 
@@ -46,4 +46,4 @@ All on one fixed commit, after the blockers above:
 - Reviewing the sandbox ([runtime.md](runtime.md) section 9) and the cryptography ([cryptography.md](cryptography.md) section 7) independently; reports go through [SECURITY.md](../SECURITY.md).
 - Writing programs in Unio and reporting diagnostics that are unclear or wrong; [How Unio works with AI](ai.md) describes the loop an agent uses.
 
-Accepted decisions: TLS is not part of 0.1 (packages are authenticated by ML-DSA-65 signatures, downloads are not private); reference counting replaces a tracing GC in 0.1 (RFC 0007); the limits of compile workers are separate from program limits (RFC 0006).
+Accepted decisions: TLS is not part of 0.1 (packages are authenticated by ML-DSA-65 signatures, downloads are not private); reference counting replaces a tracing GC in 0.1 (RFC 0007); the limits of compile workers are separate from program limits (RFC 0006); the heap limit is hard (RFC 0010).

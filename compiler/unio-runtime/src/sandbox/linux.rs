@@ -108,8 +108,40 @@ pub fn missing() -> Vec<String> {
 /// Applies every restriction the kernel supports to the current thread.
 pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
     apply_rlimits(limits)?;
+    if let Some(heap) = limits.heap_bytes {
+        backstop(heap)?;
+    }
     restrict(&rules(permissions), &[], false)
 }
+
+/// The limit of the operating system behind the heap limit of the program (RFC 0010,
+/// docs/runtime.md 3.5): the soft `RLIMIT_AS` of the process becomes the address space it maps
+/// now, when the sandbox applies (its code, the stacks of its threads, the loaded program),
+/// plus [`super::backstop_bytes`] of the heap limit. Only the soft limit is lowered, so that a
+/// child can be given back the limit it would have had ([`super::release_backstop`]). Memory
+/// beyond it is refused by the system, which the allocator turns into code 102.
+pub(super) fn backstop(heap: u64) -> Result<(), String> {
+    let statm = std::fs::read_to_string("/proc/self/statm")
+        .map_err(|e| format!("RLIMIT_AS: the address space in use: {e}"))?;
+    let pages: u64 = statm
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .ok_or("RLIMIT_AS: the address space in use cannot be read")?;
+    // SAFETY: sysconf takes an integer and returns one.
+    let page = unsafe { sysconf(SC_PAGESIZE) }.max(4096) as u64;
+    let limit = pages
+        .saturating_mul(page)
+        .saturating_add(super::backstop_bytes(heap));
+    super::set_soft_limit(RLIMIT_AS, limit).map_err(|e| format!("RLIMIT_AS: {e}"))?;
+    super::BACKSTOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+extern "C" {
+    fn sysconf(name: i32) -> i64;
+}
+const SC_PAGESIZE: i32 = 30;
 
 /// The restrictions of the writer process (docs/runtime.md 9.2): it may write only in the
 /// write scopes and their directories, read no file, run nothing, start no process or thread,
@@ -154,7 +186,7 @@ pub fn apply_worker(
     }
 }
 
-const RLIMIT_AS: i32 = 9;
+pub(super) const RLIMIT_AS: i32 = 9;
 
 fn restrict(rules: &[(PathBuf, u64)], denied: &[u32], threads_only: bool) -> Result<(), String> {
     // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments only.

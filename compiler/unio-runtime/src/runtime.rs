@@ -60,17 +60,6 @@ impl Sink {
     }
 }
 
-/// The ballast of the test hook `UNIO_TEST_HEAP_FREE`, removed with the runtime.
-struct Ballast(bool);
-
-impl Drop for Ballast {
-    fn drop(&mut self) {
-        if self.0 {
-            crate::heap::clear_ballast();
-        }
-    }
-}
-
 /// The environment variable of the test hook that fills the heap before `main` (plan section
 /// 12, condition 1): with a heap limit, the heap is counted as full but for this many bytes, so
 /// that a test reaches a fault on a full heap exactly in `unio run`, `unio test`, and an
@@ -95,8 +84,6 @@ pub struct Runtime {
     base: Option<u32>,
     /// The deepest call stack allowed before code 102 (C-18).
     pub stack_limit: usize,
-    /// The heap limit of the policy in bytes (SB-3); `None` leaves the system to decide.
-    pub heap_limit: Option<usize>,
     descriptors: BTreeMap<i64, File>,
     next_descriptor: i64,
     next_resource: u64,
@@ -107,24 +94,23 @@ pub struct Runtime {
     pub releases: Cell<usize>,
     /// The reserve for `release`, set aside before `main` (C-17).
     reserve: Reserve,
-    _ballast: Ballast,
+    /// Whether a refusal of the allocator is deferred (the harness of `unio test`).
+    deferred: bool,
+    /// The heap of the program and its limit (SB-3, C-18): the last field, so that it counts
+    /// the frees of everything else of the runtime.
+    meter: crate::heap::Meter,
 }
 
 impl Runtime {
     pub fn new(args: Vec<String>) -> Runtime {
-        // The reserve for `release` is set aside before anything of the program runs (C-17).
-        let reserve = Reserve::set_aside();
+        // The heap of the program is counted from here on (SB-3, C-18), the reserve for
+        // `release` included, which is set aside before anything of the program runs (C-17).
         let heap_limit = crate::sandbox::heap_limit();
+        let meter = crate::heap::Meter::start(heap_limit);
+        let reserve = Reserve::set_aside();
         let free = std::env::var(TEST_HEAP_FREE)
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok());
-        let ballast = match (heap_limit, free) {
-            (Some(limit), Some(free)) => {
-                crate::heap::fill_to(limit.saturating_sub(free));
-                true
-            }
-            _ => false,
-        };
         Runtime {
             args,
             output: Sink::Stdout,
@@ -136,7 +122,6 @@ impl Runtime {
             depth: 0,
             base: None,
             stack_limit: 10_000,
-            heap_limit,
             descriptors: BTreeMap::new(),
             next_descriptor: 3,
             next_resource: 1,
@@ -144,8 +129,18 @@ impl Runtime {
             fail_point: None,
             releases: Cell::new(0),
             reserve,
-            _ballast: Ballast(ballast),
+            deferred: false,
+            meter,
         }
+        .filled(heap_limit.zip(free))
+    }
+
+    /// Fills the heap by the test hook, once the runtime holds what it holds before `main`.
+    fn filled(self, limit_and_free: Option<(usize, usize)>) -> Runtime {
+        if let Some((limit, free)) = limit_and_free {
+            crate::heap::fill_to(limit.saturating_sub(free));
+        }
+        self
     }
 
     /// The reserve for `release` of this runtime (C-17).
@@ -160,6 +155,8 @@ impl Runtime {
         let mut runtime = Runtime::new(args);
         runtime.output = Sink::Buffer(Rc::clone(&out));
         runtime.error = Sink::Buffer(Rc::clone(&err));
+        // The harness goes on after a test that exhausted the heap (crate::heap, OVERDRAFT).
+        runtime.defer_refusals();
         (runtime, out, err)
     }
 
@@ -219,6 +216,10 @@ impl Runtime {
     pub fn enter_site(&mut self, site: u32, line: u32) -> Result<(), Unwind> {
         if self.depth >= self.stack_limit {
             return Err(Unwind::Exhausted(Exhaustion::Stack));
+        }
+        // A refusal the harness deferred ends the test at its next call (crate::heap).
+        if self.deferred && crate::heap::exhausted() {
+            return Err(Unwind::Exhausted(Exhaustion::Heap));
         }
         if self.depth == self.frames.len() {
             self.frames.push((site, line));
@@ -281,29 +282,62 @@ impl Runtime {
 
     // ---------------------------------------------------------------- memory
 
-    /// Ends with code 102 when the values of the program hold more than the heap limit. On the
-    /// path of a fault, the reserve for `release` bounds it instead, with or without a heap
-    /// limit and whatever room the heap has: once an allocation of the path did not fit in the
-    /// reserve, also a block freed again before this check, it is exhaustion
-    /// ([`crate::reserve::room`]; C-17, C-18).
+    /// Makes a refusal of the allocator end the test at its next check of the heap instead of
+    /// the process, as the harness of `unio test` does ([`Runtime::captured`], [`crate::heap`]).
+    pub fn defer_refusals(&mut self) {
+        self.meter.defer();
+        self.deferred = true;
+    }
+
+    /// The heap limit of the policy in bytes (SB-3); `None` leaves the system to decide.
+    pub fn heap_limit(&self) -> Option<usize> {
+        self.meter.limit()
+    }
+
+    /// Changes the heap limit, which the allocator enforces from the next allocation on.
+    pub fn set_heap_limit(&mut self, limit: Option<usize>) {
+        self.meter.set_limit(limit);
+    }
+
+    /// The heap of the program in bytes: every block its threads requested and still hold, the
+    /// reserve for `release` included (docs/runtime.md 3.3).
+    pub fn heap_bytes(&self) -> usize {
+        self.meter.bytes()
+    }
+
+    /// What a thread the runtime starts for the program needs to count into its heap.
+    pub fn heap_share(&self) -> crate::heap::Share {
+        self.meter.share()
+    }
+
+    /// Ends with code 102 when the program holds more than the heap limit, or a refusal of the
+    /// allocator was deferred (the harness of `unio test`, [`crate::heap`]). On the path of a
+    /// fault, the reserve for `release` bounds it instead, with or without a heap limit and
+    /// whatever room the heap has: once an allocation of the path did not fit in the reserve,
+    /// also a block freed again before this check, it is exhaustion ([`crate::reserve::room`];
+    /// C-17, C-18).
     pub fn check_heap(&self) -> Result<(), Unwind> {
         self.heap_room(0)
     }
 
     /// Ends with code 102 when `bytes` more would exceed the heap limit, or, on the path of a
     /// fault, would not fit in the reserve. Called before an allocation whose size the program
-    /// decides (a read buffer, a file, captured output), so that memory over the budget is
-    /// refused instead of allocated.
+    /// decides (a read buffer, a file, captured output), so that it unwinds instead of reaching
+    /// the refusal of the allocator.
     pub fn reserve_heap(&self, bytes: usize) -> Result<(), Unwind> {
         self.heap_room(bytes)
     }
 
     fn heap_room(&self, bytes: usize) -> Result<(), Unwind> {
+        if crate::heap::exhausted() {
+            return Err(Unwind::Exhausted(Exhaustion::Heap));
+        }
         let fits = match crate::reserve::room(bytes) {
             Some(fits) => fits,
             None => self
-                .heap_limit
-                .is_none_or(|limit| crate::heap::live_bytes().saturating_add(bytes) <= limit),
+                .meter
+                .limit()
+                .is_none_or(|limit| self.meter.bytes().saturating_add(bytes) <= limit),
         };
         if fits {
             Ok(())
@@ -393,12 +427,12 @@ mod tests {
     fn the_heap_limit_turns_into_exhaustion() {
         let mut runtime = Runtime::new(Vec::new());
         let _big = Value::bytes(vec![0; 1 << 20]);
-        runtime.heap_limit = Some(1024);
+        runtime.set_heap_limit(Some(1024));
         assert!(matches!(
             runtime.check_heap(),
             Err(Unwind::Exhausted(Exhaustion::Heap))
         ));
-        runtime.heap_limit = None;
+        runtime.set_heap_limit(None);
         assert!(runtime.check_heap().is_ok());
     }
 
@@ -410,43 +444,45 @@ mod tests {
 
     #[test]
     fn the_release_reserve_is_set_aside_before_main() {
-        let before = live_bytes();
         let mut runtime = Runtime::new(Vec::new());
         // Allocated, its pages written, counted in the heap, and closed.
         assert!(runtime.reserve().is_set_aside());
         assert_eq!(runtime.reserve().range().len(), RESERVE_BYTES);
         assert!(runtime.reserve().pages_are_written());
-        assert_eq!(live_bytes(), before + RESERVE_BYTES);
+        // The reserve, and the frames of the call stack, set aside as well (C-17).
+        let frames = 10_000 * std::mem::size_of::<(u32, u32)>();
+        assert_eq!(live_bytes(), RESERVE_BYTES + frames);
         assert!(!reserve::is_open());
         // Within the limit, not on top of it: at the minimum limit the program has the limit
-        // minus the reserve.
-        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
+        // minus the reserve, and the allocator refuses a block beyond it.
+        runtime.set_heap_limit(Some(MINIMUM_HEAP_LIMIT));
         let room = MINIMUM_HEAP_LIMIT - live_bytes();
         assert!(room <= MINIMUM_HEAP_LIMIT - RESERVE_BYTES);
         let fits = Value::bytes(vec![0; room - 64 * 1024]);
         assert!(runtime.check_heap().is_ok());
-        let over = Value::bytes(vec![0; 128 * 1024]);
+        let mut over: Vec<u8> = Vec::new();
+        assert!(reserve::fallible(|| over.try_reserve_exact(128 * 1024)).is_err());
         assert!(matches!(
-            runtime.check_heap(),
+            runtime.reserve_heap(128 * 1024),
             Err(Unwind::Exhausted(Exhaustion::Heap))
         ));
-        drop((fits, over));
+        drop(fits);
         drop(runtime);
-        assert_eq!(
-            live_bytes(),
-            before,
-            "the reserve leaves the count with its runtime"
-        );
+        assert_eq!(live_bytes(), 0, "the count leaves with its runtime");
     }
 
     #[test]
     fn the_reserve_opens_only_for_unwinding() {
         let mut runtime = Runtime::new(Vec::new());
-        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
+        runtime.set_heap_limit(Some(MINIMUM_HEAP_LIMIT));
+        runtime.stack_limit = 10;
+        runtime.enter("main", "a.unio", 1).unwrap();
+        let deep = runtime.site("deep".into(), "a.unio".into());
+        let error = Unwind::Error(Box::new(Value::Int(1)));
         fill_to(MINIMUM_HEAP_LIMIT + 1);
-        // User code on a full heap gets exhaustion, not the reserve.
-        let ordinary: Vec<u8> = Vec::with_capacity(64);
-        assert!(!reserve::contains(ordinary.as_ptr()));
+        // User code on a full heap gets exhaustion, not the reserve: the allocator refuses.
+        let mut ordinary: Vec<u8> = Vec::new();
+        assert!(reserve::fallible(|| ordinary.try_reserve_exact(64)).is_err());
         assert!(matches!(
             runtime.check_heap(),
             Err(Unwind::Exhausted(Exhaustion::Heap))
@@ -454,21 +490,21 @@ mod tests {
         assert!(runtime.reserve_heap(16).is_err());
         assert!(!reserve::is_open());
         // Neither an error nor stack exhaustion opens it.
-        let error = Unwind::Error(Box::new(Value::Int(1)));
         assert_eq!(error.exit_code(), None);
-        runtime.stack_limit = 0;
-        assert!(runtime.enter("deep", "a.unio", 1).is_err());
+        runtime.stack_limit = 1;
+        assert!(runtime.enter_site(deep, 1).is_err());
         assert!(!reserve::is_open());
         // A fault does, and the path of the fault may go on on the full heap.
         runtime.stack_limit = 10;
-        runtime.enter("main", "a.unio", 1).unwrap();
         let fault = runtime.fault(FaultKind::AssertFail, "boom");
         assert!(reserve::is_open());
         assert!(runtime.check_heap().is_ok());
         assert!(runtime.reserve_heap(4096).is_ok());
         assert!(runtime.reserve_heap(2 * RESERVE_BYTES).is_err());
+        let served: Vec<u8> = Vec::with_capacity(64);
+        assert!(reserve::contains(served.as_ptr()));
         // Received by expect_fault, it closes again: the program has its old budget.
-        drop(fault);
+        drop((fault, served));
         reserve::close();
         assert!(!reserve::is_open());
         assert!(runtime.check_heap().is_err());
@@ -508,8 +544,7 @@ mod tests {
     #[test]
     fn the_unwinding_path_allocates_from_the_reserved_pages() {
         let mut runtime = Runtime::new(Vec::new());
-        runtime.heap_limit = Some(MINIMUM_HEAP_LIMIT);
-        fill_to(MINIMUM_HEAP_LIMIT);
+        runtime.set_heap_limit(Some(MINIMUM_HEAP_LIMIT));
         let seen = Rc::new(RefCell::new(Vec::new()));
         let mut stack = ReleaseStack::new();
         for name in ["outer", "inner"] {
@@ -530,6 +565,8 @@ mod tests {
                 Ok(())
             }));
         }
+        // Full from here on: what the releases allocate can only come from the reserve.
+        fill_to(MINIMUM_HEAP_LIMIT);
         reserve::reset_peak();
         let fault = runtime.fault(FaultKind::DivisionByZero, "division by zero");
         let faults = stack.unwind_all(&mut runtime);
@@ -540,7 +577,10 @@ mod tests {
         );
         assert!(reserve::peak() > 2000 * 16, "the releases used the reserve");
         assert!(!reserve::overflowed());
-        // A release that needs more than the reserve is exhaustion.
+        // A release that needs more than the reserve is exhaustion, with room on the heap too
+        // (on a full heap the allocator refuses the block, which ends the program at once).
+        fill_to(0);
+        runtime.set_heap_limit(Some(8 * RESERVE_BYTES));
         let big: Vec<u8> = vec![1; RESERVE_BYTES + 1];
         let counted = Value::bytes(big);
         assert!(reserve::overflowed());
@@ -555,14 +595,15 @@ mod tests {
     #[test]
     fn a_block_over_the_reserve_freed_before_the_check_is_exhaustion() {
         let mut runtime = Runtime::new(Vec::new());
-        // On a full heap, with room on the heap, and without a heap limit: once the reserve
-        // is open, a block that does not fit in it is exhaustion, even freed at once.
+        // With little room on the heap, with much room, and without a heap limit: once the
+        // reserve is open, a block that does not fit in it is exhaustion, even freed at once.
+        // (On a full heap the allocator refuses the block itself: code 102 at once.)
         for (limit, filled) in [
-            (Some(MINIMUM_HEAP_LIMIT), MINIMUM_HEAP_LIMIT - 100_000),
+            (Some(8 * RESERVE_BYTES), 5 * RESERVE_BYTES),
             (Some(8 * RESERVE_BYTES), 0),
             (None, 0),
         ] {
-            runtime.heap_limit = limit;
+            runtime.set_heap_limit(limit);
             fill_to(filled);
             let fault = runtime.fault(FaultKind::DivisionByZero, "division by zero");
             assert!(runtime.check_heap().is_ok(), "{limit:?}");

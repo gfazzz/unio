@@ -546,7 +546,7 @@ const FAULT_ON_A_FULL_HEAP: &str = "public function main() returns Int:
 fn release_runs_from_the_reserve_after_a_fault_on_a_full_heap() {
     assert_the_heap_is_full("release");
     let dir = common::reserve_package("unio-interpreter", "release", FAULT_ON_A_FULL_HEAP);
-    let output = run_reserve(&dir, "run", Some(0));
+    let output = run_reserve(&dir, "run", Some(common::NEARLY_FULL));
     let err = program_err(&output);
     assert_eq!(output.status.code(), Some(101), "{err}");
     // Both releases ran, in reverse order: the log with its 2,000 texts, then the file, whose
@@ -593,7 +593,7 @@ fn a_fault_in_release_on_a_full_heap_still_releases_the_rest() {
     return 0
 ",
     );
-    let output = run_reserve(&dir, "run", Some(0));
+    let output = run_reserve(&dir, "run", Some(common::NEARLY_FULL));
     let err = program_err(&output);
     assert_eq!(output.status.code(), Some(101), "{err}");
     assert_eq!(
@@ -635,7 +635,7 @@ fn exhausting_the_reserve_in_release_ends_with_102() {
     return 0
 ",
     );
-    let output = run_reserve(&dir, "run", Some(0));
+    let output = run_reserve(&dir, "run", Some(common::NEARLY_FULL));
     let err = program_err(&output);
     assert_eq!(output.status.code(), Some(102), "{err}");
     assert_eq!(
@@ -852,11 +852,11 @@ test \"a fault on a full heap\":
 test \"expect_fault on a full heap\":
     expect_fault(expected)
     print(\"received\")
-    let words = [\"w {i}\" for i in range(0, 100)]
+    let words = [\"w {i}\" for i in range(0, 2000)]
     print(\"after {words.length()}\")
 ",
     );
-    let output = run_reserve(&dir, "test", Some(0));
+    let output = run_reserve(&dir, "test", Some(common::NEARLY_FULL));
     let out = text(&output.stdout);
     assert_eq!(
         output.status.code(),
@@ -876,7 +876,62 @@ test \"expect_fault on a full heap\":
         "{out}"
     );
     assert!(out.contains("received"), "{out}");
-    assert!(!out.contains("after 100"), "{out}");
+    assert!(!out.contains("after 2000"), "{out}");
     assert!(out.contains("memory exhausted"), "{out}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- the heap limit (RFC 0010)
+
+/// `limits.heap_bytes` is a hard limit on every block the program requests: 20,000 small
+/// structs, enums, and closures exceed 8 MiB through their wrappers, which the estimate of
+/// before did not count (that program ran to its end under the same policy). Without the limit
+/// it runs.
+#[test]
+fn small_structs_enums_and_closures_count_against_the_heap_limit() {
+    let dir = common::reserve_package("unio-interpreter", "small-values", common::SMALL_VALUES);
+    let output = run_reserve(&dir, "run", None);
+    let err = program_err(&output);
+    assert_eq!(output.status.code(), Some(102), "{err}");
+    assert_eq!(
+        err,
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    assert_eq!(text(&output.stdout), "");
+    common::set_heap_limit(&dir, None);
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(
+        text(&output.stdout),
+        "20000 20000 20000\n",
+        "{}",
+        program_err(&output)
+    );
+    // In `unio test` the test ends with exhaustion and the run goes on (docs/runtime.md 3.3).
+    common::set_heap_limit(&dir, Some(8_388_608));
+    let tests = SMALL_VALUES_TESTS.replace("MAIN", common::SMALL_VALUES);
+    fs::write(
+        dir.join("main.unio"),
+        format!("{}{tests}", common::RESERVE_PRELUDE),
+    )
+    .unwrap();
+    let output = run_reserve(&dir, "test", None);
+    let out = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{out}{}",
+        program_err(&output)
+    );
+    assert!(out.contains("memory exhausted"), "{out}");
+    assert!(out.contains("1 passed"), "{out}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+const SMALL_VALUES_TESTS: &str = "MAIN
+test \"many small values\":
+    main()
+
+test \"a few small values\":
+    let p = Point(x = 1, y = 2, z = 3)
+    assert p.x + p.y + p.z == 6
+";

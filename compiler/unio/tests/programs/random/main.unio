@@ -1,0 +1,26 @@
+# The random source of the operating system in a native executable: from_entropy, secure_bytes
+# and secure_int call getentropy on Linux and macOS and BCryptGenRandom on Windows, so building
+# this program links the system library of that call (bcrypt.lib on Windows). The output does
+# not depend on the random values; two calls that give the same 32 bytes are taken as a broken
+# source.
+
+import std.random as random
+
+function main():
+    var generator = random.from_entropy()
+    let drawn = generator.next_int(0, 10)
+    print("generator {drawn >= 0 and drawn < 10}")
+    let first = try random.secure_bytes(32) on random.RandomError as e:
+        assert_fail(e.reason)
+    let second = try random.secure_bytes(32) on random.RandomError as e:
+        assert_fail(e.reason)
+    print("bytes {first.length()} {second.length()} {first != second}")
+    let empty = try random.secure_bytes(0) on random.RandomError as e:
+        assert_fail(e.reason)
+    print("empty {empty.length()}")
+    let code = try random.secure_int(0, 1000000) on random.RandomError as e:
+        assert_fail(e.reason)
+    print("int {code >= 0 and code < 1000000}")
+    let one = try random.secure_int(7, 8) on random.RandomError as e:
+        assert_fail(e.reason)
+    print("one {one}")

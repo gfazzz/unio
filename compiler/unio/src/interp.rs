@@ -3929,8 +3929,9 @@ mod tests {
     use super::*;
 
     /// The peak use of the reserve for `release` (C-17, plan section 12 condition 1) in its
-    /// three measured cases, each on a heap the test hook filled to the limit, so that the whole
-    /// path of the fault runs from the reserve: deep unwinding (a `using` block in each of 9,000
+    /// three measured cases; the whole path of a fault runs from the reserve whatever room the
+    /// heap has (the heap counts every block since RFC 0010, so the program runs without a heap
+    /// limit to reach its faults 9,000 calls deep): deep unwinding (a `using` block in each of 9,000
     /// nested calls, each `release` building texts), repeated faults (on the same stack, every
     /// `release` meets an error it handles, and the innermost ten fault after it, each with a
     /// trace of about 9,000 frames), and a diagnostic with a long trace (a fault 9,990 calls
@@ -4010,12 +4011,9 @@ public function main() returns Int:
                     let module = program.modules.iter().position(|m| m.report).unwrap();
                     let interp = Interp::new(program);
                     let (mut rt, _out, err) = Runtime::captured(Vec::new());
-                    rt.heap_limit = Some(reserve::MINIMUM_HEAP_LIMIT);
-                    unio_runtime::heap::fill_to(reserve::MINIMUM_HEAP_LIMIT);
                     reserve::reset_peak();
                     let code = run_main(&interp, &mut rt, module);
                     let peak = reserve::peak();
-                    unio_runtime::heap::clear_ballast();
                     let err = String::from_utf8_lossy(&err.borrow()).into_owned();
                     (code, peak, err.lines().count(), err.len())
                 })

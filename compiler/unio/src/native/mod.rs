@@ -261,16 +261,8 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
         Target::LinuxX86_64 | Target::LinuxAarch64 => {
             let mut args: Vec<OsString> =
                 vec!["-o".into(), out.into(), object.into(), runtime.into()];
-            args.extend(os(&[
-                "-Wl,--gc-sections",
-                "-lgcc_s",
-                "-lutil",
-                "-lrt",
-                "-lpthread",
-                "-lm",
-                "-ldl",
-                "-lc",
-            ]));
+            args.push("-Wl,--gc-sections".into());
+            args.extend(os(system_libraries(target)));
             Ok(Linker {
                 program: linux_compiler(),
                 args,
@@ -285,7 +277,8 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
             args.push(sdk.clone().into());
             args.extend(["-o".into(), out.into(), object.into(), runtime.into()]);
             // No debug map: it would name the object file in the directory of this build.
-            args.extend(os(&["-Wl,-dead_strip", "-Wl,-S", "-lSystem", "-lc", "-lm"]));
+            args.extend(os(&["-Wl,-dead_strip", "-Wl,-S"]));
+            args.extend(os(system_libraries(target)));
             Ok(Linker {
                 program,
                 args,
@@ -294,6 +287,37 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
             })
         }
         Target::WindowsX86_64 => windows_linker(object, runtime, out),
+    }
+}
+
+/// The system libraries an executable of `target` is linked with: those that rustc reports for
+/// the static library of this crate on that target (`--print native-static-libs`), which
+/// tests/native.rs compares with what rustc prints on each machine that makes executables. A
+/// `#[link]` added to the runtime or to a dependency adds its library here.
+pub fn system_libraries(target: Target) -> &'static [&'static str] {
+    match target {
+        Target::LinuxX86_64 | Target::LinuxAarch64 => &[
+            "-lgcc_s",
+            "-lutil",
+            "-lrt",
+            "-lpthread",
+            "-lm",
+            "-ldl",
+            "-lc",
+        ],
+        Target::MacosAarch64 => &["-lSystem", "-lc", "-lm"],
+        Target::WindowsX86_64 => &[
+            // The random source of the system (`BCryptGenRandom`, externs/clock.rs).
+            "bcrypt.lib",
+            "kernel32.lib",
+            // The AppContainers, the access control lists, and the tokens of the sandbox.
+            "advapi32.lib",
+            "ntdll.lib",
+            "userenv.lib",
+            "ws2_32.lib",
+            "dbghelp.lib",
+            "/DEFAULTLIB:msvcrt",
+        ],
     }
 }
 
@@ -389,16 +413,7 @@ fn windows_linker(object: &Path, runtime: &Path, out: &Path) -> Result<Linker, S
         object.into(),
         plain_path(runtime).into(),
     ];
-    for lib in [
-        "kernel32.lib",
-        // The AppContainers, the access control lists, and the tokens of the sandbox.
-        "advapi32.lib",
-        "ntdll.lib",
-        "userenv.lib",
-        "ws2_32.lib",
-        "dbghelp.lib",
-        "/DEFAULTLIB:msvcrt",
-    ] {
+    for lib in system_libraries(Target::WindowsX86_64) {
         args.push(lib.into());
     }
     // LIB and LIBPATH locate the libraries of MSVC and the Windows SDK; PATH starts with the

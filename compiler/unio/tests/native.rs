@@ -612,6 +612,120 @@ fn or_with_an_option_on_the_right_matches_the_interpreter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The random source of the operating system in an executable: `from_entropy`, `secure_bytes`,
+/// and `secure_int` call `getentropy` (Linux, macOS) or `BCryptGenRandom` (Windows), so the
+/// link step must name the system library of that call (`bcrypt.lib` on Windows).
+#[test]
+fn the_random_source_of_the_system_links_and_runs() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("random");
+    let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/random/main.unio");
+    for release in [false, true] {
+        let exe = build(&program, &dir, release);
+        let output = native(&exe, &case(program.clone(), &[], &dir));
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        assert_eq!(
+            text(&output.stdout),
+            "generator true\nbytes 32 32 true\nempty 0\nint true\none 7\n"
+        );
+    }
+    let differences = compare(&[case(program, &[], &dir)], &dir);
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The system libraries that `unio build` links an executable with are those rustc reports
+/// for the static library of the runtime (`--print native-static-libs`) on this machine: a
+/// probe static library made of the rlib of this crate, which carries every `#[link]` of the
+/// crate and of its dependencies for this target, and of the standard library. Compared as
+/// sets: rustc may repeat a library. Skipped only when rustc cannot be run.
+#[test]
+fn the_linked_system_libraries_are_those_rustc_reports() {
+    let Some(target) = unio::native::Target::host() else {
+        eprintln!("skipped: no native executables are made for this machine");
+        return;
+    };
+    let deps = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    // The rlib this test is linked with: the newest of the crate in the directory of the tests.
+    let rlib = fs::read_dir(&deps)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("libunio-") && name.ends_with(".rlib")
+        })
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .expect("the rlib of the crate next to the tests")
+        .path();
+    let dir = scratch("native-static-libs");
+    fs::write(dir.join("probe.rs"), "extern crate unio;\n").unwrap();
+    let mut extern_arg = std::ffi::OsString::from("unio=");
+    extern_arg.push(&rlib);
+    let mut dependency = std::ffi::OsString::from("dependency=");
+    dependency.push(&deps);
+    let output = Command::new("rustc")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "--edition",
+            "2021",
+            "--crate-type",
+            "staticlib",
+            "--crate-name",
+            "probe",
+        ])
+        .args(["--print", "native-static-libs", "-C", "opt-level=0"])
+        .arg("--extern")
+        .arg(extern_arg)
+        .arg("-L")
+        .arg(dependency)
+        .arg("-o")
+        .arg(dir.join(target.runtime_file()))
+        .arg(dir.join("probe.rs"))
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("skipped: rustc cannot be run ({e})");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    let _ = fs::remove_dir_all(&dir);
+    let stderr = text(&output.stderr);
+    assert!(output.status.success(), "rustc failed:\n{stderr}");
+    let printed = stderr
+        .lines()
+        .find_map(|l| l.split_once("native-static-libs: ").map(|(_, libs)| libs))
+        .unwrap_or_else(|| panic!("rustc printed no native-static-libs:\n{stderr}"));
+    let windows = target == unio::native::Target::WindowsX86_64;
+    let set = |items: Vec<&str>| -> std::collections::BTreeSet<String> {
+        items
+            .into_iter()
+            .map(|l| {
+                if windows {
+                    l.to_ascii_lowercase()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect()
+    };
+    let expected = set(printed.split_whitespace().collect());
+    let linked = set(unio::native::system_libraries(target).to_vec());
+    assert_eq!(
+        linked,
+        expected,
+        "the system libraries of {} differ from what rustc prints: {printed}",
+        target.name()
+    );
+}
+
 #[test]
 fn two_builds_are_byte_for_byte_the_same() {
     if !supported() {
@@ -1169,7 +1283,7 @@ fn the_executable_releases_from_the_reserve_after_a_fault_on_a_full_heap() {
     );
     let (_, filled) = run_both(&full, Some(0));
     assert_eq!(filled.status.code(), Some(102));
-    let (_, found) = run_both(&dir, Some(0));
+    let (_, found) = run_both(&dir, Some(common::NEARLY_FULL));
     let err = errors(&found);
     assert_eq!(found.status.code(), Some(101), "{err}");
     assert_eq!(
@@ -1213,7 +1327,7 @@ fn the_executable_does_not_release_on_exhaustion() {
     return 0
 ",
     );
-    let (_, found) = run_both(&dir, Some(0));
+    let (_, found) = run_both(&dir, Some(common::NEARLY_FULL));
     assert_eq!(found.status.code(), Some(102));
     assert_eq!(
         errors(&found),
@@ -1352,5 +1466,25 @@ fn the_executable_ends_a_release_beyond_the_reserve_with_102_without_a_heap_limi
     assert_eq!(common::temporaries(&dir), Vec::<String>::new());
     common::assert_target_unchanged(&dir);
     assert!(err.starts_with("fault: division by zero\n"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// RFC 0010: the executable counts every block as `unio run` does, so 20,000 small structs,
+/// enums, and closures exceed a heap limit of 8 MiB in both (before, both ran to the end).
+#[test]
+fn the_executable_counts_small_values_against_the_heap_limit() {
+    if !supported() {
+        return;
+    }
+    let dir = common::reserve_package("unio-native", "small-values", common::SMALL_VALUES);
+    let (_, found) = run_both(&dir, None);
+    assert_eq!(found.status.code(), Some(102), "{}", errors(&found));
+    assert_eq!(
+        errors(&found),
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    common::set_heap_limit(&dir, None);
+    let (_, found) = run_both(&dir, None);
+    assert_eq!(text(&found.stdout), "20000 20000 20000\n");
     let _ = fs::remove_dir_all(&dir);
 }

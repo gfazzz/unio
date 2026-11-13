@@ -567,6 +567,32 @@ fn a_worker_over_the_compile_cpu_limit_is_stopped_alike_in_every_command() {
     }
 }
 
+/// (f) A worker killed by a signal is not taken for one that spent its CPU time: the tool
+/// decides by the CPU time the worker used (its resource usage when it is reaped), not by the
+/// wall time it ran, so a worker that slept past `compile.cpu_seconds` and was then killed by
+/// SIGKILL ends abnormally (code 101), and the report names the signal and the CPU time.
+#[cfg(unix)]
+#[test]
+fn a_killed_worker_is_not_reported_as_over_the_cpu_limit() {
+    let p = Project::new("compile-killed");
+    let policy = p.policy("[compile]\ncpu_seconds = 1\nwall_seconds = 60\n");
+    let (name, args) = compile_commands(&p, &policy).into_iter().next().unwrap();
+    let output = unio_with(&p, &args, &[("UNIO_WORKER_PROBE", "sleep=2;kill")]);
+    assert_eq!(output.status.code(), Some(101), "{name}: {}", all(&output));
+    let stderr = text(&output.stderr);
+    assert!(
+        !stderr.contains("CPU time limit"),
+        "{name}: {}",
+        all(&output)
+    );
+    assert!(
+        stderr.contains("ended abnormally") && stderr.contains("SIGKILL"),
+        "{name}: {}",
+        all(&output)
+    );
+    assert!(stderr.contains("of CPU time"), "{name}: {}", all(&output));
+}
+
 /// The limits of the program (`[limits]`) do not reach the workers of the tools: a heap of
 /// 2 MiB, a wall time of 1 s, and a CPU time of 1 s for the program leave the compile step the
 /// defaults of 2 GiB and 10 minutes, so it may take 512 MiB and outlast a second, and the

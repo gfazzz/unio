@@ -540,18 +540,7 @@ fn utf8_width(lead: u8) -> usize {
     }
 }
 
-impl crate::heap::Measure for TextData {
-    /// The index is counted as if it were built, so that the count does not depend on
-    /// which positions a program happened to use.
-    fn measure(&self) -> usize {
-        let index = if self.is_ascii() {
-            0
-        } else {
-            (self.chars / STRIDE + 1) * std::mem::size_of::<usize>()
-        };
-        self.string.capacity() + index
-    }
-}
+impl crate::heap::Contents for TextData {}
 
 impl Text {
     /// A text; its length is counted once, in time proportional to its size.
@@ -666,7 +655,6 @@ impl Text {
                     tail.chars().count()
                 };
                 data.index = std::cell::OnceCell::new();
-                data.recount();
                 self.end = data.chars;
                 return self;
             }
@@ -699,11 +687,7 @@ impl fmt::Debug for Text {
     }
 }
 
-impl crate::heap::Measure for Vec<Value> {
-    fn measure(&self) -> usize {
-        self.capacity() * std::mem::size_of::<Value>()
-    }
-
+impl crate::heap::Contents for Vec<Value> {
     fn release(&mut self) {
         if self.iter().any(owns_values) {
             release(Pending::Values(std::mem::take(self).into_iter()));
@@ -711,11 +695,7 @@ impl crate::heap::Measure for Vec<Value> {
     }
 }
 
-impl crate::heap::Measure for Vec<u8> {
-    fn measure(&self) -> usize {
-        self.capacity()
-    }
-}
+impl crate::heap::Contents for Vec<u8> {}
 
 // ---------------------------------------------------------------- hashing
 
@@ -930,12 +910,7 @@ impl OrderedMap {
     }
 }
 
-impl crate::heap::Measure for OrderedMap {
-    fn measure(&self) -> usize {
-        self.entries.capacity() * 2 * std::mem::size_of::<Value>()
-            + self.index.capacity() * (std::mem::size_of::<Value>() + 16)
-    }
-
+impl crate::heap::Contents for OrderedMap {
     fn release(&mut self) {
         // A key is held twice, by its entry and by the index, so both are handed over: the one
         // dropped last frees the key, and it must not do so by recursion either.
@@ -996,11 +971,7 @@ impl OrderedSet {
     }
 }
 
-impl crate::heap::Measure for OrderedSet {
-    fn measure(&self) -> usize {
-        self.map.measure()
-    }
-
+impl crate::heap::Contents for OrderedSet {
     fn release(&mut self) {
         self.map.release();
     }
@@ -1121,6 +1092,10 @@ fn release(work: Pending) {
             None => break,
         }
     }
+    // The list grows with the depth of what was freed (72 bytes a level that is not the last
+    // item of its parent); it is given back, so that the heap does not keep its peak. This
+    // runs only for structures deeper than `DEEP` levels.
+    PENDING.with(|p| *p.borrow_mut() = Vec::new());
     RELEASING.with(|r| r.set(false));
 }
 
@@ -1167,7 +1142,7 @@ mod tests {
         let freed = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
             .spawn(|| {
-                let before = crate::heap::live_bytes();
+                let _meter = crate::heap::Meter::start(None);
                 let depth = 1_000_000;
                 let wrappers: [fn(usize, Value) -> Value; 6] = [
                     |_, v| Value::list(vec![Value::text("item"), v]),
@@ -1187,6 +1162,16 @@ mod tests {
                         Value::map(map)
                     },
                 ];
+                // What the thread keeps once it has made and freed a chain (the shared names
+                // of `Option`) is counted before, not after.
+                for wrap in wrappers {
+                    let mut chain = Value::Unit;
+                    for i in 0..1000 {
+                        chain = wrap(i, chain);
+                    }
+                    drop(chain);
+                }
+                let before = crate::heap::live_bytes();
                 for wrap in wrappers {
                     let mut chain = Value::Unit;
                     for i in 0..depth {
@@ -1304,6 +1289,51 @@ mod tests {
         assert_ne!(a.finish(), c.finish());
     }
 
+    /// The heap counts what is requested from the allocator, once: a value shared by several
+    /// places is counted once, and a value nested in another is counted as its own blocks.
+    #[test]
+    fn the_heap_counts_each_block_once() {
+        use std::mem::size_of;
+        // The block of an `Rc<T>`: two counts and the value.
+        fn rc<T>() -> usize {
+            2 * size_of::<usize>() + size_of::<T>()
+        }
+        let meter = crate::heap::Meter::start(None);
+        let bytes = Value::bytes(Vec::with_capacity(1000));
+        let one = rc::<crate::heap::Counted<Vec<u8>>>() + 1000;
+        assert_eq!(meter.bytes(), one);
+        let shared = bytes.clone();
+        assert_eq!(meter.bytes(), one, "sharing allocates nothing");
+        let list = Value::list(vec![bytes.clone(), shared, bytes.clone()]);
+        let outer = rc::<crate::heap::Counted<Vec<Value>>>() + 3 * size_of::<Value>();
+        assert_eq!(
+            meter.bytes(),
+            one + outer,
+            "the nested value is not counted again"
+        );
+        let nested = Value::list(vec![list.clone(), list.clone()]);
+        let both = rc::<crate::heap::Counted<Vec<Value>>>() + 2 * size_of::<Value>();
+        assert_eq!(meter.bytes(), one + outer + both);
+        // Changing a shared value copies the level that changes, and that copy is counted.
+        let mut changed = list.clone();
+        if let Value::List(items) = &mut changed {
+            Rc::make_mut(items).push(Value::Int(1));
+        }
+        let copied = meter.bytes() - (one + outer + both);
+        assert!(copied >= outer + size_of::<Value>(), "{copied}");
+        // A struct, an enum and a text: the wrappers that the estimate of before left out.
+        let before = meter.bytes();
+        let record = Value::record("Point", vec![("x", Value::Int(1)), ("y", Value::Int(2))]);
+        // The struct, its name (16 bytes of counts and 5 of text, rounded up to 24), its fields
+        // (collected in place into the vector the literal made), and the two field names.
+        let name = |n: usize| (2 * size_of::<usize>() + n).next_multiple_of(8);
+        let record_bytes =
+            rc::<StructValue>() + name(5) + 2 * size_of::<(Rc<str>, Value)>() + 2 * name(1);
+        assert_eq!(meter.bytes() - before, record_bytes);
+        drop((bytes, list, nested, changed, record));
+        assert_eq!(meter.bytes(), 0);
+    }
+
     #[test]
     fn copy_on_write_copies_only_shared_values() {
         let original = Value::list(vec![Value::Int(1)]);
@@ -1311,7 +1341,6 @@ mod tests {
         if let Value::List(items) = &mut copy {
             let items = Rc::make_mut(items);
             items.push(Value::Int(2));
-            items.recount();
         }
         match (&original, &copy) {
             (Value::List(a), Value::List(b)) => {

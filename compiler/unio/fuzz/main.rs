@@ -14,30 +14,41 @@
 //! Commands:
 //!
 //! ```text
-//! fuzz run [--targets T,T...] [--jobs N] [--minutes M] [--work DIR] [--timeout S] [--memory-mb MB]
+//! fuzz run [--targets T,T...] [--jobs N] [--minutes M | --seconds S] [--min-share F]
+//!          [--work DIR] [--timeout S] [--memory-mb MB]
 //! fuzz exec --target T FILE...
 //! fuzz minimize --target T FILE [--output FILE]
 //! ```
 //!
-//! `run` starts N worker processes, each fuzzing one target (in turn from the list), and
-//! watches them: a panic is recorded by the worker, which goes on; an abort, an overflow of the
-//! stack, or a signal ends the worker, and the supervisor records the input it was running from
-//! `WORK/scratch-I/current` and starts it again; an input that runs longer than the timeout is
-//! recorded as a hang. Findings go to `WORK/crashes/` (input and a `.txt` with the reason), the
-//! corpus to `WORK/corpus/TARGET/`, shared by the workers and kept between runs. The exit code
-//! is 1 when the run recorded a finding. A finding becomes a regression test when its
-//! (minimized) input is copied to `tests/data/fuzz/TARGET/` (`tests/fuzz.rs`).
+//! `run` starts N worker processes (N defaults to the number of targets and may not be fewer),
+//! each fuzzing one target (in turn from the list, so every target has at least one), and
+//! watches them through the supervisor (`supervisor.rs`): a panic is recorded by the worker,
+//! which goes on; an abort, an overflow of the stack, or a signal ends the worker, and the
+//! supervisor records the input it was running from `WORK/scratch-I/current` and starts it
+//! again; an input that runs longer than the timeout is recorded as a hang; a worker that dies
+//! before it wrote an input is a finding as well, kept with its output. Findings go to
+//! `WORK/crashes/` (input and a `.txt` with the reason), the corpus to `WORK/corpus/TARGET/`,
+//! shared by the workers and kept between runs. The supervisor counts the wall time, the
+//! processor time (on Linux), and the executions of every worker across restarts
+//! (`WORK/stats-I`) and writes `WORK/summary.json`. The exit code is 1 when the run recorded a
+//! finding or a worker ran less than `--min-share` (0.95) of the time or no input at all, and
+//! 2 on a usage error. A finding becomes a regression test when its (minimized) input is copied
+//! to `tests/data/fuzz/TARGET/` (`tests/fuzz.rs`). `UNIO_FUZZ_FAULT=KIND:TARGET` makes the
+//! worker of TARGET fail on purpose (`fault` below), to check that the supervisor catches it.
 
+#[path = "supervisor.rs"]
+mod supervisor;
 #[path = "targets.rs"]
 mod targets;
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+
+use supervisor::{fnv, now_secs};
 
 // ---------------------------------------------------------------- coverage
 
@@ -212,15 +223,6 @@ impl Rng {
     fn chance(&mut self, one_in: usize) -> bool {
         self.below(one_in) == 0
     }
-}
-
-fn fnv(data: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in data {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
 }
 
 const MAX_LEN: usize = 64 * 1024;
@@ -660,12 +662,6 @@ impl Args {
     }
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 fn main() -> ExitCode {
     let result = args().and_then(|args| match args.command.as_str() {
         "run" => supervise(&args),
@@ -848,6 +844,8 @@ struct Session {
     findings: usize,
     /// Panics recorded per place, at most three inputs each.
     places: HashMap<String, usize>,
+    /// A fault asked for by `UNIO_FUZZ_FAULT`, for the tests of the supervisor.
+    fault: Option<String>,
 }
 
 impl Session {
@@ -855,6 +853,10 @@ impl Session {
     /// panic is recorded).
     fn execute(&mut self, data: &[u8], coverage: &mut Coverage) -> bool {
         let _ = std::fs::write(&self.current, data);
+        if self.fault.as_deref() == Some("abort-in-input") {
+            eprintln!("fuzz[{}]: the fault abort-in-input", self.id);
+            std::process::abort();
+        }
         coverage.clear();
         let result = run_one(&self.target, data, &self.scratch);
         self.execs += 1;
@@ -878,12 +880,53 @@ impl Session {
         false
     }
 
-    fn stats(&self, corpus: usize, edges: usize) -> String {
-        format!(
-            "{} execs {} corpus {corpus} edges {edges} findings {}\n",
-            self.target, self.execs, self.findings
-        )
+    /// The counters for the supervisor (`supervisor.rs`), `NAME VALUE` per line.
+    fn stats(&self, corpus: usize, coverage: &Coverage) -> String {
+        let mut text = format!(
+            "target {}\nexecs {}\ncorpus {corpus}\nedges {}\ncounters {}\nfindings {}\n",
+            self.target,
+            self.execs,
+            coverage.edges,
+            coverage.total(),
+            self.findings
+        );
+        if let Some(ms) = cpu_ms() {
+            text.push_str(&format!("cpu_ms {ms}\n"));
+        }
+        text
     }
+}
+
+/// Writes the counters whole, so that the supervisor never reads half of them.
+fn write_stats(path: &Path, text: &str) {
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".new");
+    if std::fs::write(&partial, text).is_ok() {
+        let _ = std::fs::rename(&partial, path);
+    }
+}
+
+/// The processor time of this process, threads that ended included, in milliseconds: user and
+/// system time from `/proc/self/stat`, in the clock ticks of 1/100 second that Linux reports
+/// there on every architecture. None elsewhere.
+fn cpu_ms() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = &text[text.rfind(')')? + 1..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // Fields 14 and 15 of stat(5); the rest begins with field 3.
+    let user: u64 = fields.get(11)?.parse().ok()?;
+    let system: u64 = fields.get(12)?.parse().ok()?;
+    Some((user + system) * 10)
+}
+
+/// The fault `UNIO_FUZZ_FAULT=KIND:TARGET` asks the worker of TARGET for: `abort-before-input`
+/// (the worker aborts before it writes any input), `abort-in-input` (it aborts on its first
+/// input, after writing it), or `idle` (it ends at once with success, running nothing). The
+/// supervisor must fail the run in each case; the tests of the harness use it.
+fn fault(target: &str) -> Option<String> {
+    let value = std::env::var("UNIO_FUZZ_FAULT").ok()?;
+    let (kind, of) = value.split_once(':')?;
+    (of == target).then(|| kind.to_string())
 }
 
 fn worker(args: &Args) -> Result<(), String> {
@@ -891,6 +934,18 @@ fn worker(args: &Args) -> Result<(), String> {
     let work = PathBuf::from(args.get("work", "fuzz-work"));
     let id = args.get("id", "0");
     let until = args.number("until", now_secs() + 60)?;
+    let fault = fault(&target);
+    match fault.as_deref() {
+        Some("abort-before-input") => {
+            eprintln!("fuzz[{id}]: the fault abort-before-input");
+            std::process::abort();
+        }
+        Some("idle") => {
+            eprintln!("fuzz[{id}]: the fault idle");
+            return Ok(());
+        }
+        _ => {}
+    }
     let scratch = work.join(format!("scratch-{id}"));
     let crashes = work.join("crashes");
     let corpus_dir = work.join("corpus").join(&target);
@@ -898,7 +953,7 @@ fn worker(args: &Args) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let current = scratch.join("current");
-    let stats = work.join(format!("stats-{id}"));
+    let stats = scratch.join("stats");
     quiet_panics();
     let kind = targets::seeds(&target);
     let seeds = seed_inputs(kind);
@@ -927,11 +982,17 @@ fn worker(args: &Args) -> Result<(), String> {
         execs: 0,
         findings: 0,
         places: HashMap::new(),
+        fault,
     };
     // The corpus of earlier runs and of the other workers, then the seeds.
     let mut start: Vec<Vec<u8>> = corpus.unseen();
     start.extend(seeds);
+    let mut last_stats = Instant::now();
     for data in start {
+        if last_stats.elapsed() > Duration::from_secs(5) {
+            last_stats = Instant::now();
+            write_stats(&stats, &session.stats(corpus.inputs.len(), &coverage));
+        }
         // Without instrumentation every seed is kept: there is no coverage to choose by.
         if session.execute(&data, &mut coverage)
             || coverage.total() == 0
@@ -973,127 +1034,17 @@ fn worker(args: &Args) -> Result<(), String> {
                     corpus.inputs.push(data);
                 }
             }
-            let _ = std::fs::write(&stats, session.stats(corpus.inputs.len(), coverage.edges));
+        }
+        if last_stats.elapsed() > Duration::from_secs(5) {
+            last_stats = Instant::now();
+            write_stats(&stats, &session.stats(corpus.inputs.len(), &coverage));
         }
     }
-    let _ = std::fs::write(&stats, session.stats(corpus.inputs.len(), coverage.edges));
+    write_stats(&stats, &session.stats(corpus.inputs.len(), &coverage));
     Ok(())
 }
 
 // ---------------------------------------------------------------- the supervisor
-
-struct Running {
-    child: Child,
-    target: String,
-    id: usize,
-    stderr: std::sync::Arc<Mutex<Vec<u8>>>,
-}
-
-fn spawn(
-    id: usize,
-    target: &str,
-    work: &Path,
-    until: u64,
-    memory_mb: u64,
-) -> Result<Running, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let worker_args = [
-        "worker".to_string(),
-        "--target".to_string(),
-        target.to_string(),
-        "--work".to_string(),
-        work.display().to_string(),
-        "--id".to_string(),
-        id.to_string(),
-        "--until".to_string(),
-        until.to_string(),
-    ];
-    // A limit of the address space, where the shell can set one, so that an input that makes
-    // the compiler allocate without bound ends as a finding, not as the end of the runner.
-    let mut command = if cfg!(unix) && memory_mb > 0 {
-        let mut c = Command::new("sh");
-        c.arg("-c")
-            .arg(format!(
-                "ulimit -v {} && exec \"$0\" \"$@\"",
-                memory_mb * 1024
-            ))
-            .arg(&exe)
-            .args(&worker_args);
-        c
-    } else {
-        let mut c = Command::new(&exe);
-        c.args(&worker_args);
-        c
-    };
-    let mut child = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let stderr = std::sync::Arc::new(Mutex::new(Vec::new()));
-    let mut pipe = child.stderr.take().expect("piped");
-    let keep = std::sync::Arc::clone(&stderr);
-    std::thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        while let Ok(n) = pipe.read(&mut buffer) {
-            if n == 0 {
-                break;
-            }
-            // Echo the output of the worker and keep its tail for the record of a crash.
-            eprint!("{}", String::from_utf8_lossy(&buffer[..n]));
-            let mut kept = keep.lock().unwrap_or_else(|e| e.into_inner());
-            kept.extend_from_slice(&buffer[..n]);
-            let excess = kept.len().saturating_sub(8192);
-            kept.drain(..excess);
-        }
-    });
-    Ok(Running {
-        child,
-        target: target.to_string(),
-        id,
-        stderr,
-    })
-}
-
-fn record(work: &Path, running: &Running, kind: &str, reason: &str) -> bool {
-    let current = work.join(format!("scratch-{}", running.id)).join("current");
-    let Ok(data) = std::fs::read(&current) else {
-        return false;
-    };
-    let crashes = work.join("crashes");
-    let _ = std::fs::create_dir_all(&crashes);
-    let name = format!("{}-{kind}-{}", running.target, fnv(&data));
-    let tail = running
-        .stderr
-        .lock()
-        .map(|t| String::from_utf8_lossy(&t).to_string())
-        .unwrap_or_default();
-    let _ = std::fs::write(crashes.join(&name), &data);
-    let _ = std::fs::write(
-        crashes.join(format!("{name}.txt")),
-        format!(
-            "target {}\n{reason}\n\nlast output:\n{tail}\n",
-            running.target
-        ),
-    );
-    eprintln!("fuzz: {reason}: input in crashes/{name}");
-    let _ = std::fs::remove_file(&current);
-    true
-}
-
-fn findings(work: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(work.join("crashes"))
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|n| !n.ends_with(".txt"))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
-}
 
 fn supervise(args: &Args) -> Result<bool, String> {
     let list = args.get("targets", &targets::TARGETS.join(","));
@@ -1103,103 +1054,57 @@ fn supervise(args: &Args) -> Result<bool, String> {
             return Err(format!("no target {target}"));
         }
     }
-    let jobs = args.number("jobs", chosen.len() as u64)?.max(1) as usize;
+    let jobs = args.number("jobs", chosen.len() as u64)? as usize;
     let minutes = args.number("minutes", 10)?;
-    let timeout = Duration::from_secs(args.number("timeout", 60)?);
+    let seconds = args.number("seconds", minutes * 60)?;
+    let min_share = match args.options.get("min-share") {
+        None => 0.95,
+        Some(v) => v
+            .parse::<f64>()
+            .map_err(|_| format!("--min-share: not a number: {v}"))?,
+    };
     let memory_mb = args.number("memory-mb", 4096)?;
-    let work = PathBuf::from(args.get("work", "fuzz-work"));
-    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let work = std::fs::canonicalize(&work).map_err(|e| e.to_string())?;
-    let before: HashSet<String> = findings(&work).into_iter().collect();
-    let until = now_secs() + minutes * 60;
-    eprintln!(
-        "fuzz: {jobs} workers on {} for {minutes} minutes, work directory {}",
-        chosen.join(", "),
-        work.display()
-    );
-    let mut running: Vec<Running> = Vec::new();
-    for id in 0..jobs {
-        let target = &chosen[id % chosen.len()];
-        let _ = std::fs::remove_file(work.join(format!("scratch-{id}")).join("current"));
-        running.push(spawn(id, target, &work, until, memory_mb)?);
-    }
-    let mut last_report = Instant::now();
-    let mut restarts = 0usize;
-    while !running.is_empty() {
-        std::thread::sleep(Duration::from_millis(500));
-        let mut i = 0;
-        while i < running.len() {
-            let id = running[i].id;
-            let current = work.join(format!("scratch-{id}")).join("current");
-            match running[i].child.try_wait() {
-                Ok(Some(status)) => {
-                    let worker = running.remove(i);
-                    // Give the reader of its output a moment to keep the last lines.
-                    std::thread::sleep(Duration::from_millis(100));
-                    if !status.success() {
-                        record(&work, &worker, "crash", &format!("worker ended: {status}"));
-                        if now_secs() + 5 < until && restarts < 1000 {
-                            restarts += 1;
-                            running.push(spawn(id, &worker.target, &work, until, memory_mb)?);
-                        }
-                    }
-                    continue;
-                }
-                Ok(None) => {
-                    let stuck = std::fs::metadata(&current)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > timeout);
-                    if stuck {
-                        let _ = running[i].child.kill();
-                        let _ = running[i].child.wait();
-                        let worker = running.remove(i);
-                        record(
-                            &work,
-                            &worker,
-                            "hang",
-                            &format!("no result within {} seconds", timeout.as_secs()),
-                        );
-                        if now_secs() + 5 < until {
-                            running.push(spawn(id, &worker.target, &work, until, memory_mb)?);
-                        }
-                        continue;
-                    }
-                    if now_secs() > until + 120 {
-                        let _ = running[i].child.kill();
-                    }
-                }
-                Err(e) => return Err(e.to_string()),
-            }
-            i += 1;
-        }
-        if last_report.elapsed() > Duration::from_secs(60) {
-            last_report = Instant::now();
-            report(&work, jobs);
-        }
-    }
-    report(&work, jobs);
-    let new: Vec<String> = findings(&work)
-        .into_iter()
-        .filter(|n| !before.contains(n))
-        .collect();
-    if new.is_empty() {
-        eprintln!("fuzz: no findings");
-        Ok(true)
-    } else {
-        eprintln!("fuzz: {} findings:", new.len());
-        for name in &new {
-            eprintln!("  crashes/{name}");
-        }
-        Ok(false)
-    }
+    let config = supervisor::Config {
+        targets: chosen,
+        jobs,
+        seconds,
+        timeout: Duration::from_secs(args.number("timeout", 60)?),
+        min_share,
+        work: PathBuf::from(args.get("work", "fuzz-work")),
+        command: std::env::args().collect(),
+    };
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    supervisor::run(&config, &|spec| worker_command(&exe, spec, memory_mb))
 }
 
-fn report(work: &Path, jobs: usize) {
-    for id in 0..jobs {
-        if let Ok(line) = std::fs::read_to_string(work.join(format!("stats-{id}"))) {
-            eprint!("fuzz[{id}]: {line}");
-        }
+/// The command of a worker process: this program with `worker`, under a limit of the address
+/// space where the shell can set one, so that an input that makes the compiler allocate
+/// without bound ends as a finding, not as the end of the runner.
+fn worker_command(exe: &Path, spec: &supervisor::Spec, memory_mb: u64) -> Command {
+    let worker_args = [
+        "worker".to_string(),
+        "--target".to_string(),
+        spec.target.to_string(),
+        "--work".to_string(),
+        spec.work.display().to_string(),
+        "--id".to_string(),
+        spec.id.to_string(),
+        "--until".to_string(),
+        spec.until.to_string(),
+    ];
+    if cfg!(unix) && memory_mb > 0 {
+        let mut c = Command::new("sh");
+        c.arg("-c")
+            .arg(format!(
+                "ulimit -v {} && exec \"$0\" \"$@\"",
+                memory_mb * 1024
+            ))
+            .arg(exe)
+            .args(&worker_args);
+        c
+    } else {
+        let mut c = Command::new(exe);
+        c.args(&worker_args);
+        c
     }
 }

@@ -386,7 +386,7 @@ fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
     std::fs::write(&file, vec![b'x'; 300_000]).unwrap();
     let mut rt = Runtime::new(vec![]);
     // The reserve for `release` counts within the limit (C-17): 100,000 bytes for the program.
-    rt.heap_limit = Some(unio_runtime::reserve::RESERVE_BYTES + 100_000);
+    rt.set_heap_limit(Some(unio_runtime::reserve::RESERVE_BYTES + 100_000));
     let descriptor = call(&mut rt, "std.files.system_open_read", &mut [p(&file)]).unwrap();
     // A buffer of 2^50 bytes cannot be allocated at all: it must be refused, not attempted.
     let outcome = call(
@@ -406,7 +406,7 @@ fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
         &mut [p(&file)]
     )));
     // Within the limit, a large max reads what there is.
-    rt.heap_limit = Some(1 << 30);
+    rt.set_heap_limit(Some(1 << 30));
     let step = call(
         &mut rt,
         "std.files.system_read_chunk",
@@ -422,7 +422,7 @@ fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
     assert!(matches!(step.field("data"), Some(Value::Bytes(b)) if b.len() == 300_000));
     call(&mut rt, "std.files.system_close", &mut [descriptor]).unwrap();
     // Without a heap limit, an allocation the system cannot make is exhaustion, not an abort.
-    rt.heap_limit = None;
+    rt.set_heap_limit(None);
     let descriptor = call(&mut rt, "std.files.system_open_read", &mut [p(&file)]).unwrap();
     assert!(exhausted(call(
         &mut rt,
@@ -435,7 +435,7 @@ fn reading_more_than_the_heap_limit_is_exhaustion_before_allocation() {
 #[test]
 fn repeating_a_text_over_the_heap_limit_is_exhaustion() {
     let mut rt = Runtime::new(vec![]);
-    rt.heap_limit = Some(unio_runtime::reserve::RESERVE_BYTES + 100_000);
+    rt.set_heap_limit(Some(unio_runtime::reserve::RESERVE_BYTES + 100_000));
     assert!(exhausted(call(
         &mut rt,
         "Text.repeat",
@@ -593,7 +593,7 @@ fn the_temporary_memory_of_file_operations_counts_against_the_heap_limit() {
     let scratch = Scratch::new("temporary-budget");
     let mut rt = Runtime::new(vec![]);
     let with_free = |rt: &mut Runtime, free: usize| {
-        rt.heap_limit = Some(unio_runtime::heap::live_bytes() + free);
+        rt.set_heap_limit(Some(unio_runtime::heap::live_bytes() + free));
     };
 
     // A directory listing holds every name before it makes the list.
@@ -615,7 +615,7 @@ fn the_temporary_memory_of_file_operations_counts_against_the_heap_limit() {
         "std.files.list_directory",
         &mut [p(&many)]
     )));
-    rt.heap_limit = None;
+    rt.set_heap_limit(None);
 
     // A path's copies: the native path, its resolution, the text for the system call.
     let long = Value::path(format!(
@@ -634,7 +634,7 @@ fn the_temporary_memory_of_file_operations_counts_against_the_heap_limit() {
             "{name} with a long path"
         );
     }
-    rt.heap_limit = None;
+    rt.set_heap_limit(None);
 }
 
 /// Writing bytes the program holds makes no copy of them: measured in the reserve for
@@ -688,19 +688,20 @@ fn reading_a_file_of_unknown_size_counts_the_buffer_it_grows() {
         })
     };
     let mut rt = Runtime::new(vec![]);
-    // The content is 100 KiB, and the buffer that holds it 128 KiB: with 150 KiB free it fits,
-    // but growing from 64 KiB to 128 KiB holds both blocks for a moment.
+    // The content is 100 KiB, and the buffer that holds it grows by doubling to 128 KiB: with
+    // 120 KiB free the last step does not fit. (The heap counts a growth as the new size in
+    // place of the old one; a copy the allocator makes for a moment is its own, 3.5.)
     let writer = feed(pipe.clone());
-    rt.heap_limit = Some(unio_runtime::heap::live_bytes() + 150 * 1024);
+    rt.set_heap_limit(Some(unio_runtime::heap::live_bytes() + 120 * 1024));
     let outcome = call(&mut rt, "std.files.read_bytes", &mut [p(&pipe)]);
-    rt.heap_limit = None;
+    rt.set_heap_limit(None);
     writer.join().unwrap();
     assert!(exhausted(outcome));
     // With room for both, the whole content is read.
     let writer = feed(pipe.clone());
-    rt.heap_limit = Some(unio_runtime::heap::live_bytes() + 256 * 1024);
+    rt.set_heap_limit(Some(unio_runtime::heap::live_bytes() + 150 * 1024));
     let read = call(&mut rt, "std.files.read_bytes", &mut [p(&pipe)]);
-    rt.heap_limit = None;
+    rt.set_heap_limit(None);
     writer.join().unwrap();
     assert!(matches!(read, Ok(Value::Bytes(b)) if b.len() == 100 * 1024));
 }

@@ -529,7 +529,6 @@ fn list_append(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let item = any(runtime, arguments, 1)?;
     let items = self_list(runtime, arguments)?;
     items.push(item);
-    items.recount();
     runtime.check_heap()?;
     Ok(Value::Unit)
 }
@@ -538,7 +537,6 @@ fn list_append(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn list_remove_last(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let items = self_list(runtime, arguments)?;
     let last = items.pop();
-    items.recount();
     Ok(Value::option(last))
 }
 
@@ -568,7 +566,6 @@ fn map_put(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let value = any(runtime, arguments, 2)?;
     let map = self_map(runtime, arguments)?;
     map.put(key, value);
-    map.recount();
     runtime.check_heap()?;
     Ok(Value::Unit)
 }
@@ -578,7 +575,6 @@ fn map_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let key = any(runtime, arguments, 1)?;
     let map = self_map(runtime, arguments)?;
     let removed = map.remove(&key);
-    map.recount();
     Ok(Value::option(removed))
 }
 
@@ -633,7 +629,6 @@ fn set_insert(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let item = any(runtime, arguments, 1)?;
     let set = self_set(runtime, arguments)?;
     set.insert(item);
-    set.recount();
     runtime.check_heap()?;
     Ok(Value::Unit)
 }
@@ -643,7 +638,6 @@ fn set_remove(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let item = any(runtime, arguments, 1)?;
     let set = self_set(runtime, arguments)?;
     let removed = set.remove(&item);
-    set.recount();
     Ok(Value::Bool(removed))
 }
 

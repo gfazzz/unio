@@ -251,14 +251,9 @@ fn read_whole(runtime: &Runtime, p: &Text, target: &Path) -> Result<Vec<u8>, Unw
             Ok(0) => return Ok(data),
             Ok(n) => {
                 if data.capacity() - data.len() < n {
-                    // The buffer the runtime holds is not counted yet, and growing it may copy
-                    // it into a new block before the old one is freed: both are checked.
+                    // The heap counts the buffer it holds already; growing it adds `more`.
                     let more = data.len().max(n);
-                    runtime.reserve_heap(
-                        data.capacity()
-                            .saturating_add(data.len())
-                            .saturating_add(more),
-                    )?;
+                    runtime.reserve_heap(more)?;
                     crate::reserve::fallible(|| data.try_reserve_exact(more))
                         .map_err(|_| Unwind::Exhausted(crate::fault::Exhaustion::Heap))?;
                 }
@@ -340,15 +335,18 @@ fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let target = readable(&p)?;
     let directory = native(&p);
     // The names are held before the list is made, so each is checked against the heap limit
-    // as it is read (C-18): its text, its place in the list of names, and room for that list
-    // to grow, which may copy it.
+    // before it is kept (C-18): its text, and the growth of the list of names when it is full.
+    // What is kept is counted by the allocator.
     let mut names: Vec<String> = Vec::new();
-    let mut held = 0usize;
     let mut exhausted = None;
     crate::sandbox::list_directory(&target, &mut |name| {
         let name = name.to_string_lossy().into_owned();
-        held = held.saturating_add(name.len() + 3 * std::mem::size_of::<String>());
-        if let Err(unwind) = runtime.reserve_heap(held) {
+        let growth = if names.len() == names.capacity() {
+            names.capacity().max(4) * std::mem::size_of::<String>()
+        } else {
+            0
+        };
+        if let Err(unwind) = runtime.reserve_heap(growth) {
             exhausted = Some(unwind);
             return false;
         }
@@ -360,10 +358,10 @@ fn list_directory(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
         return Err(unwind);
     }
     names.sort();
-    // Each entry of the list is a path below the directory, which the heap counts when it is
-    // made; the names are still held until then.
+    // Each entry of the list is a path below the directory, made while the names are still
+    // held.
     let per_entry = directory.as_os_str().len() + 1 + ENTRY_BYTES;
-    runtime.reserve_heap(held.saturating_add(names.len().saturating_mul(per_entry)))?;
+    runtime.reserve_heap(names.len().saturating_mul(per_entry))?;
     let entries = names
         .into_iter()
         .map(|name| Value::path(path_text(&directory.join(name))))

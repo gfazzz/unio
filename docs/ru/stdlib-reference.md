@@ -4530,8 +4530,19 @@ assert modulo(-7, 3) == 2 and -7 % 3 == -1
 Pure path manipulation (requirement S-1). Path itself and its methods components, is_absolute,
 name, extension, parent, join and normalize are in the prelude (builtin/path.unio); this module
 adds the operations on names and prefixes. Everything here is lexical, like Path.normalize: it
-never reads the file system, follows no link, and proves nothing about access. "/" separates
-names on every platform, "\\" also on Windows (S-19).
+never reads the file system, follows no link, and proves nothing about access (S-19).
+
+The platform contract (docs/stdlib.md, "Paths on each platform"):
+- Separators: "/" separates names on every platform, "\\" also on Windows; on Linux and macOS
+  "\\" is an ordinary character of a name. Path.join, and so with_name, with_extension and
+  join_all, insert the separator of the platform; parent and normalize write "/".
+- Anchors: a path may begin with an anchor, the first of its components. On Linux and macOS it
+  is "/" (or "//"), and such a path is absolute. On Windows a drive with a root ("C:\\a",
+  "C:/a") and a UNC share ("\\\\server\\share\\a") are absolute; a rooted path ("\\a", "/a",
+  relative to the root of the current drive) and a drive-relative path ("C:a", relative to the
+  current directory of drive C) have anchors too, "/" and "C:", but are not absolute.
+- A path without an anchor is relative to the current directory: only such a path starts
+  with "." (starts_with), and only it has "." as a base (relative_to).
 
 ### `stem`
 
@@ -4558,7 +4569,7 @@ without a name, such as a root, stays as it is.
 Example:
 
 ```unio
-assert "{with_extension(Path("dir/report.txt"), "md")}" == "dir/report.md"
+assert with_extension(Path("dir/report.txt"), "md") == Path("dir").join("report.md")
 assert "{with_extension(Path("notes"), "txt")}" == "notes.txt"
 ```
 
@@ -4572,7 +4583,7 @@ The path with its last name replaced; a path without a name, such as a root, get
 Example:
 
 ```unio
-assert "{with_name(Path("dir/old.txt"), "new.txt")}" == "dir/new.txt"
+assert with_name(Path("dir/old.txt"), "new.txt") == Path("dir").join("new.txt")
 ```
 
 ### `starts_with`
@@ -4582,8 +4593,9 @@ public function starts_with(path as Path, base as Path) returns Bool
 ```
 
 Whether the components of base begin the components of path, compared exactly, after
-Path.normalize. A lexical test, not a containment check for access: ".." and links are not
-resolved.
+Path.normalize, anchors included. A lexical test, not a containment check for access: ".." and
+links are not resolved. A base of "." begins exactly the paths without an anchor: not "/a", and
+on Windows neither "\\a" nor "C:a", which are relative but not to the current directory.
 Example:
 
 ```unio
@@ -4602,7 +4614,7 @@ a path equal to base is ".".
 Example:
 
 ```unio
-assert relative_to(Path("/srv/data/a.txt"), Path("/srv")) == some(Path("data/a.txt"))
+assert relative_to(Path("/srv/data/a.txt"), Path("/srv")) == some(Path("data").join("a.txt"))
 assert relative_to(Path("/srv"), Path("/home")) == none
 ```
 
@@ -4616,7 +4628,7 @@ The base with each part joined in turn, as Path.join does; "." as a base is drop
 Example:
 
 ```unio
-assert "{join_all(Path("a"), ["b", "c.txt"])}" == "a/b/c.txt"
+assert join_all(Path("a"), ["b", "c.txt"]) == Path("a").join("b").join("c.txt")
 assert "{join_all(Path("."), [])}" == "."
 ```
 
@@ -4630,7 +4642,9 @@ Whether the path is not absolute; on Windows "C:file" and "\\file" are relative 
 Example:
 
 ```unio
-assert is_relative(Path("a/b")) and not is_relative(Path("/a"))
+assert is_relative(Path("a/b")) and is_relative(Path("C:a")) and is_relative(Path("\\a"))
+# Absolute: "/a" on Linux and macOS, "C:\\a" on Windows.
+assert not is_relative(Path("/a")) or not is_relative(Path("C:\\a"))
 ```
 
 ## `std.process`

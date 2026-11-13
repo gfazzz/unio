@@ -373,4 +373,72 @@ mod windows {
             Ok(())
         }
     }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct MemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn K32GetProcessMemoryInfo(process: isize, counters: *mut MemoryCounters, cb: u32) -> i32;
+    }
+
+    /// The backstop of the heap limit of a program (RFC 0010, docs/runtime.md 3.5): the
+    /// process joins a new Job Object whose limit of committed memory per process is what it
+    /// has committed now plus `allowance`. A commit beyond it fails, which the allocator of the
+    /// runtime turns into code 102. Only that limit is set, without kill-on-close and without
+    /// breakaway; the handle stays open for the life of the process.
+    pub fn limit_program_memory(allowance: u64) -> Result<(), String> {
+        // SAFETY: the documented PROCESS_MEMORY_COUNTERS_EX and JOBOBJECT_EXTENDED_LIMIT_
+        // INFORMATION structures, a new unnamed job, the pseudo handle of this process.
+        unsafe {
+            let mut counters = MemoryCounters {
+                cb: std::mem::size_of::<MemoryCounters>() as u32,
+                ..MemoryCounters::default()
+            };
+            if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) == 0 {
+                return Err(format!(
+                    "the memory of the process: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+            if job.is_null() {
+                return Err(format!("Job Object: {}", std::io::Error::last_os_error()));
+            }
+            let mut info = ExtendedLimits::default();
+            info.basic.flags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+            info.process_memory = counters
+                .private_usage
+                .saturating_add(usize::try_from(allowance).unwrap_or(usize::MAX));
+            let set = SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&mut info as *mut ExtendedLimits).cast(),
+                std::mem::size_of::<ExtendedLimits>() as u32,
+            );
+            if set == 0 || AssignProcessToJobObject(job, GetCurrentProcess() as Handle) == 0 {
+                return Err(format!("Job Object: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The backstop of the heap limit of a program on Windows ([`windows::limit_program_memory`]).
+#[cfg(windows)]
+pub(crate) fn limit_program_memory(allowance: u64) -> Result<(), String> {
+    windows::limit_program_memory(allowance)
 }

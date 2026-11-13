@@ -2,7 +2,8 @@
 //!
 //! Before `main`, and before each test, the runtime sets aside [`RESERVE_BYTES`]: the memory is
 //! allocated from the system, every page is written so that the system has delivered it, and
-//! the size is counted in the heap ([`crate::heap`]). The reserve counts within the heap limit
+//! the size is counted in the heap ([`crate::heap`]) as one block; the blocks the reserve hands
+//! out are not counted again. The reserve counts within the heap limit
 //! of the policy, so user code may use the limit minus the reserve; a limit below
 //! [`MINIMUM_HEAP_LIMIT`] is refused before `main` (code 103, [`crate::sandbox::parse_policy`]).
 //!
@@ -29,8 +30,8 @@
 //! path reached, which `the_reserve_peak_is_measured` records for docs/runtime.md 3.6.
 //!
 //! Outside an open reserve, the allocator costs one relaxed load of an atomic counter per
-//! allocation and passes everything to the system allocator, which is what Rust uses by
-//! default.
+//! allocation and the count of the heap ([`crate::heap`]), and passes everything to the system
+//! allocator, which is what Rust uses by default.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -336,11 +337,17 @@ pub fn fallible<T>(work: impl FnOnce() -> T) -> T {
     result
 }
 
+/// Whether this thread is inside [`fallible`], where a refusal returns null to the caller.
+pub(crate) fn in_fallible() -> bool {
+    FALLIBLE.try_with(|f| f.get()).unwrap_or(0) != 0
+}
+
 /// Set once the program is ending after a refused allocation, so that the exit cannot recurse.
 static REFUSED: AtomicBool = AtomicBool::new(false);
 
-/// The result of the system allocator: a refusal outside [`fallible`] is exhaustion of the heap
-/// (C-18, L-17a, R-2), which ends the program with code 102 and the preallocated diagnostic
+/// The result of an allocation: a refusal outside [`fallible`], by the heap limit of the program
+/// ([`crate::heap`]) or by the system (its memory, or the limit of the operating system that
+/// backs the heap limit, `sandbox::apply_rlimits`), is exhaustion of the heap (C-18, L-17a, R-2), which ends the program with code 102 and the preallocated diagnostic
 /// instead of the abort of `handle_alloc_error`. No user code runs after it, `release` included.
 #[inline]
 fn checked(p: *mut u8) -> *mut u8 {
@@ -353,18 +360,41 @@ fn checked(p: *mut u8) -> *mut u8 {
 #[cold]
 #[inline(never)]
 fn refused() {
-    if FALLIBLE.try_with(|f| f.get()).unwrap_or(0) != 0 {
+    if in_fallible() {
         return;
     }
     if REFUSED.swap(true, Ordering::SeqCst) {
         // The exit itself needed memory: nothing more can be written.
         std::process::abort();
     }
+    // The exit is not the program's: what it needs is not counted against the limit.
+    crate::heap::stop_counting();
     crate::fault::emergency_exit(crate::fault::Exhaustion::Heap);
 }
 
-/// The global allocator: the system allocator, except while this thread's reserve is open.
+/// The global allocator: the system allocator, except while this thread's reserve is open. It
+/// counts every block it takes from the system in the heap of the program of the thread and
+/// refuses one that would exceed the heap limit ([`crate::heap`]); blocks of the reserve are
+/// not counted again, since the reserve is counted as a whole.
 pub struct ReserveAllocator;
+
+/// A block from the system, counted first; a refusal of the limit or of the system is null.
+#[inline]
+unsafe fn counted(layout: Layout, zeroed: bool) -> *mut u8 {
+    let bytes = crate::heap::requested(layout);
+    if !crate::heap::charge(bytes) {
+        return std::ptr::null_mut();
+    }
+    let p = if zeroed {
+        System.alloc_zeroed(layout)
+    } else {
+        System.alloc(layout)
+    };
+    if p.is_null() {
+        crate::heap::discharge(bytes);
+    }
+    p
+}
 
 unsafe impl GlobalAlloc for ReserveAllocator {
     #[inline]
@@ -375,7 +405,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                 return p;
             }
         }
-        checked(System.alloc(layout))
+        checked(counted(layout, false))
     }
 
     #[inline]
@@ -387,7 +417,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                 return p;
             }
         }
-        checked(System.alloc_zeroed(layout))
+        checked(counted(layout, true))
     }
 
     #[inline]
@@ -398,13 +428,14 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                 return;
             }
         }
+        crate::heap::discharge(crate::heap::requested(layout));
         System.dealloc(p, layout)
     }
 
     #[inline]
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if OPEN.load(Ordering::Relaxed) == 0 && REGISTERED.load(Ordering::Relaxed) == 0 {
-            return checked(System.realloc(p, layout, new_size));
+            return checked(system_realloc(p, layout, new_size));
         }
         let owned = owner(p);
         match owned {
@@ -414,7 +445,7 @@ unsafe impl GlobalAlloc for ReserveAllocator {
                     return q;
                 }
             }
-            None if route() == 0 => return checked(System.realloc(p, layout, new_size)),
+            None if route() == 0 => return checked(system_realloc(p, layout, new_size)),
             None => {}
         }
         // Into the open reserve, or out of a reserve: a new block, then the copy.
@@ -423,6 +454,31 @@ unsafe impl GlobalAlloc for ReserveAllocator {
         if !q.is_null() {
             std::ptr::copy_nonoverlapping(p, q, layout.size().min(new_size));
             self.dealloc(p, layout);
+        }
+        q
+    }
+}
+
+/// A block of the system resized, with the difference counted: growth is charged before the
+/// system is asked and refused over the limit (the old block stays as it was), a shrink is
+/// discharged once it is done.
+#[inline]
+unsafe fn system_realloc(p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    let old = crate::heap::requested(layout);
+    let new = crate::heap::requested(Layout::from_size_align_unchecked(new_size, layout.align()));
+    if new > old {
+        if !crate::heap::charge(new - old) {
+            return std::ptr::null_mut();
+        }
+        let q = System.realloc(p, layout, new_size);
+        if q.is_null() {
+            crate::heap::discharge(new - old);
+        }
+        q
+    } else {
+        let q = System.realloc(p, layout, new_size);
+        if !q.is_null() {
+            crate::heap::discharge(old - new);
         }
         q
     }
@@ -660,7 +716,7 @@ pub fn outside<R>(f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(route());
     set_route(0);
-    f()
+    crate::heap::outside(f)
 }
 
 #[cfg(test)]

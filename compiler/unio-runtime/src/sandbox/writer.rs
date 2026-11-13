@@ -933,9 +933,13 @@ impl Handle {
         if let Some(mode) = std::env::var_os(crate::externs::durability::FAIL_PARENT_SYNC) {
             command.env(crate::externs::durability::FAIL_PARENT_SYNC, mode);
         }
-        // SAFETY: the closure only calls dup2 and fcntl, which are async-signal-safe.
+        // SAFETY: the closure only calls getrlimit, setrlimit, dup2 and fcntl, which are
+        // async-signal-safe.
         unsafe {
             command.pre_exec(move || {
+                // A program that ran before in this process may have lowered the address space
+                // behind its heap limit; the writer is not that program (RFC 0010).
+                super::release_backstop();
                 if fd == SOCKET_FD {
                     fdio::keep_on_exec(fd)
                 } else if dup2(fd, SOCKET_FD) < 0 {

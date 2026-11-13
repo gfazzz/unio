@@ -115,6 +115,13 @@ public function main() returns Int:
     return 0
 ";
 
+/// The room the test hook leaves on a "full" heap for a program that must reach its fault: the
+/// heap counts every block (RFC 0010), so the calls, the open file, and the first resource
+/// before the fault need some room, while the releases after it need far more (2,000 texts,
+/// about 230 KB), which only the reserve can serve.
+#[allow(dead_code)]
+pub const NEARLY_FULL: usize = 64 * 1024;
+
 /// A fresh package for a program of the reserve: `RESERVE_PRELUDE` and `body` in `main.unio`,
 /// a manifest that lets it write `open/`, `open/target.txt` holding "old content", and
 /// `policy.toml` with a heap limit of 8 MiB.
@@ -185,3 +192,29 @@ pub fn temporaries(dir: &Path) -> Vec<String> {
 pub fn assert_target_unchanged(dir: &Path) {
     assert_eq!(read(&dir.join("open/target.txt")), "old content");
 }
+
+/// A program that makes 20,000 small structs, enums, and closures (RFC 0010). Its lists hold
+/// 32-byte values, about 2 MiB in all; the wrappers of the values (the reference-counted blocks
+/// of each struct, enum and closure, their fields and captures) take several times that, and
+/// the estimated count of before RFC 0010 did not see them.
+#[allow(dead_code)]
+pub const SMALL_VALUES: &str = "struct Point:
+    x as Int
+    y as Int
+    z as Int
+
+enum Shape:
+    Circle(radius as Int)
+    Square(side as Int, depth as Int)
+
+public function main():
+    var points as List[Point] = []
+    var shapes as List[Shape] = []
+    var adders as List[(Int) -> Int] = []
+    for i in range(0, 20000):
+        points.append(Point(x = i, y = i, z = i))
+        shapes.append(Square(side = i, depth = i))
+        let k = i
+        adders.append(function(n as Int) returns Int: n + k)
+    print(\"{points.length()} {shapes.length()} {adders.length()}\")
+";
