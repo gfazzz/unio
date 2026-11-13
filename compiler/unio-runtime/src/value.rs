@@ -137,6 +137,52 @@ pub trait Callable {
     fn name(&self) -> &str;
 }
 
+/// The values a function value captured (L-11a), for the implementations of [`Callable`]. It
+/// derefs to the values; dropping it hands them to the loop that frees deep structures without
+/// recursion, as every other object that holds values does (RFC 0007), so that a chain of
+/// closures each capturing the one before does not overflow the native stack when it is freed.
+#[derive(Default)]
+pub struct Captures(Vec<Value>);
+
+impl Captures {
+    pub fn new(values: Vec<Value>) -> Captures {
+        Captures(values)
+    }
+}
+
+impl From<Vec<Value>> for Captures {
+    fn from(values: Vec<Value>) -> Captures {
+        Captures(values)
+    }
+}
+
+impl FromIterator<Value> for Captures {
+    fn from_iter<I: IntoIterator<Item = Value>>(values: I) -> Captures {
+        Captures(values.into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for Captures {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a Captures {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl Drop for Captures {
+    fn drop(&mut self) {
+        crate::heap::Contents::release(&mut self.0);
+    }
+}
+
 /// A value of a struct or an `error` declaration: the type name and the fields in declaration
 /// order.
 #[derive(Clone, Debug)]
@@ -1109,6 +1155,15 @@ impl Drop for StructValue {
     }
 }
 
+impl Drop for ResourceCell {
+    fn drop(&mut self) {
+        let value = std::mem::replace(self.value.get_mut(), Value::Unit);
+        if owns_values(&value) {
+            release(Pending::One(Some(value)));
+        }
+    }
+}
+
 impl Drop for EnumValue {
     fn drop(&mut self) {
         match std::mem::take(&mut self.fields) {
@@ -1191,6 +1246,80 @@ mod tests {
                 }
                 drop(chain);
                 assert_eq!(crate::heap::live_bytes(), before);
+            })
+            .unwrap()
+            .join();
+        assert!(freed.is_ok());
+    }
+
+    /// A function value with its captures, as the closures of the interpreter and of native
+    /// code hold them.
+    struct Captor(Captures);
+
+    impl Callable for Captor {
+        fn call(&self, _: &mut Runtime, _: &mut [Value]) -> Outcome {
+            Ok(self.0.first().cloned().unwrap_or(Value::Unit))
+        }
+        fn name(&self) -> &str {
+            "captor"
+        }
+    }
+
+    /// Function values and resources hold values too, and free them without recursion: a chain
+    /// of closures each capturing the one before overflowed the 1 GiB stack of `unio run` at
+    /// about 9 million levels (128 bytes a level) and aborted with code 134, and a resource
+    /// that holds a resource was freed by recursion as well. Mixed chains go through every kind
+    /// of value that holds values. The stack is 2 MiB, as in the test above.
+    #[test]
+    fn closures_and_resources_are_freed_without_recursion() {
+        let freed = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let _meter = crate::heap::Meter::start(None);
+                let depth = 1_000_000;
+                fn closure(v: Value) -> Value {
+                    Value::Function(Rc::new(Captor(Captures::new(vec![Value::Int(1), v]))))
+                }
+                fn resource(i: usize, v: Value) -> Value {
+                    Value::Resource(Rc::new(ResourceCell {
+                        id: i as u64,
+                        value: RefCell::new(v),
+                        released: Cell::new(false),
+                    }))
+                }
+                let wrappers: [fn(usize, Value) -> Value; 3] = [
+                    |_, v| closure(v),
+                    |i, v| resource(i, v),
+                    |i, v| match i % 7 {
+                        0 => closure(v),
+                        1 => resource(i, v),
+                        2 => Value::list(vec![v]),
+                        3 => Value::tuple(vec![v, Value::Unit]),
+                        4 => Value::variant("Option", "some", vec![("value", v)]),
+                        5 => Value::record("Holder", vec![("held", v)]),
+                        _ => {
+                            let mut map = OrderedMap::new();
+                            map.put(Value::Int(i as i64), v);
+                            Value::map(map)
+                        }
+                    },
+                ];
+                for wrap in wrappers {
+                    let mut chain = Value::Unit;
+                    for i in 0..1000 {
+                        chain = wrap(i, chain);
+                    }
+                    drop(chain);
+                }
+                let before = crate::heap::live_bytes();
+                for wrap in wrappers {
+                    let mut chain = Value::Unit;
+                    for i in 0..depth {
+                        chain = wrap(i, chain);
+                    }
+                    drop(chain);
+                    assert_eq!(crate::heap::live_bytes(), before);
+                }
             })
             .unwrap()
             .join();

@@ -105,13 +105,36 @@ pub fn missing() -> Vec<String> {
     missing
 }
 
+/// The mechanisms that [`super::TEST_SANDBOX_FAULT`] reports as absent from the kernel.
+pub fn missing_by_test_fault() -> Vec<String> {
+    let mut missing = Vec::new();
+    if super::test_fault("landlock-missing") {
+        missing.push("file system restrictions (Landlock is not available in this kernel)".into());
+    }
+    if super::test_fault("seccomp-missing") {
+        missing.push(
+            "system call and network restrictions (seccomp is not available in this kernel)".into(),
+        );
+    }
+    missing
+}
+
 /// Applies every restriction the kernel supports to the current thread.
 pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
     apply_rlimits(limits)?;
     if let Some(heap) = limits.heap_bytes {
         backstop(heap)?;
     }
-    restrict(&rules(permissions), &[], false)
+    // The test hook makes the kernel's refusal of a mechanism fail the start, as a real one
+    // does (SB-5); only the program reads it, since workers and the writer have no environment.
+    let fault = if super::test_fault("landlock-refused") {
+        Some("Landlock")
+    } else if super::test_fault("seccomp-refused") {
+        Some("seccomp")
+    } else {
+        None
+    };
+    restrict(&rules(permissions), &[], false, fault)
 }
 
 /// The limit of the operating system behind the heap limit of the program (RFC 0010,
@@ -149,7 +172,7 @@ const SC_PAGESIZE: i32 = 30;
 pub fn apply_writer(scopes: &[Scope]) -> Result<(), String> {
     apply_rlimits(&Limits::default())?;
     let rules: Vec<(PathBuf, u64)> = scopes.iter().map(|s| (write_root(s), WRITE)).collect();
-    restrict(&rules, nr::WRITER_DENIED, false)
+    restrict(&rules, nr::WRITER_DENIED, false, None)
 }
 
 /// The restrictions of a worker of the tools (SB-11, docs/runtime.md 9.7): it may read the
@@ -180,22 +203,35 @@ pub fn apply_worker(
     }
     if processes {
         rules.push((PathBuf::from("/dev/null"), READ_FILE | WRITE_FILE));
-        restrict(&rules, &[], false)
+        restrict(&rules, &[], false, None)
     } else {
-        restrict(&rules, nr::WORKER_DENIED, true)
+        restrict(&rules, nr::WORKER_DENIED, true, None)
     }
 }
 
 pub(super) const RLIMIT_AS: i32 = 9;
 
-fn restrict(rules: &[(PathBuf, u64)], denied: &[u32], threads_only: bool) -> Result<(), String> {
+/// `refused`: the mechanism whose application fails, as the kernel's refusal would, under the
+/// test hook of [`apply`].
+fn restrict(
+    rules: &[(PathBuf, u64)],
+    denied: &[u32],
+    threads_only: bool,
+    refused: Option<&str>,
+) -> Result<(), String> {
     // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments only.
     if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(format!("no_new_privs: {}", std::io::Error::last_os_error()));
     }
+    if refused == Some("Landlock") {
+        return Err("Landlock ruleset: refused (test fault)".into());
+    }
     let abi = landlock_abi();
     if abi > 0 {
         landlock(abi, rules)?;
+    }
+    if refused == Some("seccomp") {
+        return Err("seccomp: refused (test fault)".into());
     }
     if seccomp_available() {
         seccomp(denied, threads_only)?;

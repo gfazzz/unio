@@ -327,28 +327,113 @@ fn manifest_covers_dependency(package: &Path, alias: &str) -> bool {
         })
 }
 
+/// The span of the text of a line, from 1, of a manifest.
+fn line_span(source: &str, line: usize) -> Span {
+    let begin = match line {
+        0 | 1 => 0,
+        _ => source
+            .match_indices('\n')
+            .nth(line - 2)
+            .map_or(source.len(), |(i, _)| i + 1),
+    };
+    let end = source[begin..]
+        .find('\n')
+        .map_or(source.len(), |i| begin + i);
+    let text = source[begin..end].trim_end_matches('\r');
+    let indent = text.len() - text.trim_start().len();
+    let pos = |offset: usize| crate::diag::Pos {
+        offset: begin + offset,
+        line,
+        column: text[..offset].chars().count() + 1,
+    };
+    Span::new(pos(indent), pos(text.len().max(indent)))
+}
+
 /// The E0088 diagnostics of the text of a manifest (T-6), each over the text of its line.
 pub fn manifest_diagnostics(source: &str) -> Vec<Diagnostic> {
-    let mut starts = vec![0];
-    starts.extend(source.match_indices('\n').map(|(i, _)| i + 1));
     crate::package::manifest::check(source)
         .into_iter()
         .map(|(line, mistake)| {
-            let begin = starts.get(line - 1).copied().unwrap_or(source.len());
-            let end = source[begin..]
-                .find('\n')
-                .map_or(source.len(), |i| begin + i);
-            let text = source[begin..end].trim_end_matches('\r');
-            let indent = text.len() - text.trim_start().len();
-            let pos = |offset: usize| crate::diag::Pos {
-                offset: begin + offset,
-                line,
-                column: text[..offset].chars().count() + 1,
-            };
-            let span = Span::new(pos(indent), pos(text.len().max(indent)));
+            let span = line_span(source, line);
             Diagnostic::error("E0088", span, catalog::manifest_mistake(&mistake))
         })
         .collect()
+}
+
+/// The diagnostics of the manifest of the package in `package`, whose text is `source`: its
+/// mistakes (E0088), and the modules of the package that carry `unsafe module` compared with
+/// `package.unsafe_modules`, which names exactly them (E0089, T-6, RFC 0004), in the order of
+/// the lines.
+pub fn package_manifest_diagnostics(package: &Path, source: &str) -> Vec<Diagnostic> {
+    let mut found = manifest_diagnostics(source);
+    if let Some((listed, line)) = crate::package::manifest::unsafe_modules(source) {
+        let marked = marked_modules(package);
+        let span = line_span(source, line);
+        for module in marked.iter().filter(|m| !listed.contains(m)) {
+            let message = catalog::unsafe_module_not_listed(module);
+            found.push(Diagnostic::error("E0089", span, message));
+        }
+        let mut seen = Vec::new();
+        for module in listed.iter().filter(|m| !marked.contains(m)) {
+            if !seen.contains(&module) {
+                seen.push(module);
+                let message = catalog::unsafe_module_not_marked(module);
+                found.push(Diagnostic::error("E0089", span, message));
+            }
+        }
+    }
+    found.sort_by_key(|d| d.span.start.line);
+    found
+}
+
+/// The modules of the package in `package` that carry the `unsafe module` marker, found by
+/// parsing every module of its tree, in the order of their names. As when a package is copied
+/// (`package::tree`), names that start with a dot and `target/` at the top are left out, and a
+/// link is not followed; a directory with a `unio.toml` of its own is another package.
+pub fn marked_modules(package: &Path) -> Vec<String> {
+    let mut marked = Vec::new();
+    let mut stack: Vec<(PathBuf, Vec<String>)> = vec![(package.to_path_buf(), Vec::new())];
+    while let Some((dir, parts)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.starts_with('.') || (parts.is_empty() && name == "target") {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            let mut child = parts.clone();
+            if kind.is_dir() {
+                if !path.join("unio.toml").exists() {
+                    child.push(name);
+                    stack.push((path, child));
+                }
+            } else if kind.is_file() {
+                let Some(stem) = name.strip_suffix(".unio") else {
+                    continue;
+                };
+                let Ok(source) = crate::vfs::read_to_string(&path) else {
+                    continue;
+                };
+                let lexed = crate::lexer::lex(&source);
+                if crate::parser::Parser::new(&lexed.tokens)
+                    .file()
+                    .unsafe_module
+                {
+                    child.push(stem.to_string());
+                    marked.push(child.join("."));
+                }
+            }
+        }
+    }
+    marked.sort();
+    marked
 }
 
 /// Whether `[dependencies]` of the package's `unio.toml` lists the alias (T-6, T-14).
@@ -801,7 +886,7 @@ impl Program {
         }
     }
 
-    /// Checks the manifests of the packages of the reported modules (E0088, T-6): the packages
+    /// Checks the manifests of the packages of the reported modules (E0088, E0089, T-6): the packages
     /// of the given files and of the modules they import from them, not the standard library
     /// or a dependency, whose manifest was checked when it was installed.
     pub fn check_manifests(&mut self) {
@@ -815,7 +900,7 @@ impl Program {
             let Ok(source) = crate::vfs::read_to_string(&path) else {
                 continue;
             };
-            let diagnostics = manifest_diagnostics(&source);
+            let diagnostics = package_manifest_diagnostics(&m.package, &source);
             if diagnostics.is_empty() {
                 continue;
             }

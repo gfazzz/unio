@@ -1242,8 +1242,13 @@ fn apply_os(
 ) -> Result<Applied, Refused> {
     working_directory();
     let missing = linux::missing();
-    if !missing.is_empty() && !allow_weaker {
-        return Err(refuse(&missing));
+    if !allow_weaker {
+        // A mechanism the test hook reports as absent counts only where it refuses the start.
+        let mut absent = missing.clone();
+        absent.extend(linux::missing_by_test_fault());
+        if !absent.is_empty() {
+            return Err(refuse(&absent));
+        }
     }
     linux::apply(&sandbox.permissions, &sandbox.limits).map_err(Refused)?;
     // The limit of processes holds for the whole tree of every child: each process a
@@ -1305,7 +1310,14 @@ fn apply_os(
     if let Some(heap) = sandbox.limits.heap_bytes {
         program_memory_backstop(heap).map_err(Refused)?;
     }
-    let program = windows::Program::enter(&sandbox.permissions).map_err(|e| {
+    let entered = if test_fault("appcontainer") {
+        Err(std::io::Error::other(
+            "the AppContainer cannot be created (test fault)",
+        ))
+    } else {
+        windows::Program::enter(&sandbox.permissions)
+    };
+    let program = entered.map_err(|e| {
         Refused(format!(
             "the AppContainer of the program cannot be set up: {e}"
         ))
@@ -1547,6 +1559,26 @@ fn deny_process_creation() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// The test hook that makes one mechanism of the operating system fail when the sandbox of a
+/// program is applied, so that the tests show the start failing closed with code 103 (SB-5)
+/// on systems that have every mechanism. Its values: `landlock-missing` and `seccomp-missing`
+/// (Linux) report the mechanism as absent from the kernel, which stops the start unless the
+/// operator allows a weaker sandbox, and is then ignored, so that every mechanism still
+/// applies; `landlock-refused` and `seccomp-refused` (Linux), `sandbox-init` (macOS) and
+/// `appcontainer` (Windows) make the call that applies the mechanism fail, which stops the
+/// start whatever the operator allows. It can only refuse a start, never weaken a sandbox.
+/// Workers and the writer get a cleared environment and do not see it.
+pub const TEST_SANDBOX_FAULT: &str = "UNIO_TEST_SANDBOX_FAULT";
+
+/// Whether [`TEST_SANDBOX_FAULT`] names this fault.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", windows)),
+    allow(dead_code)
+)]
+pub(crate) fn test_fault(name: &str) -> bool {
+    std::env::var_os(TEST_SANDBOX_FAULT).is_some_and(|v| v == name)
 }
 
 /// The test hook that makes the runtime treat the program as run by root (RFC 0011): set to

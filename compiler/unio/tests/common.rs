@@ -237,3 +237,62 @@ public function main():
         adders.append(function(n as Int) returns Int: n + k)
     print(\"{points.length()} {shapes.length()} {adders.length()}\")
 ";
+
+/// The depth of [`deep_closures`] for the tests: 10 million in a release build, deeper than the
+/// 1 GiB stack of `unio run` and of an executable allowed while a closure freed the closure it
+/// captured by recursion (about 128 bytes of the native stack a level): a release build
+/// overflowed between 8 and 10 million levels, with `fatal runtime error: stack overflow` and
+/// code 134 in `unio run` and SIGSEGV in an executable. A debug build is several times slower
+/// and its frames are larger, so it builds 1 million.
+#[allow(dead_code)]
+pub const DEEP_CLOSURES: usize = if cfg!(debug_assertions) {
+    1_000_000
+} else {
+    10_000_000
+};
+
+/// A program that builds a chain of `depth` closures, each capturing the one before, and a
+/// mixed chain of `depth / 4` levels, in which a closure captures a list, a map, a struct, or
+/// an Option that holds the closure before, calls each once, and drops it (RFC 0007; C-13).
+/// It prints `closures 3`, `mixed 3`, and `freed`.
+#[allow(dead_code)]
+pub fn deep_closures(depth: usize) -> String {
+    let mixed = depth / 4;
+    format!(
+        "struct Holder:
+    held as Function[(Int) -> Int]
+
+function closures(depth as Int) returns Function[(Int) -> Int]:
+    var link = function(n as Int) returns Int: n
+    for i in range(0, depth):
+        let inner = link
+        link = function(n as Int) returns Int: n if n < 1 else inner(n - 1) + 1
+    return link
+
+function mixed(depth as Int) returns Function[(Int) -> Int]:
+    var link = function(n as Int) returns Int: n
+    for i in range(0, depth):
+        if i % 4 == 0:
+            let items = [link]
+            link = function(n as Int) returns Int: n if n < 1 else items[0](n - 1) + 1
+        else if i % 4 == 1:
+            let table = {{i: link}}
+            link = function(n as Int) returns Int: n if n < 1 else (table.get(i) or link)(n - 1) + 1
+        else if i % 4 == 2:
+            let holder = Holder(held = link)
+            link = function(n as Int) returns Int: n if n < 1 else holder.held(n - 1) + 1
+        else:
+            let maybe = some(link)
+            link = function(n as Int) returns Int: n if n < 1 else (maybe or link)(n - 1) + 1
+    return link
+
+function call_once(chain as Function[(Int) -> Int]) returns Int:
+    return chain(3)
+
+public function main():
+    print(\"closures {{call_once(closures({depth}))}}\")
+    print(\"mixed {{call_once(mixed({mixed}))}}\")
+    print(\"freed\")
+"
+    )
+}

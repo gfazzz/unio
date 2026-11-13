@@ -14,8 +14,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::ast;
 use crate::diag::Span;
 use crate::effects::{self, Derived};
-use crate::program::{FnId, ModId, Owner, Program, Symbol, LAYER_NAMES};
-use crate::types::DefId;
+use crate::program::{DefKind, FnId, ModId, Owner, Program, Symbol, LAYER_NAMES};
+use crate::types::{DefId, Ty};
 
 /// The version of the hashing scheme; it is part of every hash (C-11a).
 pub const HASH_SCHEME: &str = "unio-hash-v1";
@@ -112,6 +112,27 @@ fn declaration_of(p: &Program, n: Node) -> Option<(&ast::Item, Option<&ast::Memb
         }
     }
     None
+}
+
+/// The signature of a method declared inside an interface.
+fn interface_member(p: &Program, n: Node) -> Option<&ast::Signature> {
+    let Node::Func(f) = n else {
+        return None;
+    };
+    if !matches!(p.funcs[f].owner, Owner::Interface(_)) {
+        return None;
+    }
+    let Some((ast::Item::Declaration(d), _)) = declaration_of(p, n) else {
+        return None;
+    };
+    let ast::DeclarationKind::Interface(i) = &d.kind else {
+        return None;
+    };
+    let span = p.funcs[f].span;
+    i.members
+        .iter()
+        .map(|(sig, _)| sig)
+        .find(|sig| sig.name.span == span || contains(sig.span, span))
 }
 
 /// The canonical form of a declaration: independent of formatting and comments.
@@ -366,9 +387,10 @@ fn site(p: &Program, m: ModId, span: Span) -> String {
 /// The `##` comments right above a declaration.
 fn documentation(p: &Program, n: Node) -> String {
     let module = &p.modules[node_module(p, n)];
-    let Some(start) = (match declaration_of(p, n) {
-        Some((ast::Item::Extend(_), Some(m))) => Some(m.signature.span.start.line),
-        Some((ast::Item::Declaration(d), _)) => Some(d.span.start.line),
+    let Some(start) = (match (interface_member(p, n), declaration_of(p, n)) {
+        (Some(sig), _) => Some(sig.span.start.line),
+        (_, Some((ast::Item::Extend(_), Some(m)))) => Some(m.signature.span.start.line),
+        (_, Some((ast::Item::Declaration(d), _))) => Some(d.span.start.line),
         _ => None,
     }) else {
         return String::new();
@@ -389,9 +411,11 @@ fn documentation(p: &Program, n: Node) -> String {
 /// The signature as the source writes it: the first line of the declaration.
 fn signature(p: &Program, n: Node) -> String {
     let module = &p.modules[node_module(p, n)];
-    let span = match declaration_of(p, n) {
-        Some((ast::Item::Extend(_), Some(m))) => m.signature.span,
-        Some((ast::Item::Declaration(d), _)) => match &d.kind {
+    let span = match (interface_member(p, n), declaration_of(p, n)) {
+        // A method of an interface: its own signature, not the whole interface.
+        (Some(sig), _) => sig.span,
+        (_, Some((ast::Item::Extend(_), Some(m)))) => m.signature.span,
+        (_, Some((ast::Item::Declaration(d), _))) => match &d.kind {
             ast::DeclarationKind::Function(f) => f.signature.span,
             ast::DeclarationKind::External(s) => s.span,
             _ => d.span,
@@ -412,6 +436,114 @@ fn signature(p: &Program, n: Node) -> String {
         .replace(", )", ")")
 }
 
+/// The implementation of one method of an interface that a type uses (L-6c).
+pub struct MethodImplementation {
+    /// The name of the method in the interface.
+    pub name: String,
+    /// The function that runs: the type's own method, or the default of the interface.
+    pub function: String,
+    pub declared: String,
+    /// The type uses the default of the interface.
+    pub default: bool,
+}
+
+/// An interface that a type implements in an `extend ... with` block (L-6c).
+pub struct Implementation {
+    pub interface: String,
+    /// The `extend` block.
+    pub declared: String,
+    pub methods: Vec<MethodImplementation>,
+}
+
+/// The interface of an impl, when it implements one, and whether its target is the type.
+fn implements(p: &Program, impl_id: usize, d: DefId) -> Option<DefId> {
+    let i = &p.impls[impl_id];
+    match (&i.target, &i.interface) {
+        (Ty::Named(target, _), Some(Ty::Named(interface, _))) if *target == d => Some(*interface),
+        _ => None,
+    }
+}
+
+/// The function that a type uses for a method of an interface it implements in an impl: its
+/// own method of that name, or the default of the interface; and whether it is the default.
+fn implementation_of(p: &Program, impl_id: usize, method: FnId) -> Option<(FnId, bool)> {
+    let name = &p.funcs[method].name;
+    if let Some(own) = p.impls[impl_id]
+        .methods
+        .iter()
+        .copied()
+        .find(|f| &p.funcs[*f].name == name)
+    {
+        return Some((own, false));
+    }
+    p.funcs[method].body.map(|_| (method, true))
+}
+
+fn interface_methods(p: &Program, d: DefId) -> &[FnId] {
+    match &p.defs[d].kind {
+        DefKind::Interface(methods) => methods,
+        _ => &[],
+    }
+}
+
+/// The interfaces a type implements, with the implementation of each method it uses.
+fn implementations(p: &Program, d: DefId) -> Vec<Implementation> {
+    let mut out = Vec::new();
+    for impl_id in 0..p.impls.len() {
+        let Some(interface) = implements(p, impl_id, d) else {
+            continue;
+        };
+        let methods = interface_methods(p, interface)
+            .iter()
+            .filter_map(|&m| {
+                let (f, default) = implementation_of(p, impl_id, m)?;
+                Some(MethodImplementation {
+                    name: p.funcs[m].name.clone(),
+                    function: qualified_name(p, f),
+                    declared: site(p, p.funcs[f].module, p.funcs[f].span),
+                    default,
+                })
+            })
+            .collect();
+        let i = &p.impls[impl_id];
+        out.push(Implementation {
+            interface: node_name(p, Node::Def(interface)),
+            declared: site(p, i.module, i.span),
+            methods,
+        });
+    }
+    out
+}
+
+/// The defaults of interfaces that the query names through a type that uses them, such as
+/// `M.Square.name` for the default `name` of an interface that `Square` implements without
+/// replacing it.
+fn defaults_through_types(p: &Program, query: &str) -> Vec<FnId> {
+    let Some((type_name, method)) = query.rsplit_once('.') else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for d in 0..p.defs.len() {
+        if node_name(p, Node::Def(d)) != type_name {
+            continue;
+        }
+        for impl_id in 0..p.impls.len() {
+            let Some(interface) = implements(p, impl_id, d) else {
+                continue;
+            };
+            for &m in interface_methods(p, interface) {
+                if p.funcs[m].name == method
+                    && implementation_of(p, impl_id, m) == Some((m, true))
+                    && !out.contains(&m)
+                {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Everything `unio symbol` reports about one declaration.
 pub struct Report {
     pub name: String,
@@ -428,6 +560,11 @@ pub struct Report {
     pub layer: &'static str,
     pub calls: Vec<String>,
     pub hash: String,
+    /// For a type: the interfaces it implements and the implementation of each method (L-6c).
+    pub implementations: Vec<Implementation>,
+    /// For a method that a type gets from an interface, named through the type: the default
+    /// of the interface that it is (L-6c); empty otherwise.
+    pub default_of: String,
 }
 
 pub fn report(p: &Program, derived: &Derived, hashes: &Hashes, n: Node) -> Report {
@@ -488,6 +625,11 @@ pub fn report(p: &Program, derived: &Derived, hashes: &Hashes, n: Node) -> Repor
         layer,
         calls,
         hash: hashes.hash.get(&n).cloned().unwrap_or_default(),
+        implementations: match n {
+            Node::Def(d) => implementations(p, d),
+            _ => Vec::new(),
+        },
+        default_of: String::new(),
     }
 }
 
@@ -504,6 +646,9 @@ impl Report {
         let mut out = format!("{} ({})\n", self.name, self.kind);
         out.push_str(&format!("  signature: {}\n", self.signature));
         out.push_str(&format!("  declared: {}\n", self.declared));
+        if !self.default_of.is_empty() {
+            out.push_str(&format!("  default of: {}\n", self.default_of));
+        }
         if !self.documentation.is_empty() {
             out.push_str("  documentation:\n");
             for line in self.documentation.lines() {
@@ -525,6 +670,16 @@ impl Report {
             out.push_str(&format!("  layer: {}\n", self.layer));
             out.push_str(&format!("  calls: {}\n", list(&self.calls)));
         }
+        for i in &self.implementations {
+            out.push_str(&format!("  implements: {} ({})\n", i.interface, i.declared));
+            for m in &i.methods {
+                let default = if m.default { "default, " } else { "" };
+                out.push_str(&format!(
+                    "    {}: {} ({default}{})\n",
+                    m.name, m.function, m.declared
+                ));
+            }
+        }
         out.push_str(&format!("  usages: {}\n", self.usages.len()));
         for usage in &self.usages {
             out.push_str(&format!("    {usage}\n"));
@@ -539,19 +694,46 @@ impl Report {
             format!("[{}]", quoted.join(","))
         };
         let effects: Vec<String> = self.effects.iter().map(|e| e.to_string()).collect();
+        let implementations: Vec<String> = self
+            .implementations
+            .iter()
+            .map(|i| {
+                let methods: Vec<String> = i
+                    .methods
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{{\"name\":{},\"function\":{},\"declared\":{},\"default\":{}}}",
+                            json_string(&m.name),
+                            json_string(&m.function),
+                            json_string(&m.declared),
+                            m.default
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{{\"interface\":{},\"declared\":{},\"methods\":[{}]}}",
+                    json_string(&i.interface),
+                    json_string(&i.declared),
+                    methods.join(",")
+                )
+            })
+            .collect();
         format!(
-            "{{\"name\":{},\"kind\":{},\"signature\":{},\"documentation\":{},\"declared\":{},\"usages\":{},\"errors\":{},\"effects\":{},\"argument_effects\":{},\"layer\":{},\"calls\":{},\"hash\":{}}}",
+            "{{\"name\":{},\"kind\":{},\"signature\":{},\"documentation\":{},\"declared\":{},\"default_of\":{},\"usages\":{},\"errors\":{},\"effects\":{},\"argument_effects\":{},\"layer\":{},\"calls\":{},\"implementations\":[{}],\"hash\":{}}}",
             json_string(&self.name),
             json_string(self.kind),
             json_string(&self.signature),
             json_string(&self.documentation),
             json_string(&self.declared),
+            json_string(&self.default_of),
             strings(&self.usages),
             strings(&self.errors),
             strings(&effects),
             strings(&self.argument_effects),
             json_string(self.layer),
             strings(&self.calls),
+            implementations.join(","),
             json_string(&self.hash),
         )
     }
@@ -575,15 +757,28 @@ fn json_string(text: &str) -> String {
 }
 
 /// The reports of the declarations named by the query, after checking the program.
+/// A method that a type gets from a default of an interface is reported as that default,
+/// under the name given through the type and with `default_of` naming the default (L-6c).
 pub fn lookup(p: &Program, query: &str) -> Vec<Report> {
     let nodes = find(p, query);
-    if nodes.is_empty() {
+    let defaults = if nodes.is_empty() {
+        defaults_through_types(p, query)
+    } else {
+        Vec::new()
+    };
+    if nodes.is_empty() && defaults.is_empty() {
         return Vec::new();
     }
     let derived = effects::derive(p);
     let hashes = hashes(p);
-    nodes
+    let mut reports: Vec<Report> = nodes
         .into_iter()
         .map(|n| report(p, &derived, &hashes, n))
-        .collect()
+        .collect();
+    for f in defaults {
+        let mut r = report(p, &derived, &hashes, Node::Func(f));
+        r.default_of = std::mem::replace(&mut r.name, query.to_string());
+        reports.push(r);
+    }
+    reports
 }

@@ -1,0 +1,6 @@
+# expect-error: 6 E0089
+# category: resources
+[package]
+name = "control"
+version = "0.1.0"
+unsafe_modules = []

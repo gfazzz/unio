@@ -305,6 +305,7 @@ fn the_manifest_permits_effects() {
         ],
     );
     assert!(codes(&allowed, "app.unio", Profile::Application).is_empty());
+    // A manifest without `[permissions]`, or no manifest, permits nothing (SB-2, SB-7).
     let unmanaged = package(
         "unmanaged",
         &[
@@ -312,7 +313,13 @@ fn the_manifest_permits_effects() {
             ("unio.toml", "[package]\nname = \"p\"\n"),
         ],
     );
-    assert!(codes(&unmanaged, "app.unio", Profile::Application).is_empty());
+    let found = codes(&unmanaged, "app.unio", Profile::Application);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].0.as_str(), found[0].1), ("E0085", 4));
+    std::fs::remove_file(unmanaged.join("unio.toml")).unwrap();
+    let found = codes(&unmanaged, "app.unio", Profile::Application);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].0.as_str(), found[0].1), ("E0085", 4));
     // files.read and files.write are separate scopes (T-6): writing needs files.write.
     let writer = "\
 import std.files as files
@@ -696,7 +703,13 @@ function texts(paths as List[Path]) returns List[Text] fails with IoError:
 function lengths(words as List[Text]) returns List[Int]:
     return words.map(function (w as Text) returns Int: w.length())
 ";
-    let dir = package("higher_order", &[("app.unio", app)]);
+    let dir = package(
+        "higher_order",
+        &[
+            ("app.unio", app),
+            ("unio.toml", "[permissions]\nfiles.read = [\"$CWD/**\"]\n"),
+        ],
+    );
     assert!(codes(&dir, "app.unio", Profile::Application).is_empty());
     for name in ["app.sizes", "app.longest_first", "app.texts"] {
         let r = &unio::symbol(name, &dir)[0];
@@ -801,5 +814,132 @@ function adder(n as Int) returns Function[(Int) -> Int]:
         "{}",
         found[1].2
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const SHAPES: &str = "\
+public interface Shape:
+    function area(self) returns Int
+
+    ## A name for messages.
+    function name(self) returns Text:
+        let size = self.area()
+        return \"shape of area {size}\"
+
+public struct Square:
+    side as Int
+
+extend Square with Shape:
+    function area(self) returns Int:
+        return self.side * self.side
+
+public struct Circle:
+    radius as Int
+
+extend Circle with Shape:
+    function area(self) returns Int:
+        return 3 * self.radius * self.radius
+
+    function name(self) returns Text:
+        return \"circle\"
+
+public function label(square as Square) returns Text:
+    return square.name()
+";
+
+/// A method of an interface shows its own signature and documentation, not the interface
+/// with its bodies.
+#[test]
+fn symbol_of_an_interface_method_shows_only_its_signature() {
+    let dir = package("interface_method", &[("m.unio", SHAPES)]);
+    let reports = unio::symbol("m.Shape.name", &dir);
+    assert_eq!(reports.len(), 1);
+    let r = &reports[0];
+    assert_eq!(r.signature, "function name(self) returns Text");
+    assert_eq!(r.documentation, "A name for messages.");
+    assert!(r.declared.ends_with("m.unio:5:14"), "{}", r.declared);
+    let area = &unio::symbol("m.Shape.area", &dir)[0];
+    assert_eq!(area.signature, "function area(self) returns Int");
+    assert_eq!(area.documentation, "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// L-6c: `unio symbol` shows which implementation of each interface method a type uses, and
+/// a method a type gets from a default of the interface resolves to that default.
+#[test]
+fn symbol_shows_the_implementations_of_a_type_and_its_default_methods() {
+    let dir = package("implementations", &[("m.unio", SHAPES)]);
+    let square = &unio::symbol("m.Square", &dir)[0];
+    assert_eq!(square.implementations.len(), 1);
+    let shape = &square.implementations[0];
+    assert_eq!(shape.interface, "m.Shape");
+    assert!(
+        shape.declared.ends_with("m.unio:12:1"),
+        "{}",
+        shape.declared
+    );
+    let methods: Vec<(&str, &str, bool)> = shape
+        .methods
+        .iter()
+        .map(|m| (m.name.as_str(), m.function.as_str(), m.default))
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("area", "m.Square.area", false),
+            ("name", "m.Shape.name", true)
+        ]
+    );
+    assert!(shape.methods[1].declared.ends_with("m.unio:5:14"));
+    let text = square.text();
+    assert!(text.contains("  implements: m.Shape ("), "{text}");
+    assert!(text.contains("    area: m.Square.area ("), "{text}");
+    assert!(text.contains("    name: m.Shape.name (default, "), "{text}");
+    let json = square.json();
+    assert!(
+        json.contains("\"implementations\":[{\"interface\":\"m.Shape\",\"declared\":"),
+        "{json}"
+    );
+    assert!(
+        json.contains("{\"name\":\"name\",\"function\":\"m.Shape.name\",\"declared\":"),
+        "{json}"
+    );
+    assert!(json.contains("\"default\":true}"), "{json}");
+    let circle = &unio::symbol("m.Circle", &dir)[0];
+    assert!(
+        circle.implementations[0]
+            .methods
+            .iter()
+            .all(|m| !m.default && m.function.starts_with("m.Circle.")),
+        "{}",
+        circle.text()
+    );
+
+    // The default method through the type.
+    let reports = unio::symbol("m.Square.name", &dir);
+    assert_eq!(reports.len(), 1, "a default method of the interface");
+    let name = &reports[0];
+    assert_eq!(name.name, "m.Square.name");
+    assert_eq!(name.kind, "function");
+    assert_eq!(name.default_of, "m.Shape.name");
+    assert_eq!(name.signature, "function name(self) returns Text");
+    assert!(name.declared.ends_with("m.unio:5:14"), "{}", name.declared);
+    assert_eq!(name.documentation, "A name for messages.");
+    let text = name.text();
+    assert!(text.contains("  default of: m.Shape.name\n"), "{text}");
+    assert!(
+        name.json().contains("\"default_of\":\"m.Shape.name\""),
+        "{}",
+        name.json()
+    );
+    // A replaced method is the type's own.
+    let own = &unio::symbol("m.Circle.name", &dir)[0];
+    assert_eq!(own.default_of, "");
+    assert!(own.json().contains("\"default_of\":\"\""));
+    assert!(!own.text().contains("default of"));
+    assert!(unio::symbol("m.Square.missing", &dir).is_empty());
+    // A function and an interface have no implementations.
+    assert!(unio::symbol("m.label", &dir)[0].implementations.is_empty());
+    assert!(unio::symbol("m.Shape", &dir)[0].implementations.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

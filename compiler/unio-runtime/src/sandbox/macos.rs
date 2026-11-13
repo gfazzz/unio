@@ -39,6 +39,10 @@ pub fn apply(permissions: &Permissions, limits: &Limits) -> Result<(), String> {
                     .into_iter()
                     .collect()
             };
+            // The test hook makes sandbox_init fail, as a refusal of the system does (SB-5).
+            if super::test_fault("sandbox-init") {
+                return Err("Seatbelt: sandbox_init failed (test fault)".to_string());
+            }
             init(&profile(permissions))?;
             let _ = EXECUTABLE.set(execute);
             if !permissions.process.is_empty() {

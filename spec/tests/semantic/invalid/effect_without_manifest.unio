@@ -1,0 +1,12 @@
+# expect-error: 7 E0085
+# No unio.toml is beside or above this file, so its package permits no effect that needs a
+# permission (SB-2, SB-7): the read is E0085, as the sandbox would deny it at run time.
+import std.files
+
+function size(path as Path) returns Int fails with IoError:
+    return (try files.read_text(path)).length()
+
+public function main() returns Int:
+    let n = try size(Path("data.txt")) on IoError:
+        return 1
+    return n

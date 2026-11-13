@@ -24,7 +24,7 @@ use std::rc::{Rc, Weak};
 use unio_runtime::fault::{self as rf, Fault, FaultKind, Outcome, Unwind};
 use unio_runtime::runtime::Runtime;
 use unio_runtime::value::{
-    values_equal, Callable, EnumValue, OrderedMap, OrderedSet, StructValue, Value,
+    values_equal, Callable, Captures, EnumValue, OrderedMap, OrderedSet, StructValue, Value,
 };
 
 pub(crate) type ModId = usize;
@@ -3171,7 +3171,8 @@ impl Callable for FnRef {
 pub(crate) struct Closure {
     interp: Rc<Interp>,
     code: Rc<LambdaCode>,
-    captured: Vec<Value>,
+    /// Freed without recursion, so that a chain of closures does not overflow the stack.
+    captured: Captures,
     module: ModId,
     types: Types,
 }

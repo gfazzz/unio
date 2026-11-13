@@ -1,0 +1,10 @@
+unsafe module
+
+# The number of chunks of `size` bytes that hold `length` bytes; listed for review.
+public function chunk_count(length as Int, size as Int) returns Int:
+    var count = 0
+    var covered = 0
+    while covered < length:
+        covered = covered + size
+        count = count + 1
+    return count

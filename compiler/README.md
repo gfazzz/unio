@@ -371,7 +371,7 @@ constraints, methods through `extend` blocks, interfaces and defaults, functions
 struct and variant construction, operators through interfaces, `or` on `Option`, `?.`, indexing,
 `in`, interpolation, lambdas typed from the expected function type, patterns, and `is`.
 
-Codes reported: E0040, E0041, E0044 to E0050, E0051 to E0067, E0069, E0071, E0072, E0086, E0088. The
+Codes reported: E0040, E0041, E0044 to E0050, E0051 to E0067, E0069, E0071, E0072, E0086, E0088, E0089. The
 codes of RFC 0001 have their own cases: a key, a bound, a bounded method or `<` on a type built
 from IEEE `Float` is E0045 (semantics 2.9, 3.3, 4.2); a `std.json` conversion of a type with a
 private field, also through a generic function that passes its parameter on, is E0046 (3.8); a
@@ -379,7 +379,9 @@ private field, also through a generic function that passes its parameter on, is 
 E0048 (1.9); an `external function` outside an `unsafe module` of the standard library is E0086
 (8.5); a mistake in the manifest `unio.toml` of a reported package is E0088 at its line of
 the manifest, checked by `src/package/manifest.rs` (`check`) and reported as a file of its own
-by `unio check` and the language server (8.6). Where a
+by `unio check` and the language server (8.6); `unsafe_modules` that does not name exactly
+the modules marked `unsafe module` is E0089 at its line (`src/program.rs`,
+`package_manifest_diagnostics`). Where a
 type cannot be determined, the checker uses an unknown type that is compatible with every type,
 so that one mistake is reported once. The arguments of generic interfaces are compared in
 implementation checks, constraints and assignability (`Iterator[Int]` is not `Iterator[Text]`).
@@ -441,11 +443,12 @@ that use it, a parameter default for its function, and field defaults for the fu
 build the type; list, map and comprehension literals, interpolation, `+` on texts and lambdas that
 capture values give `allocates` and the layer `alloc`. A library module that calls a higher
 layer, or a `core` module that allocates, is E0084; `--profile=core` applies the rule to the
-functions of a package, with the chain of calls down to the call or the allocating expression. When
-the `unio.toml` of a package has a `[permissions]` table, a call that needs an effect the table
-does not grant is E0085, once per effect and module, with the chain; `files.read` and
-`files.write` are checked separately against the keys of the same names (T-6), and `env`,
-`process` and `network` grant themselves. A manifest without the table is not checked.
+functions of a package, with the chain of calls down to the call or the allocating expression. A
+call that needs an effect the `[permissions]` table of the package's `unio.toml` does not grant
+is E0085, once per effect and module, with the chain; `files.read` and `files.write` are checked
+separately against the keys of the same names (T-6), and `env`, `process` and `network` grant
+themselves. A package without the table, or without a manifest, grants nothing (SB-2, SB-7); a
+manifest with a mistake (E0088) is not compared.
 
 `src/symbol.rs` and `src/sha.rs` compute the content hashes of C-11a and C-11b: SHA-384, with
 the scheme version `unio-hash-v1` and a domain for each kind of input, over the S-expression of
@@ -653,7 +656,7 @@ The tests were written before the code (concept, section 1.2):
   types; results and errors are not compared); a parameter that a function keeps has every
   argument passed for it anywhere; a lambda returned from a function does not keep the arguments
   of that call. These estimates can reject a call no run makes: under `--profile=core` it is
-  E0087, in a package with a manifest it can be E0085 (semantics 8.4); usages of types are
+  E0087, and in a package it can be E0085 (semantics 8.4); usages of types are
   listed per referencing declaration. Defaults of parameters and fields are checked like any
   expression (names and types, E0056 or E0061).
 - Known limits of `process.run` (docs/runtime.md 9.5): on Linux a program that needs `setsid`

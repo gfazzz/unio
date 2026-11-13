@@ -1,0 +1,14 @@
+# No unio.toml is beside or above this file. Its package permits no effect that needs a
+# permission, and these effects need none: allocation, the clock, and randomness from a seed
+# (semantics 8.3, RFC 0009).
+import std.time
+
+function elapsed(start as time.Instant) returns Int:
+    return time.monotonic().since(start).total_milliseconds()
+
+function names(count as Int) returns List[Text]:
+    return ["n{i}" for i in range(0, count)]
+
+public function main() returns Int:
+    let start = time.monotonic()
+    return names(3).length() + elapsed(start)

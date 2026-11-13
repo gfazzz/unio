@@ -339,6 +339,24 @@ pub enum Mistake {
     Dependency(String, DependencyMistake),
 }
 
+/// `package.unsafe_modules` of a manifest and the line to report its comparison with the
+/// marked modules at (E0089, T-6, RFC 0004): the line of the key, else of `[package]`, else 1.
+/// None when the manifest does not parse or the key is not a list, which is E0088 alone.
+pub fn unsafe_modules(source: &str) -> Option<(Vec<String>, usize)> {
+    let (table, lines) = toml::parse_with_lines(source).ok()?;
+    let line = |key: &str| lines.get(key).copied();
+    match table.get("package.unsafe_modules") {
+        None => Some((
+            Vec::new(),
+            line("package")
+                .or_else(|| line("package.name"))
+                .unwrap_or(1),
+        )),
+        Some(TomlValue::Texts(list)) => Some((list.clone(), line("package.unsafe_modules")?)),
+        Some(_) => None,
+    }
+}
+
 /// The mistakes of a manifest with the line, from 1, of each: every one is reported once, in
 /// the order of the lines. A manifest that does not parse has only that mistake.
 pub fn check(source: &str) -> Vec<(usize, Mistake)> {

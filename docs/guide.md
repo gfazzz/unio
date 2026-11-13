@@ -38,7 +38,7 @@ One command does everything; each subcommand is described by `unio --help`.
 | `unio test FILE...` | runs the `test` blocks, each in isolation; `--json` for a machine-readable report |
 | `unio fmt FILE...` | rewrites the files in the one style; `--check` only reports |
 | `unio build FILE -o OUT` | a native executable for this machine |
-| `unio outline FILE`, `unio symbol MODULE.NAME` | what a file declares; one declaration with its documentation, errors and effects |
+| `unio outline FILE`, `unio symbol MODULE.NAME` | what a file declares; one declaration with its documentation, errors and effects, and the interfaces a type implements with the method it uses for each |
 | `unio explain CODE` | the explanation of a diagnostic code with an example and its fix |
 
 A program is a file with `public function main()`. Its directory, or the nearest directory above it with `unio.toml`, is its package; the manifest names the package and grants it permissions. Without permissions a program may read its arguments and standard input and write to standard output and standard error, nothing more.

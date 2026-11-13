@@ -1,0 +1,6 @@
+import buffers
+
+# Prints how many chunks of four bytes hold ten bytes.
+public function main() returns Int:
+    print("{buffers.chunk_count(10, 4)} chunks")
+    return 0

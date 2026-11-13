@@ -35,7 +35,8 @@ fn package(name: &str, manifest: &str, program: &str) -> PathBuf {
 /// The manifest with a harmless grant for every kind of permission it does not list: the
 /// programs share helpers that use every kind, and the compile-time check (E0085, SB-7) would
 /// otherwise reject them before the sandbox is reached. A manifest without `[permissions]`
-/// stays as it is: it permits nothing, and the compiler does not check it.
+/// stays as it is: it permits nothing, and the compiler rejects every effect that needs a
+/// permission, so it suits only programs without one.
 fn with_decoys(manifest: &str) -> String {
     if !manifest.contains("[permissions]") {
         return manifest.to_string();
@@ -293,6 +294,10 @@ fn every_module_of_the_standard_library_denies_what_the_manifest_does_not_permit
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// SB-2: a program granted nothing but the decoys (a manifest with an empty `[permissions]`
+/// table) has only its arguments and standard streams at run time. Without the table, or
+/// without a manifest, `unio check` already rejects every such use (E0085, SB-7), so the
+/// program does not start.
 #[test]
 fn without_permissions_a_program_only_has_its_arguments_and_standard_streams() {
     let program = format!(
@@ -308,6 +313,19 @@ public function main():
 "
     );
     let dir = package("none", "[package]\nname = \"none\"\n", &program);
+    for manifest in [true, false] {
+        if !manifest {
+            fs::remove_file(dir.join("unio.toml")).unwrap();
+        }
+        let output = run(&dir, &[], &[]);
+        let all = format!("{}{}", text(&output.stdout), text(&output.stderr));
+        assert_eq!(output.status.code(), Some(1), "{all}");
+        assert!(
+            all.contains("E0085") && !all.contains("arguments 0"),
+            "{all}"
+        );
+    }
+    fs::write(dir.join("unio.toml"), with_decoys("[permissions]\n")).unwrap();
     let output = run(&dir, &[], &[]);
     assert_denied(
         &output,
@@ -1144,9 +1162,9 @@ fn a_policy_or_manifest_that_cannot_be_used_stops_the_start_with_code_103() {
 }
 
 /// Without the mechanisms of the operating system the sandbox fails closed unless the operator
-/// allows a weaker one, which then names what is missing (SB-5). Linux, macOS, and Windows have
-/// every mechanism; on Linux the refusal is tested where Landlock is missing
-/// (`unio-runtime`).
+/// allows a weaker one, which then names what is missing (SB-5). This runs on a system without
+/// a sandbox of its own; Linux, macOS, and Windows have every mechanism, and
+/// `a_mechanism_that_cannot_be_applied_stops_the_start_with_code_103` makes one fail there.
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[test]
 fn a_missing_mechanism_fails_closed() {
@@ -1166,6 +1184,74 @@ fn a_missing_mechanism_fails_closed() {
     let output = run(&dir, &[], &[]);
     assert_eq!(text(&output.stdout), "ran\n");
     assert!(text(&output.stderr).contains("missing"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Faults of the test hook `UNIO_TEST_SANDBOX_FAULT`, each with a word of the message that
+/// names its mechanism.
+type Faults = &'static [(&'static str, &'static str)];
+
+/// SB-5 on the systems that have every mechanism: the test hook `UNIO_TEST_SANDBOX_FAULT` makes
+/// one mechanism fail as the system would, and the start stops with code 103 before the program
+/// runs. A mechanism absent from the kernel (Landlock or seccomp on Linux) stops it and names
+/// the operator's way to allow a weaker sandbox; a mechanism the system refuses to apply
+/// (Landlock or seccomp on Linux, `sandbox_init` on macOS, the AppContainer on Windows) stops
+/// it as well. `unio test` applies the same sandbox and stops the same way. No test passes the
+/// operator's flag (`release_checks_refuse_the_weaker_sandbox`); that the flag does not help
+/// against a refusal, and that the hook is ignored under it, is stated by the code of
+/// `apply_os` and `linux::apply` in `unio-runtime`.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn a_mechanism_that_cannot_be_applied_stops_the_start_with_code_103() {
+    const FAULT: &str = "UNIO_TEST_SANDBOX_FAULT";
+    let program =
+        "public function main():\n    print(\"ran\")\n\ntest \"it runs\":\n    assert 1 == 1\n";
+    let dir = package("fault", "[package]\nname = \"x\"\n", program);
+    let ran = run(&dir, &[], &[]);
+    assert_eq!(text(&ran.stdout), "ran\n", "{}", text(&ran.stderr));
+    let (absent, refused): (Faults, Faults) = if cfg!(target_os = "linux") {
+        (
+            &[
+                ("landlock-missing", "Landlock"),
+                ("seccomp-missing", "seccomp"),
+            ],
+            &[
+                ("landlock-refused", "Landlock"),
+                ("seccomp-refused", "seccomp"),
+            ],
+        )
+    } else if cfg!(target_os = "macos") {
+        (&[], &[("sandbox-init", "sandbox_init")])
+    } else {
+        (&[], &[("appcontainer", "AppContainer")])
+    };
+    for (fault, word) in absent.iter().chain(refused) {
+        let output = run(&dir, &[], &[(FAULT, fault)]);
+        let err = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(103), "{fault}: {err}");
+        assert!(text(&output.stdout).is_empty(), "{fault}: the program ran");
+        assert!(err.contains(word), "{fault}: {err}");
+        if absent.iter().any(|(a, _)| a == fault) {
+            assert!(err.contains("allow-weaker-sandbox"), "{fault}: {err}");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_unio"))
+            .current_dir(&dir)
+            .env_remove("UNIO_POLICY")
+            .env(FAULT, fault)
+            .args(["test", "main.unio"])
+            .output()
+            .unwrap();
+        let err = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(103), "unio test, {fault}: {err}");
+        assert!(
+            !text(&output.stdout).contains("passed"),
+            "{fault}: the test ran"
+        );
+        assert!(err.contains(word), "unio test, {fault}: {err}");
+    }
+    // An unknown value of the hook changes nothing.
+    let output = run(&dir, &[], &[(FAULT, "none")]);
+    assert_eq!(text(&output.stdout), "ran\n", "{}", text(&output.stderr));
     let _ = fs::remove_dir_all(&dir);
 }
 

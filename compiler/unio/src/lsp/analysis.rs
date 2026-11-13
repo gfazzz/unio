@@ -282,12 +282,18 @@ impl Context<'_> {
     fn diagnostics(&self) -> Json {
         let lang = self.request.lang;
         let mut items = Vec::new();
-        // The manifest of the package (E0088, T-6): in its own document at its lines, and in
+        // The manifest of the package (E0088, E0089, T-6): in its own document at its lines, and in
         // a source document at its start, with the place in the manifest as related
         // information, since an editor may show only the documents of the language.
-        let manifest = package_root(&self.doc).join("unio.toml");
-        let manifest_text = crate::vfs::read_to_string(&manifest).unwrap_or_default();
-        let manifest_found = crate::program::manifest_diagnostics(&manifest_text);
+        let package = package_root(&self.doc);
+        let manifest = package.join("unio.toml");
+        let (manifest_text, manifest_found) = match crate::vfs::read_to_string(&manifest) {
+            Ok(text) => {
+                let found = crate::program::package_manifest_diagnostics(&package, &text);
+                (text, found)
+            }
+            Err(_) => (String::new(), Vec::new()),
+        };
         if self.doc.file_name().is_some_and(|n| n == "unio.toml") {
             for d in &manifest_found {
                 let at = range(&manifest_text, d.span.start.offset, d.span.end.offset);

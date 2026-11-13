@@ -930,3 +930,36 @@ test \"a few small values\":
     let p = Point(x = 1, y = 2, z = 3)
     assert p.x + p.y + p.z == 6
 ";
+
+/// What [`common::deep_closures`] prints when it runs to its end.
+const DEEP_CLOSURES_OUTPUT: &str = "closures 3\nmixed 3\nfreed\n";
+
+/// A chain of 10 million closures, each capturing the one before, and a mixed chain in which a
+/// closure captures a list, a map, a struct, or an Option holding the closure before, are freed
+/// without recursion on the native stack (RFC 0007, C-13): the program ends normally without a
+/// heap limit and with one that holds the chains, and with code 102 when the limit is reached.
+/// Before, a closure freed its captures by recursion, and the chain of closures overflowed the
+/// stack of 1 GiB: `fatal runtime error: stack overflow` and code 134.
+#[test]
+fn a_deep_chain_of_closures_is_freed_without_recursion() {
+    let source = common::deep_closures(common::DEEP_CLOSURES);
+    let dir = common::reserve_package("unio-interpreter", "deep-closures", &source);
+    common::set_heap_limit(&dir, None);
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(output.status.code(), Some(0), "{}", program_err(&output));
+    assert_eq!(text(&output.stdout), DEEP_CLOSURES_OUTPUT);
+    assert_eq!(program_err(&output), "");
+    common::set_heap_limit(&dir, Some(4 << 30));
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(output.status.code(), Some(0), "{}", program_err(&output));
+    assert_eq!(text(&output.stdout), DEEP_CLOSURES_OUTPUT);
+    common::set_heap_limit(&dir, Some(8_388_608));
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(output.status.code(), Some(102), "{}", program_err(&output));
+    assert_eq!(
+        program_err(&output),
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    assert_eq!(text(&output.stdout), "");
+    let _ = fs::remove_dir_all(&dir);
+}

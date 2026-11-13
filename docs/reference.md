@@ -190,7 +190,7 @@ Patterns appear after `case` and `is`. A pattern either matches a value, binding
 
 - **Programs.** A program starts at `public function main()` of the module given to `unio run` or `unio build`. Its exit code is 0, or the `Int` that `main` returns, which must be 0 to 100. A fault ends it with 101 after releasing the open resources, exhaustion of memory or time with 102, and a policy that cannot be met with 103 (C-15, runtime 6).
 - **Errors and faults.** An error is a value in the signature, handled by `try` and `on`; a fault is a bug or an exhausted check that ends the program in a controlled way and cannot be handled (concept section 3).
-- **Packages and permissions.** A package is a directory with `unio.toml` (T-6, [packages.md](packages.md)). The effects of each function (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`) are derived from the calls it makes (L-9b) and must be permitted by the manifest (E0085); the manifest itself is checked as a whole (E0088). Every run happens in the sandbox those permissions describe (SB-1, runtime 9).
+- **Packages and permissions.** A package is a directory with `unio.toml` (T-6, [packages.md](packages.md)). The effects of each function (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`) are derived from the calls it makes (L-9b) and must be permitted by the manifest (E0085); `allocates`, `clock` and `random` need no permission, and a package without a manifest or without a `[permissions]` table permits none of the others. The manifest itself is checked as a whole (E0088), and its `unsafe_modules` must name exactly the modules marked `unsafe module` (E0089). Every run happens in the sandbox those permissions describe (SB-1, runtime 9).
 - **Layers and profiles.** The standard library has the layers `core`, `alloc` and `std`; a module of a layer, and a package checked with `--profile=core`, uses nothing above what it may (E0084, E0087; semantics 8).
 
 ## 8. Diagnostic codes
@@ -265,5 +265,6 @@ Every diagnostic has a code, a message in English or Russian, a span, an explana
 | `E0086` | `external function` outside an `unsafe module` of the standard library | semantics 8.5 |
 | `E0087` | Call through an estimated function value that may need more than `core` | semantics 8.4, RFC 0005 |
 | `E0088` | A mistake in the manifest `unio.toml` | semantics 8.6, RFC 0008 |
+| `E0089` | `unsafe_modules` does not name exactly the modules marked `unsafe module` | semantics 8.6, RFC 0004 |
 
 Faults and exit codes are not diagnostics: they are the run-time outcomes of runtime.md sections 4 and 6.

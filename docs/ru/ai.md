@@ -42,7 +42,7 @@ Unio рассчитан на то, что его пишут люди и аген
 | `fixes` | замены, если исправление однозначно: заменить `range` в `file` на `new_text`; `description` говорит, что это делает |
 | `related` | другие места и символы; в 0.1 всегда пусто |
 
-Формат версионируется вместе с компилятором; опубликованной JSON Schema пока нет ([status.md](status.md), строка К-8).
+Формат версионируется вместе с компилятором, а его JSON Schema опубликована как [compiler/diagnostics.schema.json](../../compiler/diagnostics.schema.json) (`urn:unio:diagnostics:1`); `tests/diagnostics.rs` проверяет вывод по ней (К-8).
 
 ### 2.2 Тесты: `unio test --json FILE...`
 
@@ -68,10 +68,16 @@ Unio рассчитан на то, что его пишут люди и аген
 
 ### 2.4 Символы: `unio symbol --json MODULE.NAME`
 
-Одно объявление с тем, что оно значит для вызывающего (К-11): `name`, `kind`, `signature`, `documentation` (его комментарий `##`), `declared` (файл, строка и столбец), `usages` в программе, а для функции — `errors` (её `fails with`), `effects`, выведенные из вызовов (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`), `argument_effects` (параметры, эффекты которых — эффекты вызывающего), `layer` (самый низкий слой библиотеки, который ей нужен), `calls` и `hash` — хэш содержимого объявления и того, от чего оно зависит. Имена стандартной библиотеки начинаются с `std.`; имена программы считаются от её пакета, команда запускается из его каталога.
+Одно объявление с тем, что оно значит для вызывающего (К-11): `name`, `kind`, `signature`, `documentation` (его комментарий `##`), `declared` (файл, строка и столбец), `usages` в программе, а для функции — `errors` (её `fails with`), `effects`, выведенные из вызовов (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`), `argument_effects` (параметры, эффекты которых — эффекты вызывающего), `layer` (самый низкий слой библиотеки, который ей нужен), `calls`, `hash` — хэш содержимого объявления и того, от чего оно зависит, `default_of` и `implementations`. Метод, объявленный в интерфейсе, показывает только свою сигнатуру. Для типа `implementations` перечисляет интерфейсы, которые он реализует в блоках `extend ... with` (Я-6c), каждый с `interface`, `declared` (блок `extend`) и `methods`: для каждого метода интерфейса — `function`, которую использует тип, где она объявлена (`declared`), и `default`, истинное, когда тип использует реализацию интерфейса по умолчанию, а не заменяет её. Метод, который тип получает по умолчанию, находится через тип: `unio symbol m.Square.name` показывает реализацию по умолчанию под этим именем, с `declared` в интерфейсе и с `default_of`, который её называет (`m.Shape.name`); у всех остальных объявлений `default_of` пуст, а `implementations` пуст у всего, кроме типов. Имена стандартной библиотеки начинаются с `std.`; имена программы считаются от её пакета, команда запускается из его каталога.
 
 ```json
-[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.","declared":"stdlib/std/files.unio:212:17","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"hash":"unio-hash-v1:sha384:..."}]
+[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.","declared":"stdlib/std/files.unio:212:17","default_of":"","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"implementations":[],"hash":"unio-hash-v1:sha384:..."}]
+```
+
+Тип `Square`, реализующий интерфейс `Shape`: `area` он заменяет, а `name` использует по умолчанию; текстовый вывод показывает то же как `implements: m.Shape` со строкой на каждый метод:
+
+```json
+[{"name":"m.Square","kind":"type","signature":"public struct Square:","documentation":"","declared":"m.unio:9:15","default_of":"","usages":["m.unio:13:14","m.unio:26:17"],"errors":[],"effects":[],"argument_effects":[],"layer":"core","calls":[],"implementations":[{"interface":"m.Shape","declared":"m.unio:12:1","methods":[{"name":"area","function":"m.Square.area","declared":"m.unio:13:14","default":false},{"name":"name","function":"m.Shape.name","declared":"m.unio:5:14","default":true}]}],"hash":"unio-hash-v1:sha384:..."}]
 ```
 
 ### 2.5 Объяснения: `unio explain CODE`
@@ -112,7 +118,7 @@ Unio рассчитан на то, что его пишут люди и аген
 
 ## 5. Ограничения 0.1
 
-- `related` в диагностиках всегда пусто, опубликованной JSON Schema нет (К-8).
+- `related` в диагностиках всегда пусто (К-8).
 - Предупреждения (`W`) и подсказки стиля (`H`) определены в К-6, но ни одного нет: каждая диагностика — ошибка.
 - У `unio test --json` пока нет данных для воспроизведения тестов свойств (И-12), а REPL из И-13 не существует.
 - Языковой сервер `unio lsp` отдаёт редактору те же диагностики в виде сообщений LSP ([editors/README.md](../../editors/README.md)).

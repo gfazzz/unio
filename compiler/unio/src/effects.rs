@@ -1308,15 +1308,30 @@ pub enum Profile {
     Core,
 }
 
-/// The effects a manifest permits, or None when it has no `[permissions]` table or has a
-/// mistake, which is E0088 and gives no E0085 besides (semantics 2.8).
-pub fn manifest_permissions(package: &Path) -> Option<HashSet<&'static str>> {
-    let text = crate::vfs::read_to_string(&package.join("unio.toml")).ok()?;
+/// What the manifest of a package permits (semantics 8.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Permitted {
+    /// The effects with a permission.
+    pub effects: HashSet<&'static str>,
+    /// Whether the package has a manifest; without one nothing is permitted (SB-2).
+    pub manifest: bool,
+}
+
+/// The effects a manifest permits: none when the package has no manifest or its manifest has
+/// no `[permissions]` table, since a program without declared permissions may use no effect
+/// that needs one (SB-2, SB-7, runtime 9.1). None when the manifest has a mistake, which is
+/// E0088 and gives no E0085 besides (semantics 2.8, 8.6).
+pub fn manifest_permissions(package: &Path) -> Option<Permitted> {
+    let Ok(text) = crate::vfs::read_to_string(&package.join("unio.toml")) else {
+        return Some(Permitted {
+            effects: HashSet::new(),
+            manifest: false,
+        });
+    };
     if !crate::package::manifest::check(&text).is_empty() {
         return None;
     }
     let mut section = String::new();
-    let mut found = false;
     let mut permitted = HashSet::new();
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -1325,7 +1340,6 @@ pub fn manifest_permissions(package: &Path) -> Option<HashSet<&'static str>> {
                 .trim_matches(|c| c == '[' || c == ']')
                 .trim()
                 .to_string();
-            found |= section == "permissions";
             continue;
         }
         if section != "permissions" {
@@ -1354,7 +1368,10 @@ pub fn manifest_permissions(package: &Path) -> Option<HashSet<&'static str>> {
         };
         permitted.insert(effect);
     }
-    found.then_some(permitted)
+    Some(Permitted {
+        effects: permitted,
+        manifest: true,
+    })
 }
 
 /// E0084 and E0087 for the core profile and E0085 for the manifest, on the modules that are
@@ -1417,7 +1434,7 @@ pub fn report(p: &mut Program, profile: Profile) {
             let message = catalog::unproven_value_call(&name, LAYER_NAMES[acc.layer], (&en, &ru));
             found.push((u.module, Diagnostic::error("E0087", u.span, message)));
         }
-        let mut permissions: HashMap<ModId, Option<HashSet<&'static str>>> = HashMap::new();
+        let mut permissions: HashMap<ModId, Option<Permitted>> = HashMap::new();
         let mut reported_effects: HashSet<(ModId, usize)> = HashSet::new();
         // Every use at a place: calls, implicit calls, uses of constants and field defaults,
         // and calls through function values (semantics 8.4).
@@ -1442,7 +1459,7 @@ pub fn report(p: &mut Program, profile: Profile) {
             };
             let mut acc = None;
             for (e, effect) in EFFECTS.iter().enumerate() {
-                if needs_no_permission(e) || permitted.contains(effect) {
+                if needs_no_permission(e) || permitted.effects.contains(effect) {
                     continue;
                 }
                 if reported_effects.contains(&(u.module, e)) {
@@ -1456,7 +1473,11 @@ pub fn report(p: &mut Program, profile: Profile) {
                 let mut chain = vec![Step::Node(from)];
                 chain.extend(d.follow(acc.via[e], Some(e)));
                 let (en, ru) = d.show_chain(p, &chain);
-                let message = catalog::effect_not_permitted(effect, (&en, &ru));
+                let message = if permitted.manifest {
+                    catalog::effect_not_permitted(effect, (&en, &ru))
+                } else {
+                    catalog::effect_without_manifest(effect, (&en, &ru))
+                };
                 found.push((u.module, Diagnostic::error("E0085", u.span, message)));
             }
         }

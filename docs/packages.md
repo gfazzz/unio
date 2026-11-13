@@ -29,7 +29,7 @@ The key of a dependency is its alias, the name in `import deps.<alias>.<module>`
 
 `version` is a requirement: `^1.2.3` (the default for a bare version), `~1.2`, `=1.2.3`, `>=1.0, <2.0`, `*`. A prerelease is chosen only when a requirement names a prerelease of the same version. The table form `[dependencies.util]` with `path = "../util"` below it means the same as the inline form.
 
-`unio check` checks the whole manifest of each package it reports, as `unio run` and `unio test` read it: a value of the wrong form (`files.read = true` instead of a list of paths, an unknown placeholder or table, a dependency that is not a table or has no single source, an invalid name or version) is E0088 at its line of `unio.toml`, and the language server shows it too ([semantics.md](semantics.md) 8.6).
+`unio check` checks the whole manifest of each package it reports, as `unio run` and `unio test` read it: a value of the wrong form (`files.read = true` instead of a list of paths, an unknown placeholder or table, a dependency that is not a table or has no single source, an invalid name or version) is E0088 at its line of `unio.toml`, and the language server shows it too ([semantics.md](semantics.md) 8.6). `unsafe_modules` must name exactly the modules of the package that carry `unsafe module`; a marked module it does not name, or a name that is no marked module, is E0089 at its line (RFC 0004).
 
 ## 2. Identity, resolution, and the lock
 

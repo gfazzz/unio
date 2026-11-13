@@ -1498,3 +1498,34 @@ fn the_executable_counts_small_values_against_the_heap_limit() {
     assert_eq!(text(&found.stdout), "20000 20000 20000\n");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// RFC 0007, C-13: the executable frees a chain of 10 million closures and a mixed chain of
+/// closures, lists, maps, structs, and Options without recursion on the native stack, as `unio
+/// run` does: both end normally without a heap limit and with one that holds the chains, and
+/// with code 102 when the limit is reached. Before, both overflowed the stack of 1 GiB while
+/// freeing the chain of closures (code 134 in `unio run`, SIGSEGV in the executable).
+#[test]
+fn the_executable_frees_a_deep_chain_of_closures_without_recursion() {
+    if !supported() {
+        return;
+    }
+    let source = common::deep_closures(common::DEEP_CLOSURES);
+    let dir = common::reserve_package("unio-native", "deep-closures", &source);
+    let expected = "closures 3\nmixed 3\nfreed\n";
+    for heap in [None, Some(4 << 30)] {
+        common::set_heap_limit(&dir, heap);
+        let (_, found) = run_both(&dir, None);
+        assert_eq!(found.status.code(), Some(0), "{heap:?}: {}", errors(&found));
+        assert_eq!(text(&found.stdout), expected, "{heap:?}");
+        assert_eq!(errors(&found), "", "{heap:?}");
+    }
+    common::set_heap_limit(&dir, Some(8_388_608));
+    let (_, found) = run_both(&dir, None);
+    assert_eq!(found.status.code(), Some(102), "{}", errors(&found));
+    assert_eq!(
+        errors(&found),
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    assert_eq!(text(&found.stdout), "");
+    let _ = fs::remove_dir_all(&dir);
+}

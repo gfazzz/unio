@@ -30,7 +30,8 @@ fn every_code_has_an_explanation_with_an_example_and_its_fix() {
 /// the codes of docs/semantics.md. Each semantic example gets its own directory, so that the
 /// example of E0058 can import itself. E0084 and E0087 are checked with the core profile, and E0085 in a
 /// package whose manifest permits nothing. The example of E0088 is a manifest, checked beside a
-/// module without errors; the analysis of the manifest is returned when it has one.
+/// module without errors; that of E0089 a module, checked in a package whose manifest lists no
+/// module as unsafe; the analysis of the manifest is returned when it has one.
 fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
     if !catalog::SEMANTIC_CODES.contains(&code) {
         return unio::check_source("example.unio", source);
@@ -46,6 +47,13 @@ fn check_example(code: &str, source: &str, which: &str) -> unio::Analysis {
         std::fs::write(dir.join("unio.toml"), source).unwrap();
     } else {
         std::fs::write(&file, source).unwrap();
+    }
+    if code == "E0089" {
+        std::fs::write(
+            dir.join("unio.toml"),
+            "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
     }
     if code == "E0085" {
         std::fs::write(

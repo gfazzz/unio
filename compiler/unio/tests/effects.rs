@@ -9,11 +9,19 @@ use std::process::Command;
 
 use unio::effects::Profile;
 
-/// A fresh package directory with the given files.
+/// A manifest that permits every effect that needs a permission, for the packages whose
+/// derived effects are examined: without a manifest each such effect would be E0085 (SB-7).
+const MANIFEST_ALL: &str = "[permissions]\nfiles.read = [\"$CWD/**\"]\nfiles.write = [\"$TEMP/**\"]\nenv = [\"HOME\"]\nprocess = [\"git\"]\n";
+
+/// A fresh package directory with the given files, and [`MANIFEST_ALL`] unless they include a
+/// manifest.
 fn package(name: &str, files: &[(&str, &str)]) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("unio-effects-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    if !files.iter().any(|(file, _)| *file == "unio.toml") {
+        fs::write(dir.join("unio.toml"), MANIFEST_ALL).unwrap();
+    }
     for (file, text) in files {
         fs::write(dir.join(file), text).unwrap();
     }

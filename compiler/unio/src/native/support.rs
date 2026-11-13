@@ -22,7 +22,7 @@ use crate::lower::{ExprCode, LambdaCode, Node, Op, PStep, Pat, Place, S};
 use std::rc::Rc;
 use unio_runtime::fault::{self as rf, FaultKind, Outcome, Unwind};
 use unio_runtime::runtime::Runtime;
-use unio_runtime::value::{Callable, OrderedMap, Value};
+use unio_runtime::value::{Callable, Captures, OrderedMap, Value};
 
 /// What native code receives in its first argument. The first three fields are read by
 /// native code at fixed offsets to push its call frame without a call (C-14, C-18). Native code
@@ -124,7 +124,8 @@ struct NativeClosure {
     interp: Rc<Interp>,
     code: Rc<LambdaCode>,
     entry: Entry,
-    captured: Vec<Value>,
+    /// Freed without recursion, so that a chain of closures does not overflow the stack.
+    captured: Captures,
     types: Types,
 }
 
@@ -1134,7 +1135,7 @@ pub unsafe extern "C" fn unio_rt_closure(
         std::ptr::write(out, Value::Unit);
         return;
     };
-    let captured = read_n(captured, code.captures.len());
+    let captured = Captures::from(read_n(captured, code.captures.len()));
     let types = c.types(types);
     std::ptr::write(
         out,

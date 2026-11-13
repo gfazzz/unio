@@ -1,6 +1,6 @@
 ## Names, imports, local inference, struct construction, generics, and calls.
 
-import std.files
+import std.time
 from std.text import join, split
 
 struct Point:
@@ -28,8 +28,8 @@ function words(text as Text) returns Text:
     let parts = split(text, " ")
     return join(parts.map(function (part): part.to_upper()), "-")
 
-function exists(name as Text) returns Bool:
-    return files.exists(Path(name))
+function timeout(seconds as Int) returns Int:
+    return time.seconds(seconds).total_milliseconds()
 
 test "everything fits together":
     assert distance(ORIGIN, Point(x = 3, y = 4)) == 25

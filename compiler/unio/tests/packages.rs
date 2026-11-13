@@ -856,21 +856,29 @@ fn the_review_of_t9_is_shown_and_grants_nothing() {
     assert_eq!(p.read("app/unio.toml"), manifest);
     assert!(!p.path("app/unio.lock").exists());
     assert_eq!(p.cache_entries(), 0);
-    // Confirmed: installed, and still nothing granted. The program runs with the permissions
-    // of the root package, which has none, so the dependency does not see the file.
+    // Confirmed: installed, and still nothing granted. The compiler checks the call
+    // statically: the effect of the dependency needs files.read of the root package, which
+    // has no `[permissions]` table and so permits nothing (E0085, SB-7), as with a table
+    // without files.read.
     let out = p.unio(&["add", "util", "--path", "../util", "--unsafe-ok"]);
     ok(&out);
     assert!(all(&out).contains("nothing is granted"), "{}", all(&out));
+    let installed = p.read("app/unio.toml");
+    refused(&p.unio(&["check", "main.unio"]), "E0085");
+    p.write(
+        "app/unio.toml",
+        &(installed.clone() + "\n[permissions]\nenv = []\n"),
+    );
+    refused(&p.unio(&["check", "main.unio"]), "E0085");
+    // The program runs with the permissions of the root package, which reach only `public/`,
+    // so the dependency does not see the file.
+    p.write(
+        "app/unio.toml",
+        &(installed + "\n[permissions]\nfiles.read = [\"$CWD/public/**\"]\n"),
+    );
     let run = p.unio(&["run", "main.unio"]);
     ok(&run);
     assert_eq!(text(&run.stdout), "HELLO!\n");
-    // With a [permissions] table the compiler checks the call statically: the effect of the
-    // dependency needs files.read of the root package (E0085).
-    p.write(
-        "app/unio.toml",
-        &(p.read("app/unio.toml") + "\n[permissions]\nenv = []\n"),
-    );
-    refused(&p.unio(&["check", "main.unio"]), "E0085");
     // An external function in the marked module of a package is still E0086 (RFC 0004).
     p.write(
         "util/raw.unio",

@@ -1,0 +1,6 @@
+# Hidden behavioural check of unsafe_module_not_listed: test blocks that the reference fix passes.
+
+test "chunks cover the length":
+    assert buffers.chunk_count(0, 4) == 0
+    assert buffers.chunk_count(10, 4) == 3
+    assert buffers.chunk_count(8, 4) == 2

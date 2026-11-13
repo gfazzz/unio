@@ -61,7 +61,7 @@ pub const CODES: &[&str] = &[
     "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
     "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074", "E0075", "E0076",
     "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085", "E0045",
-    "E0046", "E0047", "E0048", "E0086", "E0087", "E0088",
+    "E0046", "E0047", "E0048", "E0086", "E0087", "E0088", "E0089",
 ];
 
 /// Codes of the name and type checks (sprint S3); their examples need the whole check.
@@ -70,7 +70,7 @@ pub const SEMANTIC_CODES: &[&str] = &[
     "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
     "E0066", "E0067", "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074",
     "E0075", "E0076", "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084",
-    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087", "E0088",
+    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087", "E0088", "E0089",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -559,6 +559,10 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
             effect_not_permitted("files.read", ("main -> read_text", "main -> read_text")),
         ),
         (
+            "E0085",
+            effect_without_manifest("files.read", ("main -> read_text", "main -> read_text")),
+        ),
+        (
             "E0087",
             unproven_value_call(
                 "call",
@@ -622,6 +626,8 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
         ("E0086", external_outside_stdlib("poke", false)),
         ("E0086", external_outside_stdlib("poke", true)),
     ];
+    samples.push(("E0089", unsafe_module_not_listed("storage.raw_buffers")));
+    samples.push(("E0089", unsafe_module_not_marked("storage.raw_buffers")));
     for mistake in sample_manifest_mistakes() {
         samples.push(("E0088", manifest_mistake(&mistake)));
     }
@@ -1021,8 +1027,8 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "function label(count as Int) returns Int:\n    return count + 1\n",
         ),
         "E0085" => (
-            "The package uses a function whose effect its manifest does not permit (T-6, concept section 6). Add the permission to `unio.toml`, or remove the call shown in the chain.",
-            "Пакет использует функцию, эффект которой не разрешён его манифестом (И-6, раздел 6 концепции). Добавьте полномочие в `unio.toml` или уберите вызов из цепочки.",
+            "The package uses a function whose effect its manifest does not permit (T-6, concept section 6). A package without `unio.toml`, or whose `unio.toml` has no `[permissions]` table, permits no such effect (SB-2). Add the permission to `unio.toml`, or remove the call shown in the chain.",
+            "Пакет использует функцию, эффект которой не разрешён его манифестом (И-6, раздел 6 концепции). Пакет без `unio.toml` или с `unio.toml` без таблицы `[permissions]` не разрешает ни одного такого эффекта (Б-2). Добавьте полномочие в `unio.toml` или уберите вызов из цепочки.",
             "import std.files\n\nfunction size(path as Path) returns Int fails with IoError:\n    return (try files.read_text(path)).length()\n",
             "function size(text as Text) returns Int:\n    return text.length()\n",
         ),
@@ -1067,6 +1073,12 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "Манифест `unio.toml` пакета проверяется целиком (И-6), командой `unio check` так же, как `unio run` и `unio test`. В `[package]` есть `name` (строчные буквы, цифры, `-` и `_`, начиная с буквы), `version` (семантическая версия) и `unsafe_modules` (список имён модулей). В `[permissions]` `files.read` и `files.write` — списки путей, которые могут начинаться с `$HOME`, `$CWD` или `$TEMP` и заканчиваться на `/**` для поддерева; `env` — список имён переменных; `process` — список программ; `network` в 0.1 равно `false`. Каждая запись `[dependencies]` — таблица ровно с одним источником: `path`, `registry` с `package` или `archive` с `sha384`. Ошибка указана в строке ошибки; исправьте значение там.",
             "[package]\nname = \"report\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = true\n",
             "[package]\nname = \"report\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = [\"$CWD/**\"]\n",
+        ),
+        "E0089" => (
+            "The manifest lists in `package.unsafe_modules` exactly the modules of the package that carry the `unsafe module` marker (T-6, RFC 0004), so that a review sees every one of them before the package is installed (T-9). In a package the marker grants nothing: no external function and no permission. The error is at the line of `unsafe_modules`, or of `[package]` when the key is missing: add the marked module to the list, remove a name that no marked module has, or add or remove the marker.",
+            "Манифест перечисляет в `package.unsafe_modules` ровно те модули пакета, которые помечены `unsafe module` (И-6, RFC 0004), чтобы проверка увидела каждый из них до установки пакета (И-9). В пакете пометка ничего не даёт: ни внешних функций, ни полномочий. Ошибка указана в строке `unsafe_modules` или `[package]`, если ключа нет: добавьте помеченный модуль в список, уберите имя, которого нет у помеченных модулей, или добавьте либо уберите пометку.",
+            "unsafe module\n\nlet A as Int = 1\n",
+            "let A as Int = 1\n",
         ),
         _ => return None,
     })
@@ -1620,6 +1632,32 @@ pub fn effect_not_permitted(effect: &str, chain: (&str, &str)) -> Msg {
     Msg::new(
         format!("the effect '{effect}' is not permitted by unio.toml, but {en} needs it; add the permission or remove the call"),
         format!("эффект '{effect}' не разрешён в unio.toml, но он нужен {ru}; добавьте полномочие или уберите вызов"),
+    )
+}
+
+/// E0085 in a package without `unio.toml`, which permits no effect (SB-2).
+pub fn effect_without_manifest(effect: &str, chain: (&str, &str)) -> Msg {
+    let (en, ru) = chain;
+    Msg::new(
+        format!("the effect '{effect}' is not permitted: the package has no unio.toml, but {en} needs it; add unio.toml with the permission or remove the call"),
+        format!("эффект '{effect}' не разрешён: у пакета нет unio.toml, но он нужен {ru}; добавьте unio.toml с полномочием или уберите вызов"),
+    )
+}
+
+/// E0089: a module of the package carries `unsafe module` but `package.unsafe_modules` of the
+/// manifest does not list it (T-6, RFC 0004).
+pub fn unsafe_module_not_listed(module: &str) -> Msg {
+    Msg::new(
+        format!("the module '{module}' carries 'unsafe module', but package.unsafe_modules does not list it; add it to the list or remove the marker"),
+        format!("модуль '{module}' помечен 'unsafe module', но его нет в package.unsafe_modules; добавьте его в список или уберите пометку"),
+    )
+}
+
+/// E0089: `package.unsafe_modules` lists a module that does not carry `unsafe module`.
+pub fn unsafe_module_not_marked(module: &str) -> Msg {
+    Msg::new(
+        format!("package.unsafe_modules lists '{module}', which is no module of the package marked 'unsafe module'; remove it from the list or mark the module"),
+        format!("package.unsafe_modules называет '{module}', но это не модуль пакета с пометкой 'unsafe module'; уберите его из списка или пометьте модуль"),
     )
 }
 

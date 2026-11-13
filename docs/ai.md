@@ -42,7 +42,7 @@ An array of diagnostics, empty when the files are clean; the exit code is 0 when
 | `fixes` | replacements, present when the fix is unambiguous: replace `range` of `file` by `new_text`; `description` says what it does |
 | `related` | other places and symbols; always empty in 0.1 |
 
-The format is versioned with the compiler; a published JSON Schema does not exist yet ([status.md](status.md), row C-8).
+The format is versioned with the compiler, and its JSON Schema is published as [compiler/diagnostics.schema.json](../compiler/diagnostics.schema.json) (`urn:unio:diagnostics:1`); `tests/diagnostics.rs` checks the output against it (C-8).
 
 ### 2.2 Tests: `unio test --json FILE...`
 
@@ -68,10 +68,16 @@ What a file declares, without bodies: an array of declarations, each with `kind`
 
 ### 2.4 Symbols: `unio symbol --json MODULE.NAME`
 
-One declaration with what it means for a caller (C-11): `name`, `kind`, `signature`, `documentation` (its `##` comment), `declared` (file, line and column), `usages` in the program, and for a function `errors` (its `fails with`), `effects` derived from its calls (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`), `argument_effects` (parameters whose effects are the caller's), `layer` (the lowest library layer it needs), `calls`, and `hash`, a content hash of the declaration and what it depends on. Names of the standard library start with `std.`; names of the program are relative to its package, run from its directory.
+One declaration with what it means for a caller (C-11): `name`, `kind`, `signature`, `documentation` (its `##` comment), `declared` (file, line and column), `usages` in the program, and for a function `errors` (its `fails with`), `effects` derived from its calls (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`), `argument_effects` (parameters whose effects are the caller's), `layer` (the lowest library layer it needs), `calls`, `hash`, a content hash of the declaration and what it depends on, `default_of` and `implementations`. A method declared in an interface shows only its own signature. For a type, `implementations` lists the interfaces it implements in `extend ... with` blocks (L-6c), each with `interface`, `declared` (the `extend` block), and `methods`: for every method of the interface, the `function` the type uses, where it is `declared`, and `default`, true when the type uses the default of the interface instead of replacing it. A method that a type gets from a default is found through the type: `unio symbol m.Square.name` reports the default under that name, `declared` at the interface, with `default_of` naming it (`m.Shape.name`); `default_of` is empty for every other declaration, and `implementations` is empty for everything but a type. Names of the standard library start with `std.`; names of the program are relative to its package, run from its directory.
 
 ```json
-[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.","declared":"stdlib/std/files.unio:212:17","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"hash":"unio-hash-v1:sha384:..."}]
+[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.","declared":"stdlib/std/files.unio:212:17","default_of":"","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"implementations":[],"hash":"unio-hash-v1:sha384:..."}]
+```
+
+A type `Square` that implements an interface `Shape`, replacing `area` and using the default `name`; the text form shows the same as `implements: m.Shape` with one line per method:
+
+```json
+[{"name":"m.Square","kind":"type","signature":"public struct Square:","documentation":"","declared":"m.unio:9:15","default_of":"","usages":["m.unio:13:14","m.unio:26:17"],"errors":[],"effects":[],"argument_effects":[],"layer":"core","calls":[],"implementations":[{"interface":"m.Shape","declared":"m.unio:12:1","methods":[{"name":"area","function":"m.Square.area","declared":"m.unio:13:14","default":false},{"name":"name","function":"m.Shape.name","declared":"m.unio:5:14","default":true}]}],"hash":"unio-hash-v1:sha384:..."}]
 ```
 
 ### 2.5 Explanations: `unio explain CODE`
@@ -112,7 +118,7 @@ Prompts to avoid ask the agent to "make the errors go away": an agent can always
 
 ## 5. Limits in 0.1
 
-- `related` in the diagnostics is always empty, and there is no published JSON Schema (C-8).
+- `related` in the diagnostics is always empty (C-8).
 - Warnings (`W`) and style hints (`H`) are defined by C-6 but none exists: every diagnostic is an error.
 - `unio test --json` has no replay data for property tests yet (T-12), and the REPL of T-13 does not exist.
 - The language server `unio lsp` gives the same diagnostics to an editor as LSP messages ([editors/README.md](../editors/README.md)).
