@@ -3,12 +3,12 @@
 //! resource identities, and a fault-injection hook for tests (requirement S-9b).
 
 use crate::fault::{Exhaustion, Fault, FaultKind, Frame, Site, Unwind};
+use crate::layers::HookWriter;
 use crate::reserve::Reserve;
 use crate::value::{ResourceCell, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Write;
 use std::rc::Rc;
 
 /// A system call of the atomic commit protocol that a test can make fail (S-9b).
@@ -36,23 +36,24 @@ impl Sink {
     fn write(&mut self, bytes: &[u8]) {
         // Writing to standard output cannot fail in Unio (write_output has no fails with);
         // a closed pipe loses the text, as in other command-line programs.
-        let _ = match self {
-            Sink::Stdout => std::io::stdout().write_all(bytes),
-            Sink::Stderr => std::io::stderr().write_all(bytes),
+        // Standard output and error belong to the std layer: the core runtime writes them
+        // through the hooks of the profile (S-12).
+        match self {
+            Sink::Stdout => (crate::layers::hooks().write_output)(bytes),
+            Sink::Stderr => (crate::layers::hooks().write_error)(bytes),
             // The captured output belongs to the harness, not to the program: it is not
             // counted in the heap and never taken from the reserve for `release`.
             Sink::Buffer(buffer) => {
                 crate::reserve::outside(|| buffer.borrow_mut().extend_from_slice(bytes));
-                Ok(())
             }
-        };
+        }
     }
 
     /// Writes a fault line by line, without building its text (C-17).
     fn write_fault(&mut self, fault: &Fault) {
         let _ = match self {
-            Sink::Stdout => fault.write_to(&mut std::io::stdout().lock()),
-            Sink::Stderr => fault.write_to(&mut std::io::stderr().lock()),
+            Sink::Stdout => fault.write_to(&mut HookWriter(crate::layers::hooks().write_output)),
+            Sink::Stderr => fault.write_to(&mut HookWriter(crate::layers::hooks().write_error)),
             Sink::Buffer(buffer) => {
                 crate::reserve::outside(|| fault.write_to(&mut *buffer.borrow_mut()))
             }

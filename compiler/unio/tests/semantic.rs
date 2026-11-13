@@ -286,3 +286,94 @@ fn a_stdlib_directory_in_a_package_does_not_replace_the_standard_library() {
         "std.evil must not be found: {codes:?}"
     );
 }
+
+/// L-31: an implementation belongs to the package of the type or of the interface, so any
+/// module of that package may hold it (docs/semantics.md 3.6); a second implementation in
+/// another module of the package is still E0044, and so is one of a type and an interface
+/// that the package does not own, here `Add` for `Bool`, both of the standard library.
+#[test]
+fn an_implementation_may_be_in_any_module_of_the_package_of_the_type_or_interface() {
+    let dir = std::env::temp_dir().join(format!("unio-semantic-l31-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("shapes")).unwrap();
+    std::fs::create_dir_all(dir.join("views")).unwrap();
+    std::fs::write(
+        dir.join("unio.toml"),
+        "[package]\nname = \"geometry\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shapes/point.unio"),
+        "public struct Point:\n    public x as Int\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("views/named.unio"),
+        "public interface Named:\n    function name(self) returns Text\n",
+    )
+    .unwrap();
+    // The type and the interface are declared in two other modules of the package.
+    std::fs::write(
+        dir.join("views/point_view.unio"),
+        "from shapes.point import Point\nfrom views.named import Named\n\nextend Point with Named:\n    function name(self) returns Text:\n        return \"point {self.x}\"\n\nextend Point with Display:\n    function to_text(self) returns Text:\n        return \"({self.x})\"\n",
+    )
+    .unwrap();
+    let main = dir.join("main.unio");
+    std::fs::write(
+        &main,
+        "from shapes.point import Point\nfrom views.named import Named\nimport views.point_view\n\nfunction describe(n as Named) returns Text:\n    return n.name()\n\npublic function main() returns Int:\n    let p = Point(x = 1)\n    print(describe(p))\n    print(\"{p}\")\n    return 0\n",
+    )
+    .unwrap();
+    let results = unio::check_files(std::slice::from_ref(&main));
+    let found: Vec<(String, &str, usize)> = results
+        .iter()
+        .flat_map(|a| {
+            a.diagnostics
+                .iter()
+                .map(|d| (a.path.clone(), d.code, d.line()))
+        })
+        .collect();
+    assert!(found.is_empty(), "{found:?}");
+
+    // A second implementation in a third module of the same package is still refused.
+    std::fs::write(
+        dir.join("again.unio"),
+        "from shapes.point import Point\nfrom views.named import Named\nimport views.point_view\n\nextend Point with Named:\n    function name(self) returns Text:\n        return \"again\"\n",
+    )
+    .unwrap();
+    // An implementation of a library interface for a library type is outside the package.
+    std::fs::write(
+        dir.join("foreign.unio"),
+        "from views.named import Named\n\nextend Int with Named:\n    function name(self) returns Text:\n        return \"int\"\n\nextend Bool with Add:\n    function add(self, other as Bool) returns Bool:\n        return self or other\n",
+    )
+    .unwrap();
+    let files = [
+        dir.join("again.unio"),
+        dir.join("views/point_view.unio"),
+        dir.join("foreign.unio"),
+    ];
+    let results = unio::check_files(&files);
+    let _ = std::fs::remove_dir_all(&dir);
+    let codes = |name: &str| -> Vec<(&str, usize)> {
+        results
+            .iter()
+            .filter(|a| a.path.ends_with(name))
+            .flat_map(|a| a.diagnostics.iter().map(|d| (d.code, d.line())))
+            .collect()
+    };
+    // One of the two implementations of `Named` for `Point` is the second, whichever is loaded
+    // first.
+    let mut second = codes("again.unio");
+    second.extend(codes("point_view.unio"));
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert_eq!(second[0].0, "E0044", "{second:?}");
+    // `Named` is the package's own, so `Int` may implement it; `Add` for `Bool` is not.
+    let foreign = codes("foreign.unio");
+    assert_eq!(foreign, [("E0044", 7)], "{foreign:?}");
+    let rendered = results
+        .iter()
+        .find(|a| a.path.ends_with("foreign.unio"))
+        .unwrap()
+        .render_text(unio::Lang::En);
+    assert!(rendered.contains("only in the package"), "{rendered}");
+}

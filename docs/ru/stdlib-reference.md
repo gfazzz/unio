@@ -4,7 +4,7 @@
 
 Комментарии документации в исходных текстах библиотеки пишутся на английском языке, поэтому здесь они приведены без перевода; переведены заголовки и пояснения. Каждое публичное объявление библиотеки показано с сигнатурой и комментарием документации в порядке исходного файла: сначала прелюдии слоёв `core`, `alloc` и `std`, затем модули по имени. Закрытые объявления опущены; методы блока `extend` показаны, если они публичны или реализуют интерфейс. Про структуру с закрытыми полями это сказано: её создают только функции её модуля.
 
-Файлов: 30; публичных объявлений и методов: 421, из них без комментария документации: 43.
+Файлов: 30; публичных объявлений и методов: 432, из них без комментария документации: 43.
 
 ## Содержание
 
@@ -761,6 +761,21 @@ Example:
 assert Bytes().length() == 0
 ```
 
+### `bytes_of`
+
+```unio
+public external function bytes_of(values as List[Int]) returns Option[Bytes]
+```
+
+The bytes with these values, in order; none if a value is outside 0..255.
+Example:
+
+```unio
+let data = bytes_of([104, 105]) or Bytes()
+assert data.to_text() == some("hi")
+assert bytes_of([256]) == none
+```
+
 ### Методы `Bytes`
 
 ```unio
@@ -791,6 +806,35 @@ Example:
 
 ```unio
 assert Bytes().to_text() == some("")
+```
+
+#### `slice`
+
+```unio
+public external function slice(self, start as Int, end as Int) returns Bytes
+```
+
+The bytes from start up to, but not including, end; a fault if a bound is outside
+0..length() or start is after end. The result is a copy of end - start bytes.
+Example:
+
+```unio
+let data = bytes_of([1, 2, 3]) or Bytes()
+assert data.slice(1, 3).length() == 2
+```
+
+#### `checked_slice`
+
+```unio
+public function checked_slice(self, start as Int, end as Int) returns Option[Bytes]
+```
+
+The bytes from start up to end, or none unless 0 \<= start \<= end \<= length(): the safe
+form of slice.
+Example:
+
+```unio
+assert Bytes().checked_slice(0, 1) == none
 ```
 
 #### `is_empty`
@@ -3584,6 +3628,37 @@ on IoError as e:
     assert e.kind != IoErrorKind.AlreadyExists
 ```
 
+#### `read_text`
+
+```unio
+public function read_text(
+    var self,
+    named max_bytes as Int = 65536,
+) returns Option[Text] fails with IoError
+```
+
+some(nonempty text) of the next characters of the file, or permanent none at the end
+(S-16, S-18). Each read of the system takes at most max_bytes bytes, and the text is at
+most max_bytes + 3 bytes of UTF-8: a character whose bytes are split between reads is kept
+until the read that completes it, however the file is cut. Bytes that are not UTF-8 fail
+with kind InvalidData and their byte offset in reason, after the text before them has been
+returned; a file that ends inside a character fails the same way at the end. Errors are
+permanent, as for read_bytes. Memory is O(max_bytes), independent of the file size.
+read_bytes after a read_text that kept part of a character fails with InvalidData.
+Example:
+
+```unio
+try:
+    using reader = try open_reader(Path("no-such-directory/notes.txt")):
+        var characters = 0
+        while true:
+            match try reader.read_text(max_bytes = 65536):
+                case some(part): characters = characters + part.length()
+                case none: break
+on IoError as e:
+    assert e.kind != IoErrorKind.AlreadyExists
+```
+
 ### `resolve`
 
 ```unio
@@ -5351,6 +5426,10 @@ Operations on texts as a whole (requirements S-1, S-18): joining and splitting, 
 code points, explicit Unicode normalization and grapheme clusters. Methods of a single text,
 such as length, slice and replace, are in builtin/text.unio.
 
+Utf8Decoder turns a stream of byte chunks into text (S-16, S-18): a character whose bytes are
+split across chunks is kept until it is complete, and invalid UTF-8 is reported with its byte
+offset, never replaced.
+
 Text never normalizes by itself: equality compares the exact scalars, so "\u{E9}" and
 "e\u{301}" differ until both are normalized with the same form. Normalization and grapheme
 clusters use the Unicode Character Database of unicode_version(), pinned in the runtime; a newer
@@ -5472,6 +5551,119 @@ Example:
 
 ```unio
 assert unicode_version() == "15.0.0"
+```
+
+### `Utf8Problem`
+
+```unio
+public enum Utf8Problem:
+    ## A byte that cannot start or continue a character here: a stray continuation byte, an
+    ## overlong form, a surrogate, a value above U+10FFFF, or a sequence cut short by another start.
+    Invalid
+    ## The stream ends inside the bytes of one character.
+    Truncated
+```
+
+Why a stream of bytes is not UTF-8.
+
+### `Utf8Error`
+
+```unio
+public error Utf8Error:
+    offset as Int
+    problem as Utf8Problem
+```
+
+The stream is not UTF-8. offset counts bytes from the start of the stream to the first byte
+of the sequence that is not valid.
+
+### `Utf8Decoder`
+
+```unio
+public struct Utf8Decoder
+```
+
+A decoder of UTF-8 that receives the stream in chunks of any size, split anywhere. It keeps
+at most 3 bytes between chunks (the start of a character the next chunk completes), so its
+memory does not depend on the length of the stream. Make one with utf8_decoder().
+
+У структуры есть закрытые поля: её создают только функции её модуля.
+
+### `utf8_decoder`
+
+```unio
+public function utf8_decoder() returns Utf8Decoder
+```
+
+A decoder at the start of a stream.
+Example:
+
+```unio
+var decoder = utf8_decoder()
+let text = try decoder.decode(bytes_of([0x68, 0xC3]) or Bytes()) on Utf8Error as e:
+    assert_fail("offset {e.offset}")
+assert text == "h" and decoder.pending_bytes() == 1
+```
+
+### Методы `Utf8Decoder`
+
+```unio
+extend Utf8Decoder
+```
+
+#### `decode`
+
+```unio
+public function decode(var self, chunk as Bytes) returns Text fails with Utf8Error
+```
+
+The text of the characters that this chunk completes, in order. The bytes of a character
+that the chunk starts but does not end are kept for the next call. The text before an
+invalid sequence is returned first, and the error is reported by the next call, as the
+bytes of a FileReader are returned before its error; once reported, every further call
+fails with the same error. The text is at most chunk.length() + 3 bytes of UTF-8.
+Example:
+
+```unio
+var decoder = utf8_decoder()
+let first = try decoder.decode(bytes_of([0xE2, 0x82]) or Bytes()) on Utf8Error as e:
+    assert_fail("offset {e.offset}")
+let second = try decoder.decode(bytes_of([0xAC]) or Bytes()) on Utf8Error as e:
+    assert_fail("offset {e.offset}")
+assert first == "" and second == "\u{20AC}"
+```
+
+#### `finish`
+
+```unio
+public function finish(var self) fails with Utf8Error
+```
+
+Ends the stream: fails with Truncated if it ended inside a character, or with the error
+that decode found and has not reported yet.
+Example:
+
+```unio
+var decoder = utf8_decoder()
+try:
+    let text = try decoder.decode(bytes_of([0xF0, 0x9F]) or Bytes())
+    try decoder.finish()
+    assert_fail("finished inside a character")
+on Utf8Error as e:
+    assert e.problem == Utf8Problem.Truncated and e.offset == 0
+```
+
+#### `pending_bytes`
+
+```unio
+public function pending_bytes(self) returns Int
+```
+
+How many bytes of an incomplete character the decoder holds: 0 to 3.
+Example:
+
+```unio
+assert utf8_decoder().pending_bytes() == 0
 ```
 
 ## `std.time`

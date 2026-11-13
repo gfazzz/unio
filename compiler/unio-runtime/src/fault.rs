@@ -3,7 +3,6 @@
 
 use crate::value::Value;
 use std::fmt;
-use std::io::Write;
 
 /// Exit code of a fault (C-15, C-17).
 pub const EXIT_FAULT: i32 = 101;
@@ -71,10 +70,12 @@ impl Exhaustion {
     }
 }
 
-/// Ends the process after exhaustion: writes the prepared message and exits with code 102.
+/// Ends the process after exhaustion: writes the prepared message and exits with code 102,
+/// through the hooks of the profile (S-12).
 pub fn emergency_exit(what: Exhaustion) -> ! {
-    let _ = std::io::stderr().write_all(what.message().as_bytes());
-    std::process::exit(EXIT_EXHAUSTED)
+    let hooks = crate::layers::hooks();
+    (hooks.write_error)(what.message().as_bytes());
+    (hooks.exit)(EXIT_EXHAUSTED)
 }
 
 /// The kinds of faults (L-17).
@@ -141,7 +142,7 @@ impl Fault {
     /// memory even on a full heap; callers pass the message unformatted (`format_args!`), so
     /// that nothing is allocated before.
     pub fn new(kind: FaultKind, message: impl fmt::Display) -> Fault {
-        crate::reserve::open();
+        (crate::layers::hooks().open_reserve)();
         Fault {
             kind,
             message: message.to_string(),

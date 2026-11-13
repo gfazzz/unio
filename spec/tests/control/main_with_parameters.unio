@@ -1,0 +1,9 @@
+# expect-error: 7 E0090
+# category: types
+function greeting(names as List[Text]) returns Text:
+    if names.is_empty(): return "hello, world"
+    return "hello, {names[0]}"
+
+public function main(arguments as List[Text]) returns Int:
+    print(greeting(arguments))
+    return 0

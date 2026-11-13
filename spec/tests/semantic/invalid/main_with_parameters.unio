@@ -1,0 +1,3 @@
+# expect-error: 2 E0090
+public function main(arguments as List[Text]):
+    print(arguments.length())

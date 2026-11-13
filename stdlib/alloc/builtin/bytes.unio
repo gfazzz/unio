@@ -6,6 +6,13 @@ unsafe module
 ##     assert Bytes().length() == 0
 public external function Bytes() returns Bytes
 
+## The bytes with these values, in order; none if a value is outside 0..255.
+## Example:
+##     let data = bytes_of([104, 105]) or Bytes()
+##     assert data.to_text() == some("hi")
+##     assert bytes_of([256]) == none
+public external function bytes_of(values as List[Int]) returns Option[Bytes]
+
 extend Bytes:
     ## The number of bytes.
     ## Example:
@@ -16,6 +23,21 @@ extend Bytes:
     ## Example:
     ##     assert Bytes().to_text() == some("")
     public external function to_text(self) returns Option[Text]
+
+    ## The bytes from start up to, but not including, end; a fault if a bound is outside
+    ## 0..length() or start is after end. The result is a copy of end - start bytes.
+    ## Example:
+    ##     let data = bytes_of([1, 2, 3]) or Bytes()
+    ##     assert data.slice(1, 3).length() == 2
+    public external function slice(self, start as Int, end as Int) returns Bytes
+
+    ## The bytes from start up to end, or none unless 0 <= start <= end <= length(): the safe
+    ## form of slice.
+    ## Example:
+    ##     assert Bytes().checked_slice(0, 1) == none
+    public function checked_slice(self, start as Int, end as Int) returns Option[Bytes]:
+        if start < 0 or end > self.length() or start > end: return none
+        return some(self.slice(start, end))
 
     ## Whether there are no bytes.
     ## Example:

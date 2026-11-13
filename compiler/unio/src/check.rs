@@ -202,6 +202,40 @@ pub fn check_program(program: &mut Program) {
     tests(program, &known, &const_types);
     conversions(program);
     externals(program);
+    entry_points(program);
+}
+
+/// Runtime 6.1, C-15: a program starts at `main()` of the module given to the command, with no
+/// parameter and an `Int` result or none. Any other signature of `main` in a given module is
+/// E0090, so that it is refused before it runs instead of faulting at its start; arguments are
+/// read with `std.args.list()` and errors are handled inside `main`.
+fn entry_points(program: &mut Program) {
+    let mut found = Vec::new();
+    for f in &program.funcs {
+        let module = &program.modules[f.module];
+        if !module.given || module.stdlib || f.name != "main" || !matches!(f.owner, Owner::Module) {
+            continue;
+        }
+        let result = matches!(f.ret, Ty::Unit | Ty::Unknown | Ty::Prim(Prim::Int));
+        let mistake = if !f.generics.is_empty() {
+            Some(catalog::MainMistake::TypeParameters)
+        } else if !f.params.is_empty() {
+            Some(catalog::MainMistake::Parameters)
+        } else if !result {
+            Some(catalog::MainMistake::Result)
+        } else if !f.fails.is_empty() {
+            Some(catalog::MainMistake::Fails)
+        } else {
+            None
+        };
+        if let Some(mistake) = mistake {
+            let message = catalog::main_signature(mistake);
+            found.push((f.module, Diagnostic::error("E0090", f.span, message)));
+        }
+    }
+    for (m, diagnostic) in found {
+        program.error(m, diagnostic);
+    }
 }
 
 /// The test blocks of every module. Each is checked; only the tests that run are part of the

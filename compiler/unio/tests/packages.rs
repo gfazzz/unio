@@ -1674,3 +1674,50 @@ fn a_registry_that_removes_a_locked_version_is_refused() {
         "no longer lists the locked version 1.0.0",
     );
 }
+
+/// L-31 across packages: an implementation belongs to the package of the type or of the
+/// interface. A path dependency may implement its own interface for its own type in another of
+/// its modules, and the root package may implement an interface of a dependency for a type of
+/// its own; an implementation of the interface of one path dependency for the type of another,
+/// written in the root package, owns neither and is E0044 (docs/semantics.md 3.6).
+#[test]
+fn an_implementation_belongs_to_the_package_of_the_type_or_the_interface() {
+    let p = Project::new("ownership");
+    p.write(
+        "shapes/unio.toml",
+        "[package]\nname = \"shapes\"\nversion = \"1.0.0\"\n",
+    );
+    p.write(
+        "shapes/point.unio",
+        "public struct Point:\n    public x as Int\n",
+    );
+    p.write(
+        "shapes/show.unio",
+        "from point import Point\n\nextend Point with Display:\n    function to_text(self) returns Text:\n        return \"point {self.x}\"\n",
+    );
+    p.write(
+        "views/unio.toml",
+        "[package]\nname = \"views\"\nversion = \"1.0.0\"\n",
+    );
+    p.write(
+        "views/named.unio",
+        "public interface Named:\n    function name(self) returns Text\n",
+    );
+    p.write(
+        "app/main.unio",
+        "from deps.shapes.point import Point\nimport deps.shapes.show\nfrom deps.views.named import Named\n\nstruct Label:\n    text as Text\n\nextend Label with Named:\n    function name(self) returns Text:\n        return self.text\n\nfunction describe(n as Named) returns Text:\n    return n.name()\n\npublic function main() returns Int:\n    print(\"{Point(x = 2)}\")\n    print(describe(Label(text = \"label\")))\n    return 0\n",
+    );
+    ok(&p.unio(&["add", "shapes", "--path", "../shapes"]));
+    ok(&p.unio(&["add", "views", "--path", "../views"]));
+    let run = p.unio(&["run", "main.unio"]);
+    ok(&run);
+    assert_eq!(text(&run.stdout), "point 2\nlabel\n");
+    p.write(
+        "app/bridge.unio",
+        "from deps.shapes.point import Point\nfrom deps.views.named import Named\n\nextend Point with Named:\n    function name(self) returns Text:\n        return \"point\"\n",
+    );
+    let out = p.unio(&["check", "bridge.unio"]);
+    refused(&out, "E0044");
+    assert!(all(&out).contains("bridge.unio:4"), "{}", all(&out));
+    assert!(all(&out).contains("only in the package"), "{}", all(&out));
+}

@@ -43,12 +43,13 @@ fn expect_fault(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     };
     // The fault opens the reserve for `release` (C-17); once it is received here, the test goes
     // on with the budget it had, unless the reserve was already open for an outer fault.
-    let was_open = crate::reserve::is_open();
+    let hooks = crate::layers::hooks();
+    let was_open = (hooks.reserve_is_open)();
     match action.call(runtime, &mut []) {
         Err(Unwind::Fault(fault)) => {
             drop(fault);
             if !was_open {
-                crate::reserve::close();
+                (hooks.close_reserve)();
             }
             Ok(Value::Unit)
         }
