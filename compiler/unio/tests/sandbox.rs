@@ -1013,7 +1013,10 @@ fn a_program_with_a_process_limit_is_refused_under_root_on_macos() {
 /// set-group-ID file, since it could make the child root, whom `RLIMIT_NPROC` does not bind.
 /// A copy of `/usr/bin/true` with the bit set is listed: calling it is refused with
 /// `PermissionDenied` before the child starts, and so is calling a listed `sh`, which could
-/// execute the copy; without a limit both run. Runs only on macOS (CI).
+/// execute the copy. Without a limit `sh` runs, and the copy is still refused, by Seatbelt
+/// itself: every profile forbids executing a set-ID file (`forbidden-exec-sugid`, seen on the
+/// macos-26 runner), so the call fails with `PermissionDenied` from the kernel. Runs only on
+/// macOS (CI).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_set_id_file_is_not_executed_under_a_process_limit_on_macos() {
@@ -1054,8 +1057,8 @@ public function main():
         let err = text(&free.stderr);
         assert_eq!(free.status.code(), Some(0), "{out}{err}");
         assert!(
-            out.contains(&format!("{tool_text} status 0")) && out.contains("sh status 0"),
-            "without a limit both run:\n{out}{err}"
+            out.contains(&format!("{tool_text} stopped true")) && out.contains("sh status 0"),
+            "without a limit sh runs and Seatbelt refuses the set-ID file:\n{out}{err}"
         );
         let out = text(&limited.stdout);
         let err = text(&limited.stderr);

@@ -186,9 +186,6 @@ jobs:
       # The prerequisites of the tests under UNIO_REQUIRE_PREREQUISITES=1: python3 for the
       # tests of leaving the process group, and the C compiler that the pin selected above
       # (CC on Linux, the pinned Xcode on macOS, MSVC on Windows) for the C helpers and the link.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
       - name: Prerequisites of the tests (python3, a C compiler)
         shell: bash
         run: |
@@ -246,6 +243,10 @@ jobs:
       # tests of leaving the process group, and the C compiler that the pin selected above
       # (CC on Linux, the pinned Xcode on macOS, MSVC on Windows) for the C helpers and the link.
       - uses: actions/setup-python@v5
+        # Only on Windows, which has no python3 of the system. Elsewhere the tests use the
+        # system's python3: the sandbox grants reads of the system directories, not of the
+        # runner's tool cache, so a python3 from setup-python cannot load its library there.
+        if: runner.os == 'Windows'
         with:
           python-version: "3.13"
       - name: Prerequisites of the tests (python3, a C compiler)
