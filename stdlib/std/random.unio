@@ -125,7 +125,10 @@ public external function secure_int(low as Int, high as Int) returns Int fails w
 ##     let empty = try checked_secure_int(5, 5) on RandomError as e:
 ##         assert_fail(e.reason)
 ##     assert empty == none
-public function checked_secure_int(low as Int, high as Int) returns Option[Int] fails with RandomError:
+public function checked_secure_int(
+    low as Int,
+    high as Int,
+) returns Option[Int] fails with RandomError:
     if low >= high: return none
     return some(try secure_int(low, high))
 

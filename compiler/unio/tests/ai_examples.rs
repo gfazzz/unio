@@ -117,6 +117,9 @@ fn the_json_examples_of_ai_md_are_the_output_of_their_commands() {
     };
     let mut dirs = canonical(&dir);
     dirs.extend(canonical(&root));
+    // The longest form first: on Windows the canonical `//?/D:/...` holds the plain `D:/...`,
+    // and replacing the plain one first would leave `//?/` in front of the path.
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.len()));
     let mut problems = Vec::new();
     let mut english = Vec::new();
     for doc in ["docs/ai.md", "docs/ru/ai.md"] {

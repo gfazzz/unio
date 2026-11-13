@@ -70,7 +70,9 @@ public function main() returns Int:
     print(
         "grammar rules: {rules.covered}/{rules.total} with a valid and an invalid corpus file or an exemption ({rules.exempt} exempt)",
     )
-    print("diagnostic codes: {codes.covered}/{codes.total} with a control program ({codes.exempt} exempt)")
+    print(
+        "diagnostic codes: {codes.covered}/{codes.total} with a control program ({codes.exempt} exempt)",
+    )
     if problems.is_empty():
         print("coverage is complete")
         return 0
@@ -93,7 +95,9 @@ function exemptions(source as Text) returns List[Exemption]:
     let pieces = split(source, "Corpus exemption: ")
     for piece in pieces.slice(1, pieces.length()):
         let words = piece.split_whitespace()
-        if words.length() >= 5 and words[1] == "has" and words[2] == "no" and words[4].starts_with("file"):
+        if words.length() >= 5 and words[1] == "has" and words[2] == "no" and words[4].starts_with(
+            "file",
+        ):
             found.append(Exemption(rule = words[0], kind = words[3]))
     return found
 
@@ -156,7 +160,9 @@ function is_code(word as Text) returns Bool:
 
 ## A reference fix or a hidden check of a control program.
 function is_helper(name as Text) returns Bool:
-    return name.ends_with(".fixed.unio") or name.ends_with(".check.unio") or name.contains(".fixed.")
+    return name.ends_with(".fixed.unio") or name.ends_with(".check.unio") or name.contains(
+        ".fixed.",
+    )
 
 ## The codes that the control programs below the directory expect.
 function control_codes(directory as Text) returns Set[Text] fails with SetupError:
@@ -176,8 +182,7 @@ function check_codes(var problems as List[Text]) returns Count fails with SetupE
     let catalog = quoted_block(try read(CATALOG), "pub const CODES: &[&str] = &[") or []
     let marker = "const EXCLUDED: &[(&str, &str)] = &["
     let excluded_block = quoted_block(try read(CONTROL_TEST), marker) or []
-    if catalog.is_empty():
-        fail SetupError(message = "{CATALOG}: the list CODES is missing")
+    if catalog.is_empty(): fail SetupError(message = "{CATALOG}: the list CODES is missing")
     let excluded = excluded_block.filter(is_code)
     let programs = try control_codes(CONTROL)
     var covered = 0

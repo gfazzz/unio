@@ -137,7 +137,9 @@ function error_problems(file as Text, source as Text) returns List[Text]:
                 let rest = line.slice(at + "fails with ".length(), line.length())
                 for part in split(rest.replace(":", ","), ","):
                     if part.trim() == "Error":
-                        found.append("{file}:{index + 1}: fails with Error (S-2): name concrete error types")
+                        found.append(
+                            "{file}:{index + 1}: fails with Error (S-2): name concrete error types",
+                        )
             case none: pass
     return found
 
@@ -157,8 +159,7 @@ function function_name(text as Text) returns Text:
 ## The type an extend block extends: "extend[T] List[T] with X:" gives List.
 function extended_type(line as Text) returns Text:
     var rest = line.slice("extend".length(), line.length())
-    if rest.starts_with("["):
-        rest = rest.slice((rest.index_of("] ") or 0) + 2, rest.length())
+    if rest.starts_with("["): rest = rest.slice((rest.index_of("] ") or 0) + 2, rest.length())
     var name = ""
     for character in rest.trim_start().chars():
         if character == "[" or character == " " or character == ":": break
@@ -180,8 +181,7 @@ function called_names(text as Text) returns List[Text]:
             if current.is_empty(): start = previous
             current = current + character
         else:
-            if character == "(" and not current.is_empty() and start != ".":
-                names.append(current)
+            if character == "(" and not current.is_empty() and start != ".": names.append(current)
             current = ""
         previous = character
     return names
@@ -206,7 +206,12 @@ function functions_of(file as Text, source as Text) returns List[Declared]:
                 implements = false
         let level = indent(line)
         var is_function = false
-        for start in ["function ", "public function ", "external function ", "public external function "]:
+        for start in [
+            "function ",
+            "public function ",
+            "external function ",
+            "public external function ",
+        ]:
             if stripped.starts_with(start): is_function = true
         if not is_function or (level != 0 and target.is_empty()) or level > 4:
             index = index + 1
@@ -225,7 +230,9 @@ function functions_of(file as Text, source as Text) returns List[Declared]:
             depth = depth + lines[next].count("(") - lines[next].count(")")
             next = next + 1
         var body as List[Text] = []
-        while next < lines.length() and (lines[next].trim().is_empty() or indent(lines[next]) > level):
+        while next < lines.length() and (lines[next].trim().is_empty() or indent(
+            lines[next],
+        ) > level):
             let text = lines[next].trim()
             if not text.starts_with("#"): body.append(text)
             next = next + 1
@@ -255,7 +262,10 @@ function functions_of(file as Text, source as Text) returns List[Declared]:
 ## Whether the comment says the function faults, and is not the safe form of something.
 function documents_fault(doc as Text) returns Bool:
     if doc.contains("the safe form of"): return false
-    for word in split(doc.replace(".", " ").replace(",", " ").replace(";", " ").replace(":", " "), " "):
+    for word in split(
+        doc.replace(".", " ").replace(",", " ").replace(";", " ").replace(":", " "),
+        " ",
+    ):
         if word == "fault" or word == "faults": return true
     return false
 
@@ -324,8 +334,7 @@ function rows_of(text as Text, marker as Text) returns Option[List[Row]]:
             let last = cells[cells.length() - 2].trim()
             let named = last.starts_with("none") or last.starts_with("нет")
             rows.append(Row(operation = operation[0], safe = [] if named else code_spans(last)))
-        else if table and line.trim().is_empty():
-            return some(rows)
+        else if table and line.trim().is_empty(): return some(rows)
     if table: return some(rows)
     return none
 
@@ -353,17 +362,25 @@ function inventory_problems(
             problems.append("{place} faults ({reason}) and has no row in {INVENTORY} (L-18)")
     for row in rows:
         if row.operation not in OPERATORS and not public_names.contains(row.operation):
-            problems.append("the row of {row.operation} names no operator and no public function of {STDLIB}")
+            problems.append(
+                "the row of {row.operation} names no operator and no public function of {STDLIB}",
+            )
         if row.safe.is_empty():
             if row.operation not in INTENTIONAL:
                 problems.append("the row of {row.operation} names no safe form (L-18)")
             continue
         let safe = row.safe[0]
-        let candidates = functions.filter(function (f as Declared) returns Bool: f.exported and f.name == safe)
+        let candidates = functions.filter(
+            function (f as Declared) returns Bool: f.exported and f.name == safe,
+        )
         if candidates.is_empty():
-            problems.append("the safe form {safe} of {row.operation} is not a public function of {STDLIB}")
+            problems.append(
+                "the safe form {safe} of {row.operation} is not a public function of {STDLIB}",
+            )
         else if not is_safe(candidates[0]):
-            problems.append("the safe form {safe} of {row.operation} neither returns Option nor fails with an error")
+            problems.append(
+                "the safe form {safe} of {row.operation} neither returns Option nor fails with an error",
+            )
     return problems
 
 test "fails with Error is found, concrete errors and bounds are not":
@@ -402,8 +419,10 @@ test "a faulting function without a row or with an unsafe safe form is reported"
 
 test "the rows of the inventory are read below their heading":
     let text = "## Other (L-17)\n\n| `x` | `y` |\n\n## Faults (L-18)\n\nText.\n\n| Operation | Faults when | Safe form |\n|---|---|---|\n| `Text.slice` | outside | `Text.checked_slice` |\n| `assert_fail` | always | none: `test` only |\n\nAfter.\n"
-    assert rows_of(text, "(L-18)") == some([
-        Row(operation = "Text.slice", safe = ["Text.checked_slice"]),
-        Row(operation = "assert_fail", safe = []),
-    ])
+    assert rows_of(text, "(L-18)") == some(
+        [
+            Row(operation = "Text.slice", safe = ["Text.checked_slice"]),
+            Row(operation = "assert_fail", safe = []),
+        ],
+    )
     assert rows_of(text, "(L-99)") == none

@@ -397,7 +397,10 @@ extend Arguments:
     ##     let config = try arguments.checked_get("config") on DeclarationError as e:
     ##         assert_fail(e.message)
     ##     assert config == none
-    public function checked_get(self, name as Text) returns Option[Text] fails with DeclarationError:
+    public function checked_get(
+        self,
+        name as Text,
+    ) returns Option[Text] fails with DeclarationError:
         let parameter = try lookup(self.parser, name)
         match parameter.kind:
             case ParameterKind.Flag: fail DeclarationError(message = "'{name}' is a flag")
@@ -439,7 +442,10 @@ extend Arguments:
     ##     let tags = try arguments.checked_values("tag") on DeclarationError as e:
     ##         assert_fail(e.message)
     ##     assert tags == ["a"]
-    public function checked_values(self, name as Text) returns List[Text] fails with DeclarationError:
+    public function checked_values(
+        self,
+        name as Text,
+    ) returns List[Text] fails with DeclarationError:
         let _ = try lookup(self.parser, name)
         return self.values.get(name) or []
 

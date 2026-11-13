@@ -279,13 +279,22 @@ jobs:
           python=$(command -v python3 || command -v python)
           "$python" ../.github/scripts/expected_toolchain.py select
       - name: Device mapper, dm-log-writes, XFS tools
+        id: dm
         shell: bash
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y dmsetup xfsprogs e2fsprogs "linux-modules-extra-$(uname -r)"
-          sudo modprobe dm-log-writes
-          sudo dmsetup targets | grep -w log-writes
+          sudo apt-get install -y dmsetup xfsprogs e2fsprogs
+          # dm-log-writes ships in linux-modules-extra, which is not published for every kernel
+          # of the runner image (none for 7.0.0-1017-azure, run 43446501062). Without it the
+          # dm-log-writes trial cannot run; that is reported, not passed over in silence.
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if sudo modprobe dm-log-writes && sudo dmsetup targets | grep -qw log-writes; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::dm-log-writes is not available for kernel $(uname -r): only the FUSE recorder runs; the dm-log-writes evidence of S-9b is still pending"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
           sudo modprobe xfs
           sudo modprobe fuse
           sudo modprobe loop
@@ -300,6 +309,7 @@ jobs:
       - name: The log reader and the content check (no root)
         run: cargo test --release --locked -p unio --test power_cut
       - name: Power cut at every write logged by dm-log-writes (ext4, xfs)
+        if: steps.dm.outputs.available == 'true'
         shell: bash
         run: |
           sudo env UNIO_POWER_CUT=dm-log-writes UNIO_POWER_CUT_FS=ext4,xfs \

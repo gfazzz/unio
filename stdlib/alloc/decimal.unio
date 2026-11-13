@@ -213,7 +213,11 @@ extend Decimal:
     ## Example:
     ##     assert from_int(2).checked_round(1, Rounding.HalfEven) == some(from_int(2))
     ##     assert from_int(2).checked_round(-1, Rounding.HalfEven) == none
-    public function checked_round(self, places as Int, rounding as Rounding) returns Option[Decimal]:
+    public function checked_round(
+        self,
+        places as Int,
+        rounding as Rounding,
+    ) returns Option[Decimal]:
         if places < 0: return none
         return some(self.round(places, rounding))
 
@@ -344,7 +348,11 @@ extend Decimal:
     ## Example:
     ##     assert from_int(7).checked_to_fixed(1, Rounding.HalfEven) == some("7.0")
     ##     assert from_int(7).checked_to_fixed(-1, Rounding.HalfEven) == none
-    public function checked_to_fixed(self, places as Int, rounding as Rounding) returns Option[Text]:
+    public function checked_to_fixed(
+        self,
+        places as Int,
+        rounding as Rounding,
+    ) returns Option[Text]:
         if places < 0: return none
         return some(self.to_fixed(places, rounding))
 
