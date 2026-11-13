@@ -99,6 +99,36 @@ pub struct Fix {
     pub description: Msg,
 }
 
+/// A second location that matters for a diagnostic (C-8 `related`): the earlier declaration of
+/// a duplicate, the declaration of a type or a function the diagnostic is about, the handler or
+/// the `fails with` list of an error, the line of a manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Related {
+    /// The full name of the symbol, when the location is its declaration.
+    pub symbol: Option<String>,
+    pub message: Msg,
+    /// The file of the location as the command names it; None for the file of the diagnostic.
+    pub file: Option<String>,
+    pub span: Span,
+}
+
+impl Related {
+    /// A location in the file of the diagnostic.
+    pub fn here(span: Span, message: Msg) -> Related {
+        Related {
+            symbol: None,
+            message,
+            file: None,
+            span,
+        }
+    }
+
+    pub fn with_symbol(mut self, symbol: impl Into<String>) -> Related {
+        self.symbol = Some(symbol.into());
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: &'static str,
@@ -107,8 +137,11 @@ pub struct Diagnostic {
     pub span: Span,
     pub label: Option<Msg>,
     pub fixes: Vec<Fix>,
-    /// The type the place expects, for a value of another type: the language server gives it
-    /// to the editor with the diagnostic (T-13). Not part of the text or JSON of `unio check`.
+    /// Other locations that matter, in the order they are shown (C-8 `related`).
+    pub related: Vec<Related>,
+    /// The type the place expects, for a value of another type or for incomplete code: the
+    /// language server gives it to the editor with the diagnostic (T-13). Not part of the text
+    /// or JSON of `unio check`.
     pub expected: Option<String>,
 }
 
@@ -121,8 +154,19 @@ impl Diagnostic {
             span,
             label: None,
             fixes: Vec::new(),
+            related: Vec::new(),
             expected: None,
         }
+    }
+
+    pub fn with_related(mut self, related: Related) -> Diagnostic {
+        self.related.push(related);
+        self
+    }
+
+    pub fn with_all_related(mut self, related: impl IntoIterator<Item = Related>) -> Diagnostic {
+        self.related.extend(related);
+        self
     }
 
     pub fn with_label(mut self, label: Msg) -> Diagnostic {
@@ -193,6 +237,20 @@ pub fn render_text(diags: &[Diagnostic], path: &str, source: &str, lang: Lang) -
         let _ = writeln!(out, "  = {help}: {}", explanation(d.code).get(lang));
         for fix in &d.fixes {
             let _ = writeln!(out, "  = fix: {}", fix.description.get(lang));
+        }
+        let note = match lang {
+            Lang::En => "note",
+            Lang::Ru => "примечание",
+        };
+        for r in &d.related {
+            let file = r.file.as_deref().unwrap_or(path);
+            let _ = writeln!(
+                out,
+                "  = {note}: {file}:{}:{}: {}",
+                r.span.start.line,
+                r.span.start.column,
+                r.message.get(lang)
+            );
         }
         out.push('\n');
     }
@@ -269,7 +327,27 @@ pub fn render_json(diags: &[Diagnostic], path: &str, lang: Lang) -> String {
             json_string(&mut out, fix.description.get(lang));
             out.push('}');
         }
-        out.push_str("],\"related\":[]}");
+        out.push_str("],\"related\":[");
+        for (k, r) in d.related.iter().enumerate() {
+            if k > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"symbol\":");
+            match &r.symbol {
+                Some(symbol) => json_string(&mut out, symbol),
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"message\":");
+            json_string(&mut out, r.message.get(lang));
+            out.push_str(",\"span\":{\"file\":");
+            json_string(&mut out, r.file.as_deref().unwrap_or(path));
+            out.push_str(",\"start\":");
+            json_pos(&mut out, r.span.start);
+            out.push_str(",\"end\":");
+            json_pos(&mut out, r.span.end);
+            out.push_str(",\"label\":null}}");
+        }
+        out.push_str("]}");
     }
     if !diags.is_empty() {
         out.push('\n');

@@ -1323,12 +1323,15 @@ impl<'a> Parser<'a> {
                 None
             };
             let value = self.expression()?;
-            if name.is_none() && arguments.iter().any(|a| a.name.is_some()) {
-                self.report(Diagnostic::error(
-                    "E0023",
-                    value.span,
-                    catalog::positional_after_named(),
-                ));
+            let first_named = arguments.iter().find_map(|a| a.name.as_ref());
+            if let (None, Some(first)) = (&name, first_named) {
+                // The first named argument, before which the positional one goes (C-8).
+                let related =
+                    crate::diag::Related::here(first.span, catalog::first_named_argument_here());
+                self.report(
+                    Diagnostic::error("E0023", value.span, catalog::positional_after_named())
+                        .with_related(related),
+                );
             }
             arguments.push(Argument { name, value });
             if !self.at_sym(",") {

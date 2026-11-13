@@ -50,6 +50,51 @@ pub struct Manifest {
     /// By alias.
     pub dependencies: Vec<Dependency>,
     pub permissions: Declared,
+    /// `package.unio_version`: the versions of the Unio toolchain, compiler and runtime, the
+    /// package needs (T-14); `None` for any.
+    pub unio_version: Option<Req>,
+    /// `package.targets`: the targets the package runs on (T-14); `None` for every target.
+    pub targets: Option<Vec<String>>,
+}
+
+/// The targets a manifest may name in `package.targets` (T-14, docs/packages.md section 1):
+/// the targets of `unio build` (docs/runtime.md 8.4), by their Rust target triples.
+pub const TARGETS: [&str; 4] = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+];
+
+/// The target of this machine in the names of [`TARGETS`], if it is one of them.
+pub fn host_target() -> Option<&'static str> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some(TARGETS[0])
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some(TARGETS[1])
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some(TARGETS[2])
+    } else if cfg!(all(windows, target_arch = "x86_64")) {
+        Some(TARGETS[3])
+    } else {
+        None
+    }
+}
+
+/// The version of this toolchain that `package.unio_version` is matched against: the release
+/// it belongs to, without a prerelease tag, so that a development build of 0.1.0 counts as
+/// 0.1.0 (T-14).
+pub fn toolchain_version() -> Version {
+    let mut version =
+        Version::parse(env!("CARGO_PKG_VERSION")).expect("the version of the compiler crate");
+    version.pre.clear();
+    version.build.clear();
+    version
+}
+
+/// The problem of a target name in `package.targets`, if it is not one of [`TARGETS`].
+fn target_problem(name: &str) -> Option<Mistake> {
+    (!TARGETS.contains(&name)).then(|| Mistake::Target(name.to_string()))
 }
 
 /// An alias is one segment of a module path: `deps.<alias>.<module>` (T-14).
@@ -118,6 +163,32 @@ impl Manifest {
             Some(TomlValue::Texts(list)) => manifest.unsafe_modules = list.clone(),
             Some(_) => return Err("package.unsafe_modules must be a list of module names".into()),
         }
+        if let Some(req) =
+            text(&table, "package.unio_version").map_err(|e| format!("E0088: package.{e}"))?
+        {
+            manifest.unio_version = Some(
+                Req::parse(&req)
+                    .map_err(|e| format!("E0088: package.unio_version '{req}': {e}"))?,
+            );
+        }
+        match table.get("package.targets") {
+            None => {}
+            Some(TomlValue::Texts(list)) => {
+                if let Some(bad) = list.iter().find(|t| target_problem(t).is_some()) {
+                    return Err(format!(
+                        "E0088: package.targets names '{bad}', which is not a target; use {}",
+                        TARGETS.join(", ")
+                    ));
+                }
+                manifest.targets = Some(list.clone());
+            }
+            Some(_) => {
+                return Err(format!(
+                    "E0088: package.targets must be a list of targets, for example [\"{}\"]",
+                    TARGETS[0]
+                ))
+            }
+        }
         let mut fields: BTreeMap<String, BTreeMap<String, TomlValue>> = BTreeMap::new();
         for (key, value) in &table {
             let Some(rest) = key.strip_prefix("dependencies.") else {
@@ -141,6 +212,48 @@ impl Manifest {
 
     pub fn dependency(&self, alias: &str) -> Option<&Dependency> {
         self.dependencies.iter().find(|d| d.alias == alias)
+    }
+
+    /// Whether this toolchain and this machine meet the target and runtime requirements of the
+    /// package (T-14): `package.unio_version` holds for [`toolchain_version`], and
+    /// `package.targets`, when given, names the target of this machine. The error says which
+    /// does not hold and what the package asks for.
+    pub fn requirements_met(&self) -> Result<(), String> {
+        requirements_met(self.unio_version.as_ref(), self.targets.as_deref())
+    }
+}
+
+/// [`Manifest::requirements_met`] for requirements already read from a manifest.
+pub fn requirements_met(
+    unio_version: Option<&Req>,
+    targets: Option<&[String]>,
+) -> Result<(), String> {
+    {
+        if let Some(req) = unio_version {
+            let have = toolchain_version();
+            if !req.matches(&have) {
+                return Err(format!(
+                    "it needs Unio {} (package.unio_version), and this is Unio {}",
+                    req.text(),
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+        }
+        if let Some(targets) = targets {
+            let host = host_target();
+            if !host.is_some_and(|h| targets.iter().any(|t| t == h)) {
+                return Err(format!(
+                    "it runs on {} (package.targets), and this machine is {}",
+                    if targets.is_empty() {
+                        "no target".to_string()
+                    } else {
+                        targets.join(", ")
+                    },
+                    host.unwrap_or("not one of the targets of Unio")
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -298,6 +411,7 @@ pub enum ListOf {
     Variables,
     Programs,
     Modules,
+    Targets,
 }
 
 /// Why an entry of `files.read` or `files.write` is not a scope (T-6).
@@ -337,6 +451,10 @@ pub enum Mistake {
     Network,
     UnknownPermission(String),
     Dependency(String, DependencyMistake),
+    /// `package.unio_version` that is not a version requirement, with the problem (T-14).
+    UnioVersion(String),
+    /// A name in `package.targets` that is not a target (T-14).
+    Target(String),
 }
 
 /// `package.unsafe_modules` of a manifest and the line to report its comparison with the
@@ -432,6 +550,24 @@ pub fn check(source: &str) -> Vec<(usize, Mistake)> {
                         found.push((line, Mistake::NotList(key.clone(), ListOf::Modules)));
                     }
                 }
+                "unio_version" => match value {
+                    TomlValue::Text(r) => {
+                        if let Err(e) = Req::parse(r) {
+                            found.push((line, Mistake::UnioVersion(e)));
+                        }
+                    }
+                    _ => found.push((line, Mistake::NotText(key.clone()))),
+                },
+                "targets" => match value {
+                    TomlValue::Texts(list) => {
+                        found.extend(
+                            list.iter()
+                                .filter_map(|t| target_problem(t))
+                                .map(|m| (line, m)),
+                        );
+                    }
+                    _ => found.push((line, Mistake::NotList(key.clone(), ListOf::Targets))),
+                },
                 _ => found.push((line, Mistake::UnknownKey(key.clone()))),
             },
             "permissions" => {
@@ -599,8 +735,43 @@ mod tests {
             "[dependencies]\nu = { path = \"x\", colour = \"red\" }\n",
             "[dependencies]\nu = { path = \"x\", version = \"one\" }\n",
             "[package]\nname = \"Bad Name\"\n",
+            "[package]\nunio_version = \"zero\"\n",
+            "[package]\ntargets = \"x86_64-unknown-linux-gnu\"\n",
+            "[package]\ntargets = [\"x86_64-linux\"]\n",
         ] {
             assert!(Manifest::parse(bad).is_err(), "{bad}");
+            assert!(!check(bad).is_empty(), "{bad}");
         }
+    }
+
+    /// The target and runtime requirements of T-14: met by this toolchain and machine, or not.
+    #[test]
+    fn target_and_runtime_requirements() {
+        let with =
+            |body: &str| Manifest::parse(&format!("[package]\nname = \"p\"\n{body}")).unwrap();
+        assert!(with("").requirements_met().is_ok());
+        let this = toolchain_version();
+        let same = format!(
+            "unio_version = \"={}.{}.{}\"\n",
+            this.major, this.minor, this.patch
+        );
+        assert!(with(&same).requirements_met().is_ok());
+        assert!(check(&format!("[package]\nname = \"p\"\n{same}")).is_empty());
+        let later = format!("unio_version = \">={}.0\"\n", this.major + 1);
+        let problem = with(&later).requirements_met().unwrap_err();
+        assert!(problem.contains("package.unio_version"), "{problem}");
+        if let Some(host) = host_target() {
+            let here = format!("targets = [\"{host}\"]\n");
+            assert!(with(&here).requirements_met().is_ok());
+            let other = TARGETS.iter().find(|t| **t != host).unwrap();
+            let problem = with(&format!("targets = [\"{other}\"]\n"))
+                .requirements_met()
+                .unwrap_err();
+            assert!(
+                problem.contains(host) && problem.contains(other),
+                "{problem}"
+            );
+        }
+        assert!(with("targets = []\n").requirements_met().is_err());
     }
 }

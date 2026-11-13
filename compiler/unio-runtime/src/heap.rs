@@ -57,6 +57,8 @@ struct Slot {
     defer: AtomicBool,
     exhausted: AtomicBool,
     overdraft: AtomicUsize,
+    /// The most a deferred refusal grants: [`OVERDRAFT`], or what the harness set.
+    overdraft_limit: AtomicUsize,
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
@@ -70,6 +72,7 @@ const FREE: Slot = Slot {
     defer: AtomicBool::new(false),
     exhausted: AtomicBool::new(false),
     overdraft: AtomicUsize::new(0),
+    overdraft_limit: AtomicUsize::new(OVERDRAFT),
 };
 
 static SLOTS: [Slot; METERS] = [FREE; METERS];
@@ -163,7 +166,7 @@ fn over(slot: &Slot, joined: bool, bytes: usize) -> bool {
         return false;
     }
     let granted = slot.overdraft.load(Ordering::Relaxed).saturating_add(bytes);
-    if granted > OVERDRAFT {
+    if granted > slot.overdraft_limit.load(Ordering::Relaxed) {
         return false;
     }
     slot.overdraft.store(granted, Ordering::Relaxed);
@@ -298,6 +301,7 @@ impl Meter {
         s.defer.store(false, Ordering::Relaxed);
         s.exhausted.store(false, Ordering::Relaxed);
         s.overdraft.store(0, Ordering::Relaxed);
+        s.overdraft_limit.store(OVERDRAFT, Ordering::Relaxed);
         let generation = s.generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         let previous = tag();
         set_tag(slot as u64 + 1);
@@ -329,6 +333,13 @@ impl Meter {
     /// module documentation.
     pub fn defer(&self) {
         self.slot().defer.store(true, Ordering::Relaxed);
+    }
+
+    /// Lets a deferred refusal grant up to `bytes` above the limit instead of [`OVERDRAFT`]:
+    /// the default heap limit of a test of `unio test` (T-12), where a list that doubles past
+    /// the limit must end the test, not the process.
+    pub fn set_overdraft(&self, bytes: usize) {
+        self.slot().overdraft_limit.store(bytes, Ordering::Relaxed);
     }
 
     /// The bytes counted on this meter.

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ExprKind, PatternKind, StatementKind};
 use crate::catalog;
-use crate::diag::{Diagnostic, Fix, Span};
+use crate::diag::{Diagnostic, Fix, Related, Span};
 use crate::effects::{self, Allocation, Atom, Callee, Flow, Holder, LambdaFact, Site, Use};
 use crate::program::{
     closest, CallEdge, ConstId, DefKind, FnId, ModId, Owner, Program, Symbol, LAYER_NAMES,
@@ -576,7 +576,7 @@ struct Checker<'a> {
     module: ModId,
     scopes: Vec<Vec<Local>>,
     /// Names bound by `is` whose branch has ended (E0050).
-    expired: HashSet<String>,
+    expired: HashMap<String, Span>,
     ret: Ty,
     self_ty: Option<Ty>,
     generics: HashMap<String, ParamId>,
@@ -591,6 +591,10 @@ struct Checker<'a> {
     try_frames: Vec<Frame>,
     /// The error types handled by enclosing `try:` blocks.
     handlers: Vec<Vec<Ty>>,
+    /// The places of the types of those handlers, for the related locations of E0074 (C-8).
+    handler_spans: Vec<Vec<Span>>,
+    /// The function of the call being checked, taken by `call` (C-8).
+    callee_fn: Option<FnId>,
     in_try_block: usize,
     loops: usize,
     /// The first scope of the current lambda: names below it are captured.
@@ -655,7 +659,7 @@ impl<'a> Checker<'a> {
             const_types,
             module,
             scopes: Vec::new(),
-            expired: HashSet::new(),
+            expired: HashMap::new(),
             ret: Ty::Unit,
             self_ty: None,
             generics: HashMap::new(),
@@ -666,6 +670,8 @@ impl<'a> Checker<'a> {
             signature: None,
             try_frames: Vec::new(),
             handlers: Vec::new(),
+            handler_spans: Vec::new(),
+            callee_fn: None,
             in_try_block: 0,
             loops: 0,
             lambda_floor: 0,
@@ -694,6 +700,79 @@ impl<'a> Checker<'a> {
             .error(self.module, Diagnostic::error(code, span, message));
     }
 
+    /// Like err, with the related locations of C-8.
+    fn err_with(
+        &mut self,
+        code: &'static str,
+        span: Span,
+        message: crate::diag::Msg,
+        related: impl IntoIterator<Item = Related>,
+    ) {
+        if self.silent > 0 {
+            return;
+        }
+        let diagnostic = Diagnostic::error(code, span, message).with_all_related(related);
+        self.p.error(self.module, diagnostic);
+    }
+
+    /// Like err_with, with the type the place expects, which the language server gives the
+    /// editor for incomplete code (T-13).
+    fn err_expecting(
+        &mut self,
+        code: &'static str,
+        span: Span,
+        message: crate::diag::Msg,
+        expected: &Ty,
+        related: impl IntoIterator<Item = Related>,
+    ) {
+        if self.silent > 0 {
+            return;
+        }
+        let resolved = self.resolved(expected);
+        let mut diagnostic = Diagnostic::error(code, span, message).with_all_related(related);
+        if !resolved.is_partial() {
+            diagnostic.expected = Some(self.p.show(&resolved));
+        }
+        self.p.error(self.module, diagnostic);
+    }
+
+    /// The span of the binding of a local name, if it has one.
+    fn bound_span(&self, name: &str) -> Option<Span> {
+        self.local_span(name)
+            .filter(|span| *span != Span::default())
+    }
+
+    /// The binding of a local name as a related location (C-8).
+    fn local_related(&self, name: &str) -> Option<Related> {
+        let span = self.bound_span(name)?;
+        let kind = self.find_local_full(name).map(|(_, _, k)| k);
+        let message = if kind == Some(LocalKind::Using) {
+            catalog::opened_by_using(name)
+        } else {
+            catalog::bound_here(name)
+        };
+        Some(Related::here(span, message))
+    }
+
+    /// The declaration of a node as a related location (C-8).
+    fn node_related(&self, node: Node, message: crate::diag::Msg) -> Option<Related> {
+        self.p.related_node(self.module, node, message)
+    }
+
+    /// The declarations of the user types among these, each once (C-8).
+    fn types_related(&self, types: &[&Ty]) -> Vec<Related> {
+        let mut found: Vec<Related> = Vec::new();
+        for t in types {
+            let t = self.resolved(t);
+            if let Some(r) = self.p.related_type(self.module, &t) {
+                if !found.contains(&r) {
+                    found.push(r);
+                }
+            }
+        }
+        found
+    }
+
     // ------------------------------------------------------------ functions
 
     fn function(&mut self, f: FnId, block: &ast::Block) {
@@ -711,7 +790,8 @@ impl<'a> Checker<'a> {
         let ret = self.resolved(&self.ret.clone());
         if completes && !matches!(ret, Ty::Unit | Ty::Never | Ty::Unknown) {
             let shown = self.p.show(&ret);
-            self.err("E0082", name_span, catalog::missing_return(&shown));
+            let message = catalog::missing_return(&shown);
+            self.err_expecting("E0082", name_span, message, &ret, None);
         }
     }
 
@@ -827,7 +907,10 @@ impl<'a> Checker<'a> {
             return;
         }
         if self.find_local(name).is_some() {
-            self.err("E0055", span, catalog::local_repeats(name));
+            let first = self
+                .bound_span(name)
+                .map(|at| Related::here(at, catalog::first_declared_here(name)));
+            self.err_with("E0055", span, catalog::local_repeats(name), first);
         }
         self.expired.remove(name);
         if self.noted.on {
@@ -890,10 +973,11 @@ impl<'a> Checker<'a> {
 
     /// Ends the scope of `is` bindings, so that later uses report E0050.
     fn pop_expiring(&mut self, names: &[String]) {
+        let spans: Vec<Option<Span>> = names.iter().map(|n| self.bound_span(n)).collect();
         self.pop();
-        for n in names {
+        for (n, span) in names.iter().zip(spans) {
             if self.find_local(n).is_none() {
-                self.expired.insert(n.clone());
+                self.expired.insert(n.clone(), span.unwrap_or_default());
             }
         }
     }
@@ -992,10 +1076,13 @@ impl<'a> Checker<'a> {
                     .map(|h| self.resolve_type(&h.ty, false))
                     .collect();
                 self.handlers.push(types.clone());
+                self.handler_spans
+                    .push(handlers.iter().map(|h| h.ty.span).collect());
                 self.in_try_block += 1;
                 let mut completes = self.block(body);
                 self.in_try_block -= 1;
                 self.handlers.pop();
+                self.handler_spans.pop();
                 for (h, ty) in handlers.iter().zip(types) {
                     self.push();
                     if let Some(name) = &h.name {
@@ -1037,6 +1124,7 @@ impl<'a> Checker<'a> {
             self.block(block);
             return;
         };
+        let head = ty.span;
         let ty = self.resolve_type(&ty, false);
         self.push();
         if let Some(name) = name {
@@ -1044,7 +1132,8 @@ impl<'a> Checker<'a> {
         }
         // The block replaces the value of the expression, so it must not complete (L-14a).
         if self.block(block) {
-            self.err("E0075", span, catalog::handler_completes());
+            let related = Related::here(head, catalog::inline_handler_here());
+            self.err_with("E0075", span, catalog::handler_completes(), Some(related));
         }
         self.pop();
     }
@@ -1120,7 +1209,8 @@ impl<'a> Checker<'a> {
                     None => {
                         if ret != Ty::Unit && ret != Ty::Never && !ret.is_unknown() {
                             let shown = self.p.show(&ret);
-                            self.err("E0061", span, catalog::missing_return_value(&shown));
+                            let message = catalog::missing_return_value(&shown);
+                            self.err_expecting("E0061", span, message, &ret, None);
                         }
                     }
                 }
@@ -1204,6 +1294,23 @@ impl<'a> Checker<'a> {
             let shown = self.p.show(&err);
             let mut diagnostic =
                 Diagnostic::error("E0074", span, catalog::error_not_handled(&shown));
+            // The handlers of the enclosing `try:` blocks, innermost first, and the signature
+            // whose `fails with` list may take the error (C-8).
+            for (types, spans) in self.handlers.iter().zip(&self.handler_spans).rev() {
+                for (t, at) in types.iter().zip(spans) {
+                    let shown = self.p.show(&self.resolved(t));
+                    diagnostic
+                        .related
+                        .push(Related::here(*at, catalog::handler_here(&shown)));
+                }
+            }
+            if let (Some((sig, _)), Some(f)) = (self.signature, self.current_fn) {
+                let name = crate::symbol::qualified_name(self.p, f);
+                diagnostic.related.push(
+                    Related::here(sig, catalog::enclosing_function_here(&self.p.funcs[f].name))
+                        .with_symbol(name),
+                );
+            }
             if let Some((sig, has_fails)) = self.signature {
                 let at = Span::new(sig.end, sig.end);
                 let text = if has_fails {
@@ -1222,7 +1329,7 @@ impl<'a> Checker<'a> {
     }
 
     /// A call of a function that can fail: inside `try`, inside a `try:` block, or E0073.
-    fn fallible_call(&mut self, fails: Vec<Ty>, span: Span) {
+    fn fallible_call(&mut self, fails: Vec<Ty>, span: Span, callee: Option<FnId>) {
         if fails.is_empty() || self.silent > 0 {
             return;
         }
@@ -1235,7 +1342,16 @@ impl<'a> Checker<'a> {
             return;
         }
         let shown: Vec<String> = fails.iter().map(|t| self.p.show(t)).collect();
-        self.err("E0073", span, catalog::call_needs_try(&shown.join(", ")));
+        let related = callee.and_then(|f| {
+            let name = self.p.funcs[f].name.clone();
+            self.node_related(Node::Func(f), catalog::fails_with_here(&name))
+        });
+        self.err_with(
+            "E0073",
+            span,
+            catalog::call_needs_try(&shown.join(", ")),
+            related,
+        );
     }
 
     fn uncertain(&mut self) {
@@ -1303,10 +1419,15 @@ impl<'a> Checker<'a> {
         if let ExprKind::Name(n) = &strip(target).kind {
             match self.find_local_full(n) {
                 Some((_, _, LocalKind::Var | LocalKind::VarParam)) => {}
-                Some(_) => self.err("E0077", target.span, catalog::assign_immutable(n)),
+                Some(_) => {
+                    let related = self.local_related(n);
+                    self.err_with("E0077", target.span, catalog::assign_immutable(n), related);
+                }
                 None => {
-                    if self.p.lookup(self.module, n).is_some() {
-                        self.err("E0077", target.span, catalog::assign_immutable(n));
+                    if let Some((_, symbol)) = self.p.lookup(self.module, n) {
+                        let node = crate::program::symbol_node(symbol);
+                        let related = self.node_related(node, catalog::declared_here(n));
+                        self.err_with("E0077", target.span, catalog::assign_immutable(n), related);
                     }
                 }
             }
@@ -1319,7 +1440,11 @@ impl<'a> Checker<'a> {
         let (root, bad) = self.place(place);
         if !Checker::mutable_root(&root) {
             let name = Checker::root_name(&root);
-            self.err("E0078", span, catalog::not_mutable(&name));
+            let related = match &root {
+                Root::Local(n, _) => self.local_related(n),
+                _ => None,
+            };
+            self.err_with("E0078", span, catalog::not_mutable(&name), related);
         } else if let Some(field) = bad {
             self.err("E0078", span, catalog::field_not_var(&field));
         }
@@ -1365,7 +1490,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.coverage_budget = COVERAGE_LIMIT;
-        let missing = self.missing(rows, vec![ty], 0);
+        let missing = self.missing(rows, vec![ty.clone()], 0);
         if missing.is_some() && self.pattern_overflow.get() || self.coverage_budget == 0 {
             self.err("E0068", span, catalog::match_too_many_cases());
             return false;
@@ -1374,7 +1499,13 @@ impl<'a> Checker<'a> {
             None => true,
             Some(witness) => {
                 let example = witness.first().cloned().unwrap_or_else(|| "_".to_string());
-                self.err("E0068", span, catalog::match_not_exhaustive(&example));
+                let related = self.types_related(&[&ty]);
+                self.err_with(
+                    "E0068",
+                    span,
+                    catalog::match_not_exhaustive(&example),
+                    related,
+                );
                 false
             }
         }
@@ -1683,10 +1814,20 @@ impl<'a> Checker<'a> {
         ) {
             if there > here {
                 let name = self.p.funcs[f].name.clone();
-                self.err(
+                // The standard library is left out of related locations unless it is the
+                // code being checked, as a layer violation is (C-8).
+                let related = Related {
+                    symbol: Some(crate::symbol::qualified_name(self.p, f)),
+                    message: catalog::layer_function_here(&name),
+                    file: (callee_module != self.module)
+                        .then(|| self.p.modules[callee_module].analysis.path.clone()),
+                    span: self.p.funcs[f].span,
+                };
+                self.err_with(
                     "E0084",
                     span,
                     catalog::layer_violation(&name, LAYER_NAMES[there], LAYER_NAMES[here]),
+                    Some(related),
                 );
             }
         }
@@ -2187,8 +2328,10 @@ impl<'a> Checker<'a> {
             }
             let (a, e) = (self.p.show(&a), self.p.show(&e));
             if self.silent == 0 {
+                let related = self.types_related(&[expected, actual]);
                 let mut diagnostic =
-                    Diagnostic::error("E0061", span, catalog::type_mismatch(&e, &a));
+                    Diagnostic::error("E0061", span, catalog::type_mismatch(&e, &a))
+                        .with_all_related(related);
                 diagnostic.expected = Some(e);
                 self.p.error(self.module, diagnostic);
             }
@@ -2567,6 +2710,16 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: &Ty,
     ) -> Ty {
+        // The declaration of the function called, for E0040 and E0064 (C-8).
+        let declared: Vec<Related> = self
+            .callee_fn
+            .take()
+            .and_then(|f| {
+                let name = self.p.funcs[f].name.clone();
+                self.node_related(Node::Func(f), catalog::parameters_here(&name))
+            })
+            .into_iter()
+            .collect();
         let mut assigned: Vec<Option<&ast::Argument>> = vec![None; params.len()];
         let plain: Vec<usize> = (0..params.len())
             .filter(|i| !params[*i].named_only)
@@ -2605,7 +2758,8 @@ impl<'a> Checker<'a> {
                         };
                         let at = arg.value.span;
                         let mut diagnostic =
-                            Diagnostic::error("E0040", at, catalog::missing_label(&label));
+                            Diagnostic::error("E0040", at, catalog::missing_label(&label))
+                                .with_all_related(declared.clone());
                         if open == 1 && !label.is_empty() {
                             diagnostic.fixes.push(Fix {
                                 span: Span::new(at.start, at.start),
@@ -2620,10 +2774,11 @@ impl<'a> Checker<'a> {
                         assigned[j] = Some(arg);
                     } else {
                         if !reported {
-                            self.err(
+                            self.err_with(
                                 "E0064",
                                 arg.value.span,
                                 catalog::too_many_arguments(params.len()),
+                                declared.clone(),
                             );
                             reported = true;
                         }
@@ -2636,12 +2791,14 @@ impl<'a> Checker<'a> {
                 {
                     Some(i) if assigned[i].is_none() => assigned[i] = Some(arg),
                     Some(_) => {
-                        self.err("E0064", name.span, catalog::argument_twice(&name.text));
+                        let message = catalog::argument_twice(&name.text);
+                        self.err_with("E0064", name.span, message, declared.clone());
                         reported = true;
                         self.expr(&arg.value, &Ty::Unknown);
                     }
                     None => {
-                        self.err("E0064", name.span, catalog::unknown_argument(&name.text));
+                        let message = catalog::unknown_argument(&name.text);
+                        self.err_with("E0064", name.span, message, declared.clone());
                         reported = true;
                         self.expr(&arg.value, &Ty::Unknown);
                     }
@@ -2652,7 +2809,9 @@ impl<'a> Checker<'a> {
             for (i, p) in params.iter().enumerate() {
                 if assigned[i].is_none() && !p.has_default {
                     let name = p.name.clone().unwrap_or_else(|| format!("{}", i + 1));
-                    self.err("E0064", span, catalog::missing_argument(&name));
+                    let message = catalog::missing_argument(&name);
+                    let ty = p.ty.clone();
+                    self.err_expecting("E0064", span, message, &ty, declared.clone());
                     break;
                 }
             }
@@ -2673,7 +2832,12 @@ impl<'a> Checker<'a> {
                 )
             }))
             .collect();
-        let mut var_roots: Vec<String> = self.var_receiver.take().into_iter().collect();
+        let mut var_roots: Vec<(String, Option<Span>)> = self
+            .var_receiver
+            .take()
+            .into_iter()
+            .map(|name| (name, None))
+            .collect();
         for (i, p) in params.iter().enumerate() {
             let Some(arg) = assigned[i] else { continue };
             if p.var && self.silent == 0 {
@@ -2681,13 +2845,24 @@ impl<'a> Checker<'a> {
                 let (root, bad) = self.place(&arg.value);
                 if !Checker::mutable_root(&root) || bad.is_some() {
                     let name = Checker::root_name(&root);
-                    self.err("E0079", arg.value.span, catalog::var_argument(&name));
+                    let related = match &root {
+                        Root::Local(n, _) => self.local_related(n),
+                        _ => None,
+                    };
+                    self.err_with(
+                        "E0079",
+                        arg.value.span,
+                        catalog::var_argument(&name),
+                        related,
+                    );
                 } else {
                     let name = Checker::root_name(&root);
-                    if var_roots.contains(&name) {
-                        self.err("E0042", arg.value.span, catalog::var_argument_twice(&name));
+                    if let Some((_, first)) = var_roots.iter().find(|(n, _)| *n == name) {
+                        let related = first.map(|at| Related::here(at, catalog::first_one_here()));
+                        let message = catalog::var_argument_twice(&name);
+                        self.err_with("E0042", arg.value.span, message, related);
                     }
-                    var_roots.push(name);
+                    var_roots.push((name, Some(arg.value.span)));
                 }
             }
             if p.resource_bound {
@@ -2771,10 +2946,12 @@ impl<'a> Checker<'a> {
         if let Some(types) = explicit {
             if types.len() != generics.len() {
                 let name = self.p.funcs[f].name.clone();
-                self.err(
+                let related = self.node_related(Node::Func(f), catalog::declared_here(&name));
+                self.err_with(
                     "E0059",
                     span,
                     catalog::type_arity(&name, generics.len(), types.len()),
+                    related,
                 );
             }
             for (v, t) in vars.iter().zip(types) {
@@ -2789,10 +2966,11 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|t| t.subst(&subst, self_ty.as_ref()))
             .collect();
+        self.callee_fn = Some(f);
         let result = self.call(params, ret, args, span, expected);
         let flows = std::mem::take(&mut self.last_args);
         self.record_call(f, span, flows);
-        self.fallible_call(fails, span);
+        self.fallible_call(fails, span, Some(f));
         if self.silent == 0 && !subst.is_empty() {
             let types = subst.iter().map(|(g, t)| (*g, self.resolved(t))).collect();
             self.p.generic_calls.push(crate::program::GenericCall {
@@ -2816,7 +2994,9 @@ impl<'a> Checker<'a> {
                             // IEEE Float where a total order or a hash is needed (L-32).
                             self.err("E0045", span, catalog::float_constraint(&ts, &bs));
                         } else {
-                            self.err("E0062", span, catalog::constraint_not_met(&ts, &bs));
+                            let related = self.types_related(&[&t]);
+                            let message = catalog::constraint_not_met(&ts, &bs);
+                            self.err_with("E0062", span, message, related);
                         }
                     }
                 }
@@ -2877,16 +3057,19 @@ impl<'a> Checker<'a> {
         }
         let foreign = self.p.defs[def].module != self.module;
         let type_name = self.p.defs[def].name.clone();
+        let declared = self.node_related(Node::Def(def), catalog::type_declared_here(&type_name));
         if foreign && fields.iter().any(|f| !f.2) {
-            self.err("E0057", span, catalog::private_fields(&type_name));
+            let message = catalog::private_fields(&type_name);
+            self.err_with("E0057", span, message, declared.clone());
         }
         let mut given = HashSet::new();
         for arg in args {
             let Some(name) = &arg.name else {
-                self.err(
+                self.err_with(
                     "E0063",
                     arg.value.span,
                     catalog::fields_are_named(&type_name),
+                    declared.clone(),
                 );
                 self.expr(&arg.value, &Ty::Unknown);
                 continue;
@@ -2903,18 +3086,20 @@ impl<'a> Checker<'a> {
                     self.store(def, &name.text, flow);
                 }
                 None => {
-                    self.err(
+                    self.err_with(
                         "E0063",
                         name.span,
                         catalog::unknown_field(&name.text, &type_name),
+                        declared.clone(),
                     );
                     self.expr(&arg.value, &Ty::Unknown);
                 }
             }
         }
-        for (name, _, _, has_default) in &fields {
+        for (name, ty, _, has_default) in &fields {
             if !has_default && !given.contains(name) {
-                self.err("E0063", span, catalog::missing_field(name, &type_name));
+                let message = catalog::missing_field(name, &type_name);
+                self.err_expecting("E0063", span, message, ty, declared.clone());
                 break;
             }
         }
@@ -3006,6 +3191,18 @@ impl<'a> Checker<'a> {
                 let enum_name = self.p.defs[first.0].name.clone();
                 let mut diagnostic =
                     Diagnostic::error("E0072", span, catalog::variant_collision(name, &enum_name));
+                // The enums with the variant, and a declaration of the module with its name.
+                for (d, _) in &found {
+                    let message = catalog::type_declared_here(&self.p.defs[*d].name);
+                    diagnostic
+                        .related
+                        .extend(self.node_related(Node::Def(*d), message));
+                }
+                if let Some(symbol) = self.p.modules[self.module].symbols.get(name).copied() {
+                    let node = crate::program::symbol_node(symbol);
+                    let message = catalog::declared_here(name);
+                    diagnostic.related.extend(self.node_related(node, message));
+                }
                 // The full form is the fix when it is unambiguous: one enum has the variant and
                 // its name means that enum here (R-9, the migration of concept 0.4).
                 let visible = matches!(
@@ -3032,8 +3229,10 @@ impl<'a> Checker<'a> {
             // The import that should bind the name has been reported (semantics 2.8).
             return;
         }
-        if self.expired.contains(name) {
-            self.err("E0050", span, catalog::is_name_not_bound(name));
+        if let Some(at) = self.expired.get(name).copied() {
+            let related =
+                (at != Span::default()).then(|| Related::here(at, catalog::bound_here(name)));
+            self.err_with("E0050", span, catalog::is_name_not_bound(name), related);
             return;
         }
         let mut candidates: Vec<String> = Vec::new();
@@ -3098,9 +3297,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_visible(&mut self, owner: ModId, public: bool, name: &str, span: Span) {
+    fn check_visible(&mut self, owner: ModId, public: bool, name: &str, span: Span, node: Node) {
         if owner != self.module && !public {
-            self.err("E0057", span, catalog::private_used(name));
+            let related = self.node_related(node, catalog::declared_here(name));
+            self.err_with("E0057", span, catalog::private_used(name), related);
         }
     }
 
@@ -3123,7 +3323,8 @@ impl<'a> Checker<'a> {
                     } else {
                         catalog::resource_escapes(name)
                     };
-                    self.err("E0081", span, message);
+                    let related = self.local_related(name);
+                    self.err_with("E0081", span, message, related);
                 }
             }
             return t;
@@ -3139,7 +3340,8 @@ impl<'a> Checker<'a> {
         }
         if let Some((owner, symbol)) = self.p.lookup(self.module, name) {
             let public = self.p.symbol_public(symbol);
-            self.check_visible(owner, public, name, span);
+            let node = crate::program::symbol_node(symbol);
+            self.check_visible(owner, public, name, span, node);
             return self.symbol_type(owner, symbol, span);
         }
         if self.p.module_alias(self.module, name).is_some() {
@@ -3200,6 +3402,11 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             self.noted.expr(self.module, e.span, &ty, local);
+            // The type a name is expected to have: the language server puts a name in the
+            // place of missing code to learn the expected type there (T-13).
+            if matches!(e.kind, ExprKind::Name(_)) && !matches!(expected, Ty::Unknown) {
+                self.noted.expected(self.module, e.span, expected);
+            }
         }
         ty
     }
@@ -3332,9 +3539,9 @@ impl<'a> Checker<'a> {
             } => self.lambda(params, returns.as_ref(), fails, body, e.span, expected),
             ExprKind::Is { .. } => {
                 let (ty, bindings) = self.cond_expr(e);
-                for (n, _, _) in bindings {
+                for (n, _, at) in bindings {
                     if self.find_local(&n).is_none() {
-                        self.expired.insert(n);
+                        self.expired.insert(n, at);
                     }
                 }
                 ty
@@ -3491,7 +3698,8 @@ impl<'a> Checker<'a> {
                 if let Some(display) = self.known.display {
                     if !self.implements(&t, display, &[]) {
                         let shown = self.p.show(&t);
-                        self.err("E0067", e.span, catalog::not_display(&shown));
+                        let related = self.types_related(&[&t]);
+                        self.err_with("E0067", e.span, catalog::not_display(&shown), related);
                     }
                 }
             }
@@ -3549,6 +3757,7 @@ impl<'a> Checker<'a> {
         let saved_fails = std::mem::replace(&mut self.fn_fails, lambda_fails.clone());
         let saved_frames = std::mem::take(&mut self.try_frames);
         let saved_handlers = std::mem::take(&mut self.handlers);
+        let saved_handler_spans = std::mem::take(&mut self.handler_spans);
         let saved_try = std::mem::replace(&mut self.in_try_block, 0);
         let saved_loops = std::mem::replace(&mut self.loops, 0);
         let saved_floor = std::mem::replace(&mut self.lambda_floor, self.scopes.len());
@@ -3594,6 +3803,7 @@ impl<'a> Checker<'a> {
         self.fn_fails = saved_fails;
         self.try_frames = saved_frames;
         self.handlers = saved_handlers;
+        self.handler_spans = saved_handler_spans;
         self.in_try_block = saved_try;
         self.loops = saved_loops;
         self.lambda_floor = saved_floor;
@@ -3807,12 +4017,14 @@ impl<'a> Checker<'a> {
                 match found {
                     Some((t, public)) => {
                         let owner = self.p.defs[*d].module;
-                        self.check_visible(owner, public, &name.text, name.span);
+                        self.check_visible(owner, public, &name.text, name.span, Node::Def(*d));
                         t
                     }
                     None => {
                         let shown = self.p.show(&ty);
-                        self.err("E0056", name.span, catalog::no_field(&name.text, &shown));
+                        let related = self.types_related(&[&ty]);
+                        let message = catalog::no_field(&name.text, &shown);
+                        self.err_with("E0056", name.span, message, related);
                         Ty::Unknown
                     }
                 }
@@ -3831,7 +4043,8 @@ impl<'a> Checker<'a> {
             return match self.p.modules[m].symbols.get(&name.text).copied() {
                 Some(symbol) => {
                     let public = self.p.symbol_public(symbol);
-                    self.check_visible(m, public, &name.text, name.span);
+                    let node = crate::program::symbol_node(symbol);
+                    self.check_visible(m, public, &name.text, name.span, node);
                     self.symbol_type(m, symbol, name.span)
                 }
                 None => {
@@ -3890,7 +4103,7 @@ impl<'a> Checker<'a> {
                 match self.p.lookup(self.module, n) {
                     Some((owner, Symbol::Func(f))) => {
                         let public = self.p.funcs[f].public;
-                        self.check_visible(owner, public, n, callee.span);
+                        self.check_visible(owner, public, n, callee.span, Node::Func(f));
                         self.call_function(f, HashMap::new(), None, explicit, args, span, expected)
                     }
                     Some((owner, Symbol::Def(d)))
@@ -3900,7 +4113,7 @@ impl<'a> Checker<'a> {
                         ) =>
                     {
                         let public = self.p.defs[d].public;
-                        self.check_visible(owner, public, n, callee.span);
+                        self.check_visible(owner, public, n, callee.span, Node::Def(d));
                         self.construct(d, explicit, args, span, expected)
                     }
                     _ => {
@@ -3915,7 +4128,7 @@ impl<'a> Checker<'a> {
                     return match self.p.modules[m].symbols.get(&name.text).copied() {
                         Some(Symbol::Func(f)) => {
                             let public = self.p.funcs[f].public;
-                            self.check_visible(m, public, &name.text, name.span);
+                            self.check_visible(m, public, &name.text, name.span, Node::Func(f));
                             self.call_function(
                                 f,
                                 HashMap::new(),
@@ -3933,7 +4146,7 @@ impl<'a> Checker<'a> {
                             ) =>
                         {
                             let public = self.p.defs[d].public;
-                            self.check_visible(m, public, &name.text, name.span);
+                            self.check_visible(m, public, &name.text, name.span, Node::Def(d));
                             self.construct(d, explicit, args, span, expected)
                         }
                         _ => {
@@ -3961,7 +4174,7 @@ impl<'a> Checker<'a> {
                     if let Some((f, subst, self_ty)) = self.find_method(&target_ty, &name.text) {
                         if self.p.funcs[f].self_param.is_none() {
                             let (owner, public) = (self.p.funcs[f].module, self.p.funcs[f].public);
-                            self.check_visible(owner, public, &name.text, name.span);
+                            self.check_visible(owner, public, &name.text, name.span, Node::Func(f));
                             return self.call_function(
                                 f,
                                 subst,
@@ -3996,7 +4209,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some((f, subst, self_ty)) = self.find_method(&recv, &name.text) {
                     let (owner, public) = (self.p.funcs[f].module, self.p.funcs[f].public);
-                    self.check_visible(owner, public, &name.text, name.span);
+                    self.check_visible(owner, public, &name.text, name.span, Node::Func(f));
                     if self.p.funcs[f].self_param == Some(true) && self.silent == 0 {
                         // A `var self` method changes its receiver (L-11).
                         let (root, bad) = self.place(target);
@@ -4052,7 +4265,9 @@ impl<'a> Checker<'a> {
                         catalog::float_method(&name.text, &element),
                     );
                 } else {
-                    self.err("E0056", name.span, catalog::no_method(&name.text, &shown));
+                    let related = self.types_related(&[&recv]);
+                    let message = catalog::no_method(&name.text, &shown);
+                    self.err_with("E0056", name.span, message, related);
                 }
                 for a in args {
                     self.expr(&a.value, &Ty::Unknown);
@@ -4115,7 +4330,7 @@ impl<'a> Checker<'a> {
                 let result = self.call(params, f.ret.clone(), args, span, expected);
                 let flows = std::mem::take(&mut self.last_args);
                 self.add_use(Callee::Value(flow), flows, span);
-                self.fallible_call(f.fails.clone(), span);
+                self.fallible_call(f.fails.clone(), span, None);
                 result
             }
             Ty::Unknown | Ty::Never => {
@@ -4191,7 +4406,9 @@ impl<'a> Checker<'a> {
                                 );
                                 if !self.compatible(&t, &subject) {
                                     let (e, a) = (self.p.show(&subject), self.p.show(&t));
-                                    self.err("E0061", p.span, catalog::type_mismatch(&e, &a));
+                                    let message = catalog::type_mismatch(&e, &a);
+                                    let related = self.types_related(&[&subject, &t]);
+                                    self.err_expecting("E0061", p.span, message, &subject, related);
                                 }
                             }
                             _ => self.unknown_name(n, path[0].span),
@@ -4376,7 +4593,10 @@ impl<'a> Checker<'a> {
                 .collect(),
             other => {
                 let (e, a) = (self.p.show(other), self.p.defs[d].name.clone());
-                self.err("E0061", span, catalog::type_mismatch(&e, &a));
+                let message = catalog::type_mismatch(&e, &a);
+                let related = self.types_related(&[other]);
+                let expected = other.clone();
+                self.err_expecting("E0061", span, message, &expected, related);
                 self.p.defs[d]
                     .generics
                     .iter()

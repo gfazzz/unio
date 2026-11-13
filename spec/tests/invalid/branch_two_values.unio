@@ -1,0 +1,5 @@
+# expect-error: 4
+function f(x as Int) returns Int:
+    match x:
+        case 1: return 1 2
+        case _: return 0

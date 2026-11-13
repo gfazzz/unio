@@ -11,6 +11,8 @@ A package is a directory with `unio.toml` (L-22). The package manager reads thre
 name = "app"                 # lowercase letters, digits, '-' and '_'
 version = "0.1.0"            # a semantic version; required for a package that others depend on
 unsafe_modules = ["raw"]     # the modules that carry `unsafe module` (T-6)
+unio_version = "^0.1"        # the versions of the Unio toolchain it needs (T-14); optional
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]  # where it runs (T-14); optional
 
 [dependencies]
 util = { path = "../util" }
@@ -20,6 +22,8 @@ vendored = { archive = "vendor/vendored-1.0.0.tar", sha384 = "<96 hexadecimal di
 [permissions]
 files.read = ["$CWD/**"]
 ```
+
+`unio_version` and `targets` are the runtime and target requirements of the package (T-14, [language-contracts.md](language-contracts.md) section 6). `unio_version` is a version requirement in the syntax below on the Unio toolchain, the compiler and its runtime, matched against the release the toolchain belongs to: its version without a prerelease tag, so that a development build of 0.1.0 counts as 0.1.0. `targets` lists the targets the package runs on by the Rust triples of the targets of `unio build` (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`; [tools.md](tools.md) section 10); without the key the package runs everywhere, and an empty list runs nowhere. `unio add`, `remove`, `update` and `install` check both, for every package they install and for the root package, against this toolchain and this machine, before anything is written (section 3). A value of the wrong form (a requirement that does not parse, a target that is not one of the four, a target list that is not a list) is a mistake of the manifest, E0088.
 
 The key of a dependency is its alias, the name in `import deps.<alias>.<module>` (T-14): lowercase letters, digits and `_`, not `std` or `deps`. A dependency has exactly one source:
 
@@ -45,6 +49,8 @@ The content hash is SHA-384 over a versioned canonical form of the files (`unio-
 
 | Command | What it does |
 |---|---|
+| `unio new NAME [--bin \| --lib]` | makes a new package in the directory NAME: the manifest (name, version `0.1.0`, no permissions), `main.unio` or a module named after the package with a `test` block, and `.gitignore` ([tools.md](tools.md) section 8) |
+| `unio doc [--open] [-o DIR]` | writes the documentation of the package as HTML pages into `target/doc/` ([tools.md](tools.md) section 9) |
 | `unio add ALIAS [VERSION] --path DIR` | adds a path dependency, resolves, installs, and writes `unio.toml` and `unio.lock` |
 | `unio add ALIAS VERSION --package OWNER/NAME [--registry NAME]` | the same for a package of a registry |
 | `unio add ALIAS --archive FILE\|URL --sha384 HEX` | the same for an archive with a known hash |
@@ -59,6 +65,8 @@ The content hash is SHA-384 over a versioned canonical form of the files (`unio-
 The commands from `add` to `install` take `--offline` (no download: a package that is not in the cache and needs the network is an error), `--unsafe-ok` (the confirmation of T-9, section 6), and `--policy FILE` and `--allow-weaker-sandbox` for its workers, as the other commands do. The commands look for `unio.toml` in the working directory and above it. Nothing is written until everything was fetched, checked, and confirmed: a failed or refused command leaves `unio.toml`, `unio.lock`, and the cache as they were. A path dependency is copied into the cache: after changing its files, run `unio update <alias>`; `unio install` reports the change instead of locking it silently.
 
 `unio install` checks first that the lock matches the manifest (the same aliases, identities, and requirements, and every locked version satisfies the requirements on it); otherwise it stops and suggests `unio update`. For a package that is already in the cache it reads the entry again in a worker and checks its content hash.
+
+Every package these commands install must meet its target and runtime requirements here (T-14): its `package.unio_version` must hold for this toolchain and its `package.targets`, when given, must name this machine. One that does not stops the command before anything is written, with what the package asks for and what this is: `unio install: error: path+../util 1.0.0 cannot be installed: it runs on aarch64-apple-darwin (package.targets), and this machine is x86_64-unknown-linux-gnu; nothing was installed`. The root package is checked the same way. A malformed key of a dependency's manifest is reported as E0088 with the manifest; `unio check` reports one in the package's own manifest at its line. Checked by `target_and_runtime_requirements_are_validated_at_installation` in `compiler/unio/tests/packages.rs` and the unit tests of `package/manifest.rs`.
 
 `unio check`, `build`, `run`, `test`, and the language server read only `unio.lock` and the cache, never the network (T-7): `import deps.util.strings` resolves through the lock of the root package to the cache entry of `util`, and a module of a dependency imports the modules of its own package and its own dependencies the same way. An alias that is not declared, declared but not locked, or locked but not installed is E0048, and the message says which and what to run.
 
@@ -189,6 +197,5 @@ Accepted are regular files and directories with portable relative names: ASCII l
 - An independent security review, fuzzing of the parsers of envelopes, trust files, and indexes (they are strict and bounded, and tested with modified and truncated inputs), and a review of the timing of the ML-DSA implementation: until then no component claims post-quantum compliance (R-6c; [cryptography.md](cryptography.md), section 7).
 - One signature per object: no threshold of several keys; SLH-DSA as an independent alternative is not selected.
 - An upload service: a registry is a directory that its publisher serves or copies.
-- Target and runtime requirements in manifests (language-contracts section 6 asks installation to validate them); 0.1 manifests declare none.
 - Yanking, which the requirements do not ask for, and removing old cache entries.
 - On Windows each worker is a process of its own AppContainer without network (SB-4), and the download worker inherits the connection the tool opened, as on Linux and macOS ([runtime.md](runtime.md) 9.4, 9.7).

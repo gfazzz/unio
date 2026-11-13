@@ -4,7 +4,7 @@ Version 0.1-draft. Russian localization: [ru/stdlib-reference.md](ru/stdlib-refe
 
 Every public declaration of the library is listed with its signature and its documentation comment, in the order of its source file: the preludes of the layers `core`, `alloc` and `std` first, then the modules by name. Private declarations are left out; the methods of an `extend` block are listed when they are public or implement an interface. A struct with private fields says so: it is built only by the functions of its module.
 
-30 files, 390 public declarations and methods, 43 of them without a documentation comment.
+30 files, 421 public declarations and methods, 43 of them without a documentation comment.
 
 ## Contents
 
@@ -611,6 +611,20 @@ Example:
 assert 7.checked_divide(2) == some(3) and 1.checked_divide(0) == none
 ```
 
+#### `checked_remainder`
+
+```unio
+public function checked_remainder(self, other as Int) returns Option[Int]
+```
+
+The remainder of the division truncated toward zero, with the sign of self, or none when
+other is 0: the safe form of %.
+Example:
+
+```unio
+assert (-7).checked_remainder(2) == some(-1) and 7.checked_remainder(0) == none
+```
+
 #### `to_float`
 
 ```unio
@@ -862,7 +876,7 @@ assert [1, 2, 3].length() == 3
 public external function get(self, index as Int) returns Option[T]
 ```
 
-The item at the position; none outside 0..length(), where items[index] is a fault.
+The item at the position, or none outside 0..length(): the safe form of items[index].
 Example:
 
 ```unio
@@ -949,6 +963,20 @@ Example:
 
 ```unio
 assert [1, 2, 3, 4].slice(1, 3) == [2, 3]
+```
+
+#### `checked_slice`
+
+```unio
+public function checked_slice(self, start as Int, end as Int) returns Option[List[T]]
+```
+
+Items from start up to, but not including, end, or none unless 0 \<= start \<= end \<= length():
+the safe form of slice.
+Example:
+
+```unio
+assert [1, 2, 3].checked_slice(1, 3) == some([2, 3]) and [1].checked_slice(0, 2) == none
 ```
 
 #### `append_all`
@@ -1697,6 +1725,20 @@ Example:
 assert "привет".slice(0, 3) == "при"
 ```
 
+#### `checked_slice`
+
+```unio
+public function checked_slice(self, start as Int, end as Int) returns Option[Text]
+```
+
+Scalars from start up to, but not including, end, or none unless
+0 \<= start \<= end \<= length(): the safe form of slice.
+Example:
+
+```unio
+assert "привет".checked_slice(0, 3) == some("при") and "ab".checked_slice(1, 3) == none
+```
+
 #### `index_of`
 
 ```unio
@@ -1762,6 +1804,19 @@ Example:
 
 ```unio
 assert "héllo".char_at(1) == "é"
+```
+
+#### `checked_char_at`
+
+```unio
+public function checked_char_at(self, index as Int) returns Option[Text]
+```
+
+The character at the position, or none outside 0..length(): the safe form of char_at.
+Example:
+
+```unio
+assert "héllo".checked_char_at(1) == some("é") and "ab".checked_char_at(2) == none
 ```
 
 #### `is_empty`
@@ -1919,6 +1974,20 @@ Example:
 
 ```unio
 assert "ab".repeat(3) == "ababab"
+```
+
+#### `checked_repeat`
+
+```unio
+public function checked_repeat(self, times as Int) returns Option[Text]
+```
+
+The text repeated the given number of times, or none for a negative count: the safe form of
+repeat.
+Example:
+
+```unio
+assert "ab".checked_repeat(2) == some("abab") and "ab".checked_repeat(-1) == none
 ```
 
 #### `to_int`
@@ -2291,6 +2360,37 @@ let cli = parser("greet", "Greets someone.", [positional("name", "Who to greet."
 assert help(cli).starts_with("Usage: greet [options] <name>")
 ```
 
+### `DeclarationError`
+
+```unio
+public error DeclarationError:
+    message as Text
+```
+
+A declaration of parameters that cannot work; its message says why.
+
+### `checked_parser`
+
+```unio
+public function checked_parser(
+    program as Text,
+    about as Text,
+    parameters as List[Parameter],
+) returns Parser fails with DeclarationError
+```
+
+The declared parameters of a program, or DeclarationError for a declaration that cannot work:
+the safe form of parser.
+Example:
+
+```unio
+try:
+    let _ = try checked_parser("x", "", [flag("a", ""), flag("a", "")])
+    assert_fail("declared twice")
+on DeclarationError as e:
+    assert e.message == "'a' is declared twice"
+```
+
 ### `help`
 
 ```unio
@@ -2347,6 +2447,30 @@ let arguments = try parse(cli, []) on ArgsError as e:
 assert not arguments.flag("long")
 ```
 
+#### `checked_flag`
+
+```unio
+public function checked_flag(self, name as Text) returns Bool fails with DeclarationError
+```
+
+Whether the flag was given, or DeclarationError for a name that is not a declared flag: the
+safe form of flag.
+Example:
+
+```unio
+let cli = parser("ls", "Lists.", [flag("long", "Long format.")])
+let arguments = try parse(cli, ["--long"]) on ArgsError as e:
+    assert_fail(e.message)
+let long = try arguments.checked_flag("long") on DeclarationError as e:
+    assert_fail(e.message)
+assert long
+try:
+    let _ = try arguments.checked_flag("wide")
+    assert_fail("wide is not declared")
+on DeclarationError as e:
+    assert e.message == "'wide' is not a declared parameter"
+```
+
 #### `get`
 
 ```unio
@@ -2362,6 +2486,26 @@ let cli = parser("run", "Runs.", [option("config", "Configuration file.")])
 let arguments = try parse(cli, ["--config=app.toml"]) on ArgsError as e:
     assert_fail(e.message)
 assert arguments.get("config") == some("app.toml")
+```
+
+#### `checked_get`
+
+```unio
+public function checked_get(self, name as Text) returns Option[Text] fails with DeclarationError
+```
+
+The value of an option or positional as get gives it, or DeclarationError for a name that is
+not declared or that is a flag: the safe form of get, and with none for a missing value, of
+value.
+Example:
+
+```unio
+let cli = parser("run", "Runs.", [option("config", "Configuration file.")])
+let arguments = try parse(cli, []) on ArgsError as e:
+    assert_fail(e.message)
+let config = try arguments.checked_get("config") on DeclarationError as e:
+    assert_fail(e.message)
+assert config == none
 ```
 
 #### `value`
@@ -2399,6 +2543,25 @@ let arguments = try parse(cli, ["-t", "a", "--tag", "b"]) on ArgsError as e:
 assert arguments.values("tag") == ["a", "b"]
 ```
 
+#### `checked_values`
+
+```unio
+public function checked_values(self, name as Text) returns List[Text] fails with DeclarationError
+```
+
+The values as values gives them, or DeclarationError for a name that is not declared: the
+safe form of values.
+Example:
+
+```unio
+let cli = parser("tag", "Tags.", [option("tag", "A tag.")])
+let arguments = try parse(cli, ["--tag", "a"]) on ArgsError as e:
+    assert_fail(e.message)
+let tags = try arguments.checked_values("tag") on DeclarationError as e:
+    assert_fail(e.message)
+assert tags == ["a"]
+```
+
 #### `get_int`
 
 ```unio
@@ -2406,7 +2569,8 @@ public function get_int(self, name as Text) returns Option[Int] fails with ArgsE
 ```
 
 The value as a decimal integer; none when the parameter has no value. A value that is not an
-integer fails with kind InvalidValue.
+integer fails with kind InvalidValue; a name that is not declared, or that is a flag, is a
+fault, as for get.
 Example:
 
 ```unio
@@ -2944,6 +3108,21 @@ assert "{amount.round(2, Rounding.HalfEven)}" == "2.68"
 assert "{amount.round(2, Rounding.Down)}" == "2.67"
 ```
 
+#### `checked_round`
+
+```unio
+public function checked_round(self, places as Int, rounding as Rounding) returns Option[Decimal]
+```
+
+The value rounded to at most places digits after the point, or none for negative places:
+the safe form of round.
+Example:
+
+```unio
+assert from_int(2).checked_round(1, Rounding.HalfEven) == some(from_int(2))
+assert from_int(2).checked_round(-1, Rounding.HalfEven) == none
+```
+
 #### `divide_rounded`
 
 ```unio
@@ -2962,6 +3141,27 @@ Example:
 ```unio
 let third = from_int(1).divide_rounded(from_int(3), 4, Rounding.HalfEven)
 assert "{third}" == "0.3333"
+```
+
+#### `checked_divide_rounded`
+
+```unio
+public function checked_divide_rounded(
+    self,
+    other as Decimal,
+    places as Int,
+    rounding as Rounding,
+) returns Option[Decimal]
+```
+
+The quotient rounded to at most places digits after the point, or none for a zero divisor or
+negative places: the safe form of divide_rounded.
+Example:
+
+```unio
+let third = from_int(1).checked_divide_rounded(from_int(3), 2, Rounding.HalfEven)
+assert "{third or from_int(0)}" == "0.33"
+assert from_int(1).checked_divide_rounded(from_int(0), 2, Rounding.HalfEven) == none
 ```
 
 #### `checked_divide`
@@ -3024,6 +3224,21 @@ let price = try parse("19.9") on DecimalError as e:
     assert_fail(e.message)
 assert price.to_fixed(2, Rounding.HalfEven) == "19.90"
 assert from_int(-1).divide_rounded(from_int(3), 4, Rounding.HalfEven).to_fixed(2, Rounding.HalfEven) == "-0.33"
+```
+
+#### `checked_to_fixed`
+
+```unio
+public function checked_to_fixed(self, places as Int, rounding as Rounding) returns Option[Text]
+```
+
+The text with exactly places digits after the point, or none for negative places: the safe
+form of to_fixed.
+Example:
+
+```unio
+assert from_int(7).checked_to_fixed(1, Rounding.HalfEven) == some("7.0")
+assert from_int(7).checked_to_fixed(-1, Rounding.HalfEven) == none
 ```
 
 ### `Decimal` implements `Add`
@@ -4442,6 +4657,19 @@ Example:
 assert clamp(15, 0, 10) == 10 and clamp("b", "a", "c") == "b"
 ```
 
+### `checked_clamp`
+
+```unio
+public function checked_clamp[T with Order](value as T, low as T, high as T) returns Option[T]
+```
+
+The value limited to low..high, or none when low is greater than high: the safe form of clamp.
+Example:
+
+```unio
+assert checked_clamp(15, 0, 10) == some(10) and checked_clamp(1, 10, 0) == none
+```
+
 ### `gcd`
 
 ```unio
@@ -4454,6 +4682,20 @@ Example:
 
 ```unio
 assert gcd(12, -18) == 6
+```
+
+### `checked_gcd`
+
+```unio
+public function checked_gcd(a as Int, b as Int) returns Option[Int]
+```
+
+The greatest common divisor, or none when it is 2^63, which does not fit in Int: the safe form
+of gcd.
+Example:
+
+```unio
+assert checked_gcd(12, -18) == some(6) and checked_gcd(MINIMUM_INT, 0) == none
 ```
 
 ### `lcm`
@@ -4495,6 +4737,19 @@ Example:
 assert integer_sqrt(17) == 4 and integer_sqrt(MAXIMUM_INT) == 3037000499
 ```
 
+### `checked_integer_sqrt`
+
+```unio
+public function checked_integer_sqrt(n as Int) returns Option[Int]
+```
+
+The integer square root, or none for a negative n: the safe form of integer_sqrt.
+Example:
+
+```unio
+assert checked_integer_sqrt(17) == some(4) and checked_integer_sqrt(-1) == none
+```
+
 ### `floor_divide`
 
 ```unio
@@ -4509,6 +4764,20 @@ Example:
 assert floor_divide(-7, 2) == -4 and -7 / 2 == -3
 ```
 
+### `checked_floor_divide`
+
+```unio
+public function checked_floor_divide(a as Int, b as Int) returns Option[Int]
+```
+
+The quotient rounded toward negative infinity, or none for a zero divisor and for
+MINIMUM_INT divided by -1: the safe form of floor_divide.
+Example:
+
+```unio
+assert checked_floor_divide(-7, 2) == some(-4) and checked_floor_divide(1, 0) == none
+```
+
 ### `modulo`
 
 ```unio
@@ -4521,6 +4790,19 @@ Example:
 
 ```unio
 assert modulo(-7, 3) == 2 and -7 % 3 == -1
+```
+
+### `checked_modulo`
+
+```unio
+public function checked_modulo(a as Int, b as Int) returns Option[Int]
+```
+
+The remainder of floor_divide, or none for a zero divisor: the safe form of modulo.
+Example:
+
+```unio
+assert checked_modulo(-7, 3) == some(2) and checked_modulo(7, 0) == none
 ```
 
 ## `std.path`
@@ -4794,6 +5076,22 @@ var generator = from_entropy()
 assert generator.next_float() < 1.0
 ```
 
+### `checked_from_entropy`
+
+```unio
+public function checked_from_entropy() returns Generator fails with RandomError
+```
+
+A generator seeded from the random source of the operating system, or RandomError when the
+system cannot give randomness: the safe form of from_entropy. It has the effect random.
+Example:
+
+```unio
+var generator = try checked_from_entropy() on RandomError as e:
+    assert_fail(e.reason)
+assert generator.next_float() < 1.0
+```
+
 ### `RandomError`
 
 ```unio
@@ -4820,6 +5118,22 @@ let key = try secure_bytes(32) on RandomError as e:
 assert key.length() == 32
 ```
 
+### `checked_secure_bytes`
+
+```unio
+public function checked_secure_bytes(count as Int) returns Option[Bytes] fails with RandomError
+```
+
+count bytes as secure_bytes gives them, or none for a count below 0 or above 1048576: the safe
+form of secure_bytes. It has the effect random.
+Example:
+
+```unio
+let none_for_negative = try checked_secure_bytes(-1) on RandomError as e:
+    assert_fail(e.reason)
+assert none_for_negative == none
+```
+
 ### `secure_int`
 
 ```unio
@@ -4835,6 +5149,22 @@ Example:
 let code = try secure_int(0, 1000000) on RandomError as e:
     assert_fail(e.reason)
 assert code >= 0 and code < 1000000
+```
+
+### `checked_secure_int`
+
+```unio
+public function checked_secure_int(low as Int, high as Int) returns Option[Int] fails with RandomError
+```
+
+An Int as secure_int gives it, or none when low >= high: the safe form of secure_int. It has the
+effect random.
+Example:
+
+```unio
+let empty = try checked_secure_int(5, 5) on RandomError as e:
+    assert_fail(e.reason)
+assert empty == none
 ```
 
 ### Methods of `Generator`
@@ -4856,6 +5186,21 @@ Example:
 var generator = seeded(7)
 let die = generator.next_int(1, 7)
 assert die >= 1 and die <= 6
+```
+
+#### `checked_next_int`
+
+```unio
+public function checked_next_int(var self, low as Int, high as Int) returns Option[Int]
+```
+
+An Int in low..high as next_int gives it, or none when low >= high: the safe form of
+next_int.
+Example:
+
+```unio
+var generator = seeded(7)
+assert generator.checked_next_int(3, 4) == some(3) and generator.checked_next_int(4, 4) == none
 ```
 
 #### `next_float`
@@ -5021,6 +5366,20 @@ Example:
 
 ```unio
 assert split("a..b", ".") == ["a", "", "b"]
+```
+
+### `checked_split`
+
+```unio
+public function checked_split(text as Text, separator as Text) returns Option[List[Text]]
+```
+
+The text cut at every occurrence of the separator, or none for an empty separator: the safe
+form of split.
+Example:
+
+```unio
+assert checked_split("a.b", ".") == some(["a", "b"]) and checked_split("a", "") == none
 ```
 
 ### `from_code_point`
@@ -5206,7 +5565,7 @@ assert microseconds(2).total_nanoseconds() == 2000
 public function milliseconds(n as Int) returns Duration
 ```
 
-A duration of n milliseconds.
+A duration of n milliseconds; one that does not fit in Int nanoseconds is a fault.
 Example:
 
 ```unio
@@ -5219,7 +5578,7 @@ assert milliseconds(1500) == seconds(1) + milliseconds(500)
 public function seconds(n as Int) returns Duration
 ```
 
-A duration of n seconds.
+A duration of n seconds; one that does not fit in Int nanoseconds is a fault.
 Example:
 
 ```unio
@@ -5232,7 +5591,7 @@ assert seconds(90) == minutes(1) + seconds(30)
 public function minutes(n as Int) returns Duration
 ```
 
-A duration of n minutes.
+A duration of n minutes; one that does not fit in Int nanoseconds is a fault.
 Example:
 
 ```unio
@@ -5245,7 +5604,7 @@ assert minutes(60) == hours(1)
 public function hours(n as Int) returns Duration
 ```
 
-A duration of n hours.
+A duration of n hours; one that does not fit in Int nanoseconds is a fault.
 Example:
 
 ```unio
@@ -5308,6 +5667,49 @@ Example:
 
 ```unio
 assert milliseconds(250).as_seconds() == 0.25
+```
+
+#### `checked_times`
+
+```unio
+public function checked_times(self, count as Int) returns Option[Duration]
+```
+
+The duration count times as long, or none when it does not fit in Int nanoseconds: the safe
+form of microseconds, milliseconds, seconds, minutes and hours, as seconds(1).checked_times(n).
+Example:
+
+```unio
+assert seconds(1).checked_times(90) == some(minutes(1) + seconds(30))
+assert hours(1).checked_times(MAXIMUM_INT) == none
+```
+
+#### `checked_add`
+
+```unio
+public function checked_add(self, other as Duration) returns Option[Duration]
+```
+
+The sum, or none when it does not fit: the safe form of +.
+Example:
+
+```unio
+assert seconds(1).checked_add(seconds(2)) == some(seconds(3))
+assert nanoseconds(MAXIMUM_INT).checked_add(nanoseconds(1)) == none
+```
+
+#### `checked_subtract`
+
+```unio
+public function checked_subtract(self, other as Duration) returns Option[Duration]
+```
+
+The difference, or none when it does not fit: the safe form of -.
+Example:
+
+```unio
+assert seconds(1).checked_subtract(seconds(3)) == some(seconds(-2))
+assert nanoseconds(MINIMUM_INT).checked_subtract(nanoseconds(1)) == none
 ```
 
 #### `is_negative`
@@ -5401,11 +5803,27 @@ extend Instant
 public function since(self, earlier as Instant) returns Duration
 ```
 
-The time from earlier to this reading; negative when earlier is later.
+The time from earlier to this reading; negative when earlier is later, and a fault when it
+does not fit in Int nanoseconds.
 Example:
 
 ```unio
 assert monotonic().since(monotonic()) <= seconds(0)
+```
+
+#### `checked_since`
+
+```unio
+public function checked_since(self, earlier as Instant) returns Option[Duration]
+```
+
+The time from earlier to this reading, or none when it does not fit: the safe form of since.
+Example:
+
+```unio
+let start = monotonic()
+assert start.checked_since(start) == some(seconds(0))
+assert Instant(nanos = MINIMUM_INT).checked_since(Instant(nanos = 1)) == none
 ```
 
 #### `plus`
@@ -5414,12 +5832,27 @@ assert monotonic().since(monotonic()) <= seconds(0)
 public function plus(self, duration as Duration) returns Instant
 ```
 
-The reading the duration after this one.
+The reading the duration after this one; a fault when it does not fit in Int nanoseconds.
 Example:
 
 ```unio
 let start = monotonic()
 assert start.plus(seconds(1)) > start
+```
+
+#### `checked_plus`
+
+```unio
+public function checked_plus(self, duration as Duration) returns Option[Instant]
+```
+
+The reading the duration after this one, or none when it does not fit: the safe form of plus.
+Example:
+
+```unio
+let start = monotonic()
+assert start.checked_plus(seconds(1)) == some(start.plus(seconds(1)))
+assert Instant(nanos = 1).checked_plus(nanoseconds(MAXIMUM_INT)) == none
 ```
 
 ### `Instant` implements `Order`
@@ -5472,11 +5905,27 @@ assert from_unix_nanoseconds(-1).unix_seconds() == -1
 public function since(self, earlier as Timestamp) returns Duration
 ```
 
-The time from earlier to this timestamp; negative when earlier is later.
+The time from earlier to this timestamp; negative when earlier is later, and a fault when it
+does not fit in Int nanoseconds.
 Example:
 
 ```unio
 assert from_unix_seconds(60).since(from_unix_seconds(0)) == minutes(1)
+```
+
+#### `checked_since`
+
+```unio
+public function checked_since(self, earlier as Timestamp) returns Option[Duration]
+```
+
+The time from earlier to this timestamp, or none when it does not fit: the safe form of
+since.
+Example:
+
+```unio
+assert from_unix_seconds(60).checked_since(from_unix_seconds(0)) == some(minutes(1))
+assert from_unix_nanoseconds(MINIMUM_INT).checked_since(from_unix_seconds(1)) == none
 ```
 
 #### `plus`
@@ -5485,11 +5934,27 @@ assert from_unix_seconds(60).since(from_unix_seconds(0)) == minutes(1)
 public function plus(self, duration as Duration) returns Timestamp
 ```
 
-The timestamp the duration after this one; a negative duration goes back.
+The timestamp the duration after this one; a negative duration goes back. A result outside
+the years 1677 to 2262 is a fault.
 Example:
 
 ```unio
 assert from_unix_seconds(0).plus(hours(1)).unix_seconds() == 3600
+```
+
+#### `checked_plus`
+
+```unio
+public function checked_plus(self, duration as Duration) returns Option[Timestamp]
+```
+
+The timestamp the duration after this one, or none outside the years 1677 to 2262: the safe
+form of plus.
+Example:
+
+```unio
+assert from_unix_seconds(0).checked_plus(hours(1)) == some(from_unix_seconds(3600))
+assert from_unix_nanoseconds(MAXIMUM_INT).checked_plus(nanoseconds(1)) == none
 ```
 
 #### `to_utc`
@@ -5550,7 +6015,8 @@ RFC 3339 in UTC with the fraction that is needed: "2026-11-12T08:30:00Z",
 public function from_unix_seconds(n as Int) returns Timestamp
 ```
 
-The timestamp n seconds after 1970-01-01T00:00:00Z.
+The timestamp n seconds after 1970-01-01T00:00:00Z; outside the years 1677 to 2262 a fault. Its
+safe form is seconds(1).checked_times(n) with from_unix_nanoseconds.
 Example:
 
 ```unio
@@ -5709,6 +6175,22 @@ var clock = manual_clock(from_unix_seconds(0))
 let start = clock.monotonic()
 clock.advance(minutes(1))
 assert clock.monotonic().since(start) == minutes(1)
+```
+
+#### `checked_advance`
+
+```unio
+public function checked_advance(var self, duration as Duration) returns Option[Timestamp]
+```
+
+Moves both times forward by the duration as advance does and returns the new wall time, or
+none for a negative duration, which leaves the clock as it was: the safe form of advance.
+Example:
+
+```unio
+var clock = manual_clock(from_unix_seconds(0))
+assert clock.checked_advance(seconds(-1)) == none
+assert clock.checked_advance(seconds(5)) == some(from_unix_seconds(5))
 ```
 
 #### `set`

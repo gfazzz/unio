@@ -24,7 +24,29 @@ pub fn identity() -> Result<String, String> {
     let Some(target) = Target::host() else {
         return Err(super::unsupported());
     };
+    identity_for(target)
+}
+
+/// The identity of the toolchain that `unio build --target` links with for `target` on this
+/// machine: for the other Linux target, the cross C compiler of that target
+/// ([`super::linux_compiler_for`]). A pair of machines that cannot be built for stops here
+/// ([`super::cross_problem`]).
+pub fn identity_for(target: Target) -> Result<String, String> {
+    super::cross_problem(target).map_or(Ok(()), Err)?;
     match target {
+        Target::LinuxX86_64 | Target::LinuxAarch64 if Some(target) != Target::host() => {
+            let cc = super::linux_compiler_for(target);
+            let banner = first_line(&cc, &["--version"]).map_err(|e| {
+                format!(
+                    "the C compiler {cc} that links executables for {} cannot be run ({e}); install a cross C compiler for {} with its linker and C library (on Debian and Ubuntu the package {}), or name one in {}; unio does not install it",
+                    target.name(),
+                    target.rust_triple(),
+                    super::cross_package(target),
+                    super::cross_compiler_variable(target)
+                )
+            })?;
+            Ok(linux(target, &cc, &banner))
+        }
         Target::LinuxX86_64 | Target::LinuxAarch64 => {
             let cc = super::linux_compiler();
             let banner = first_line(&cc, &["--version"]).map_err(|e| {

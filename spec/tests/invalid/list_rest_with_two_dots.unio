@@ -1,0 +1,5 @@
+# expect-error: 4
+function f(items as List[Int]) returns Int:
+    match items:
+        case [first, rest..]: return first
+        case _: return 0

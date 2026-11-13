@@ -21,6 +21,14 @@ public external function join(parts as List[Text], separator as Text) returns Te
 ##     assert split("a..b", ".") == ["a", "", "b"]
 public external function split(text as Text, separator as Text) returns List[Text]
 
+## The text cut at every occurrence of the separator, or none for an empty separator: the safe
+## form of split.
+## Example:
+##     assert checked_split("a.b", ".") == some(["a", "b"]) and checked_split("a", "") == none
+public function checked_split(text as Text, separator as Text) returns Option[List[Text]]:
+    if separator.is_empty(): return none
+    return some(split(text, separator))
+
 ## The character with the code point; none for a surrogate or a value above 0x10FFFF.
 ## Example:
 ##     assert from_code_point(0x41) == some("A") and from_code_point(0xD800) == none

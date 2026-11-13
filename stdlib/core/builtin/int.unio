@@ -34,6 +34,14 @@ extend Int:
         if other == 0 or (self == MINIMUM_INT and other == -1): return none
         return some(self / other)
 
+    ## The remainder of the division truncated toward zero, with the sign of self, or none when
+    ## other is 0: the safe form of %.
+    ## Example:
+    ##     assert (-7).checked_remainder(2) == some(-1) and 7.checked_remainder(0) == none
+    public function checked_remainder(self, other as Int) returns Option[Int]:
+        if other == 0: return none
+        return some(self % other)
+
     ## The nearest Float (round to nearest, ties to even).
     ## Example:
     ##     assert 3.to_float() == 3.0

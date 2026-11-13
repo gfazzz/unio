@@ -1,0 +1,24 @@
+## Shapes with an area and a name.
+
+public interface Shape:
+    function area(self) returns Int
+    function name(self) returns Text:
+        return "shape"
+
+## A square with a side of a whole number of units.
+public struct Square:
+    side as Int
+
+extend Square with Shape:
+    function area(self) returns Int:
+        return self.side * self.side
+
+## The sum of the areas.
+public function total_area(squares as List[Square]) returns Int:
+    var sum = 0
+    for square in squares:
+        sum = sum + square.area()
+    return sum
+
+test "two squares":
+    assert total_area([Square(side = 2), Square(side = 3)]) == 13

@@ -1390,7 +1390,7 @@ fn watchdog(limits: &Limits, stop: Arc<AtomicBool>) {
 
 /// The CPU time this process has used.
 #[cfg(unix)]
-fn process_cpu_time() -> Duration {
+pub(crate) fn process_cpu_time() -> Duration {
     #[repr(C)]
     struct Timespec {
         tv_sec: i64,
@@ -1418,7 +1418,7 @@ fn process_cpu_time() -> Duration {
 }
 
 #[cfg(windows)]
-fn process_cpu_time() -> Duration {
+pub(crate) fn process_cpu_time() -> Duration {
     #[repr(C)]
     #[derive(Default)]
     struct FileTime {
@@ -1451,7 +1451,7 @@ fn process_cpu_time() -> Duration {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_cpu_time() -> Duration {
+pub(crate) fn process_cpu_time() -> Duration {
     Duration::ZERO
 }
 

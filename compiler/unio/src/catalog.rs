@@ -648,12 +648,15 @@ fn sample_manifest_mistakes() -> Vec<crate::package::manifest::Mistake> {
         M::Variable("HOME=/root".into()),
         M::Network,
         M::UnknownPermission("permissions.net".into()),
+        M::UnioVersion("'one' is not a version number".into()),
+        M::Target("x86_64-unknown-linux-musl".into()),
     ];
     for of in [
         ListOf::Paths,
         ListOf::Variables,
         ListOf::Programs,
         ListOf::Modules,
+        ListOf::Targets,
     ] {
         all.push(M::NotList("permissions.files.write".into(), of));
     }
@@ -1069,8 +1072,8 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "function poke(address as Int) returns Int:\n    return address\n",
         ),
         "E0088" => (
-            "The manifest `unio.toml` of the package is checked as a whole (T-6), by `unio check` as by `unio run` and `unio test`. `[package]` has `name` (lowercase letters, digits, `-` and `_`, starting with a letter), `version` (a semantic version) and `unsafe_modules` (a list of module names). In `[permissions]`, `files.read` and `files.write` are lists of paths, which may start with `$HOME`, `$CWD` or `$TEMP` and end with `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. Each entry of `[dependencies]` is a table with exactly one source: `path`, `registry` with `package`, or `archive` with `sha384`. The error is at the line of the mistake; correct the value there.",
-            "Манифест `unio.toml` пакета проверяется целиком (И-6), командой `unio check` так же, как `unio run` и `unio test`. В `[package]` есть `name` (строчные буквы, цифры, `-` и `_`, начиная с буквы), `version` (семантическая версия) и `unsafe_modules` (список имён модулей). В `[permissions]` `files.read` и `files.write` — списки путей, которые могут начинаться с `$HOME`, `$CWD` или `$TEMP` и заканчиваться на `/**` для поддерева; `env` — список имён переменных; `process` — список программ; `network` в 0.1 равно `false`. Каждая запись `[dependencies]` — таблица ровно с одним источником: `path`, `registry` с `package` или `archive` с `sha384`. Ошибка указана в строке ошибки; исправьте значение там.",
+            "The manifest `unio.toml` of the package is checked as a whole (T-6), by `unio check` as by `unio run` and `unio test`. `[package]` has `name` (lowercase letters, digits, `-` and `_`, starting with a letter), `version` (a semantic version), `unsafe_modules` (a list of module names), `unio_version` (a version requirement on the Unio toolchain) and `targets` (a list of target triples, such as `x86_64-unknown-linux-gnu`), which `unio add` and `unio install` check against this toolchain and machine (T-14). In `[permissions]`, `files.read` and `files.write` are lists of paths, which may start with `$HOME`, `$CWD` or `$TEMP` and end with `/**` for a subtree; `env` is a list of variable names; `process` is a list of programs; `network` is `false` in 0.1. Each entry of `[dependencies]` is a table with exactly one source: `path`, `registry` with `package`, or `archive` with `sha384`. The error is at the line of the mistake; correct the value there.",
+            "Манифест `unio.toml` пакета проверяется целиком (И-6), командой `unio check` так же, как `unio run` и `unio test`. В `[package]` есть `name` (строчные буквы, цифры, `-` и `_`, начиная с буквы), `version` (семантическая версия), `unsafe_modules` (список имён модулей), `unio_version` (требование к версии инструментария Unio) и `targets` (список целевых триплетов, например `x86_64-unknown-linux-gnu`), которые `unio add` и `unio install` сверяют с этим инструментарием и машиной (И-14). В `[permissions]` `files.read` и `files.write` — списки путей, которые могут начинаться с `$HOME`, `$CWD` или `$TEMP` и заканчиваться на `/**` для поддерева; `env` — список имён переменных; `process` — список программ; `network` в 0.1 равно `false`. Каждая запись `[dependencies]` — таблица ровно с одним источником: `path`, `registry` с `package` или `archive` с `sha384`. Ошибка указана в строке ошибки; исправьте значение там.",
             "[package]\nname = \"report\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = true\n",
             "[package]\nname = \"report\"\nversion = \"0.1.0\"\n\n[permissions]\nfiles.read = [\"$CWD/**\"]\n",
         ),
@@ -1082,6 +1085,173 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
         ),
         _ => return None,
     })
+}
+
+// ---------------------------------------------------------------- related locations (C-8)
+
+/// The earlier declaration of a name declared twice.
+pub fn first_declared_here(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is first declared here"),
+        format!("'{name}' впервые объявлено здесь"),
+    )
+}
+
+/// The declaration of a name the diagnostic is about.
+pub fn declared_here(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is declared here"),
+        format!("'{name}' объявлено здесь"),
+    )
+}
+
+/// The declaration of a type of a mismatch, a field, a variant or a method.
+pub fn type_declared_here(name: &str) -> Msg {
+    Msg::new(
+        format!("the type '{name}' is declared here"),
+        format!("тип '{name}' объявлен здесь"),
+    )
+}
+
+/// The declaration of a function whose parameters a call does not match.
+pub fn parameters_here(name: &str) -> Msg {
+    Msg::new(
+        format!("the parameters of '{name}' are declared here"),
+        format!("параметры '{name}' объявлены здесь"),
+    )
+}
+
+/// The declaration of a function that may fail.
+pub fn fails_with_here(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' lists the errors it may fail with here"),
+        format!("'{name}' перечисляет здесь ошибки, с которыми может завершиться"),
+    )
+}
+
+/// The function whose `fails with` list an unhandled error may be added to.
+pub fn enclosing_function_here(name: &str) -> Msg {
+    Msg::new(
+        format!("the error may be added to the 'fails with' list of '{name}' here"),
+        format!("ошибку можно добавить в список 'fails with' функции '{name}' здесь"),
+    )
+}
+
+/// A handler of an enclosing `try:` block that does not receive the error.
+pub fn handler_here(error: &str) -> Msg {
+    Msg::new(
+        format!("this handler receives '{error}', not the error of the call"),
+        format!("этот обработчик получает '{error}', а не ошибку вызова"),
+    )
+}
+
+/// The head of an inline handler whose block reaches its end.
+pub fn inline_handler_here() -> Msg {
+    Msg::new(
+        "the block belongs to this handler",
+        "блок относится к этому обработчику",
+    )
+}
+
+/// The first of two of a kind: an argument, a handler, a rest element, an implementation.
+pub fn first_one_here() -> Msg {
+    Msg::new("the first one is here", "первый находится здесь")
+}
+
+/// The first named argument, before which a positional one belongs.
+pub fn first_named_argument_here() -> Msg {
+    Msg::new(
+        "the first named argument is here",
+        "первый именованный аргумент находится здесь",
+    )
+}
+
+/// The opening bracket of an unclosed or mismatched pair.
+pub fn opened_here(bracket: &str) -> Msg {
+    Msg::new(
+        format!("'{bracket}' is opened here"),
+        format!("'{bracket}' открыта здесь"),
+    )
+}
+
+/// The binding of a local name.
+pub fn bound_here(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is bound here"),
+        format!("'{name}' связано здесь"),
+    )
+}
+
+/// The `using` that opens a resource.
+pub fn opened_by_using(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is opened by this 'using'"),
+        format!("'{name}' открыт этим 'using'"),
+    )
+}
+
+/// The method of an interface that an implementation lacks or changes.
+pub fn interface_method_here(name: &str) -> Msg {
+    Msg::new(
+        format!("the interface declares '{name}' here"),
+        format!("интерфейс объявляет '{name}' здесь"),
+    )
+}
+
+/// The import of the other module of a cycle.
+pub fn cycle_continues_here(module: &str) -> Msg {
+    Msg::new(
+        format!("'{module}' continues the cycle here"),
+        format!("'{module}' продолжает цикл здесь"),
+    )
+}
+
+/// The `[permissions]` table of the manifest, which lacks a permission.
+pub fn permissions_here() -> Msg {
+    Msg::new(
+        "the permissions of the package are listed here",
+        "полномочия пакета перечислены здесь",
+    )
+}
+
+/// A manifest without a `[permissions]` table.
+pub fn manifest_without_permissions() -> Msg {
+    Msg::new(
+        "the manifest of the package has no [permissions] table",
+        "в манифесте пакета нет таблицы [permissions]",
+    )
+}
+
+/// The `[dependencies]` table of the manifest, which lacks an alias.
+pub fn dependencies_here() -> Msg {
+    Msg::new(
+        "the dependencies of the package are listed here",
+        "зависимости пакета перечислены здесь",
+    )
+}
+
+/// The table of a manifest that holds the key of a mistake.
+pub fn table_here(table: &str) -> Msg {
+    Msg::new(
+        format!("the key belongs to the table [{table}] here"),
+        format!("ключ относится к таблице [{table}] здесь"),
+    )
+}
+
+/// The marker of a module that `package.unsafe_modules` does not list.
+pub fn marked_here(module: &str) -> Msg {
+    Msg::new(
+        format!("'{module}' is marked 'unsafe module' here"),
+        format!("'{module}' помечен 'unsafe module' здесь"),
+    )
+}
+
+/// The function of a higher layer that a lower one reaches.
+pub fn layer_function_here(name: &str) -> Msg {
+    Msg::new(
+        format!("'{name}' is declared here, in a higher layer"),
+        format!("'{name}' объявлена здесь, в более высоком слое"),
+    )
 }
 
 pub fn duplicate(name: &str) -> Msg {
@@ -1790,8 +1960,8 @@ pub fn manifest_mistake(mistake: &crate::package::manifest::Mistake) -> Msg {
             format!("в unio.toml нет таблицы [{name}]; используйте [package], [dependencies] и [permissions]"),
         ),
         M::UnknownKey(key) => Msg::new(
-            format!("unknown key {key} in unio.toml; [package] has name, version and unsafe_modules"),
-            format!("неизвестный ключ {key} в unio.toml; в [package] есть name, version и unsafe_modules"),
+            format!("unknown key {key} in unio.toml; [package] has name, version, unsafe_modules, unio_version and targets"),
+            format!("неизвестный ключ {key} в unio.toml; в [package] есть name, version, unsafe_modules, unio_version и targets"),
         ),
         M::NotText(key) => Msg::new(
             format!("{key} must be a text in double quotes"),
@@ -1811,6 +1981,7 @@ pub fn manifest_mistake(mistake: &crate::package::manifest::Mistake) -> Msg {
                 ListOf::Variables => ("variable names", "имён переменных", "[\"HOME\"]"),
                 ListOf::Programs => ("programs", "программ", "[\"git\"]"),
                 ListOf::Modules => ("module names", "имён модулей", "[\"raw\"]"),
+                ListOf::Targets => ("targets", "целевых платформ", "[\"x86_64-unknown-linux-gnu\"]"),
             };
             Msg::new(
                 format!("{key} must be a list of {en}, for example {example}"),
@@ -1851,6 +2022,17 @@ pub fn manifest_mistake(mistake: &crate::package::manifest::Mistake) -> Msg {
             format!("unknown permission {key}; use files.read, files.write, env, process or network"),
             format!("неизвестное полномочие {key}; используйте files.read, files.write, env, process или network"),
         ),
+        M::UnioVersion(problem) => Msg::new(
+            format!("package.unio_version is not a version requirement: {problem}"),
+            format!("package.unio_version не является требованием к версии: {problem}"),
+        ),
+        M::Target(name) => {
+            let targets = crate::package::manifest::TARGETS.join(", ");
+            Msg::new(
+                format!("'{name}' in package.targets is not a target; use {targets}"),
+                format!("'{name}' в package.targets не является целевой платформой; используйте {targets}"),
+            )
+        }
         M::Dependency(alias, mistake) => match mistake {
             D::NotTable => Msg::new(
                 format!("the dependency '{alias}' must be a table, for example {alias} = {{ path = \"../{alias}\" }}"),

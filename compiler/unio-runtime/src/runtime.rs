@@ -221,6 +221,10 @@ impl Runtime {
         if self.deferred && crate::heap::exhausted() {
             return Err(Unwind::Exhausted(Exhaustion::Heap));
         }
+        // So does the time limit of a test (T-12, crate::deadline).
+        if crate::deadline::time_up() {
+            return Err(Unwind::Exhausted(Exhaustion::Time));
+        }
         if self.depth == self.frames.len() {
             self.frames.push((site, line));
         } else {
@@ -287,6 +291,11 @@ impl Runtime {
     pub fn defer_refusals(&mut self) {
         self.meter.defer();
         self.deferred = true;
+    }
+
+    /// How much a deferred refusal may grant above the limit ([`crate::heap::Meter::set_overdraft`]).
+    pub fn set_heap_overdraft(&mut self, bytes: usize) {
+        self.meter.set_overdraft(bytes);
     }
 
     /// The heap limit of the policy in bytes (SB-3); `None` leaves the system to decide.

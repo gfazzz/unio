@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast;
 use crate::catalog;
-use crate::diag::{Diagnostic, Span};
+use crate::diag::{Diagnostic, Related, Span};
 use crate::types::{DefId, FnTy, ParamId, Prim, Ty};
 use crate::Analysis;
 
@@ -327,8 +327,17 @@ fn manifest_covers_dependency(package: &Path, alias: &str) -> bool {
         })
 }
 
+/// The node of `unio symbol` that a symbol of a module is.
+pub fn symbol_node(symbol: Symbol) -> crate::symbol::Node {
+    match symbol {
+        Symbol::Func(f) => crate::symbol::Node::Func(f),
+        Symbol::Def(d) => crate::symbol::Node::Def(d),
+        Symbol::Const(c) => crate::symbol::Node::Const(c),
+    }
+}
+
 /// The span of the text of a line, from 1, of a manifest.
-fn line_span(source: &str, line: usize) -> Span {
+pub fn line_span(source: &str, line: usize) -> Span {
     let begin = match line {
         0 | 1 => 0,
         _ => source
@@ -350,14 +359,49 @@ fn line_span(source: &str, line: usize) -> Span {
 }
 
 /// The E0088 diagnostics of the text of a manifest (T-6), each over the text of its line.
+/// A key in a table has the header of the table as related location (C-8).
 pub fn manifest_diagnostics(source: &str) -> Vec<Diagnostic> {
     crate::package::manifest::check(source)
         .into_iter()
         .map(|(line, mistake)| {
             let span = line_span(source, line);
-            Diagnostic::error("E0088", span, catalog::manifest_mistake(&mistake))
+            let mut d = Diagnostic::error("E0088", span, catalog::manifest_mistake(&mistake));
+            if let Some((header, table)) = table_of_line(source, line) {
+                if header != line {
+                    let at = line_span(source, header);
+                    d = d.with_related(Related::here(at, catalog::table_here(&table)));
+                }
+            }
+            d
         })
         .collect()
+}
+
+/// The line, from 1, and the name of the nearest table header `[name]` at or above a line of
+/// a manifest.
+fn table_of_line(source: &str, line: usize) -> Option<(usize, String)> {
+    source
+        .lines()
+        .take(line)
+        .enumerate()
+        .filter_map(|(i, text)| {
+            let name = text.trim().strip_prefix('[')?.split(']').next()?.trim();
+            (!name.is_empty() && !name.starts_with('[')).then(|| (i + 1, name.to_string()))
+        })
+        .last()
+}
+
+/// The line, from 1, of the header of a table of a manifest, as `[permissions]`.
+pub fn table_line(source: &str, table: &str) -> Option<usize> {
+    source
+        .lines()
+        .position(|text| {
+            text.trim()
+                .strip_prefix('[')
+                .and_then(|rest| rest.split(']').next())
+                .is_some_and(|name| name.trim() == table)
+        })
+        .map(|i| i + 1)
 }
 
 /// The diagnostics of the manifest of the package in `package`, whose text is `source`: its
@@ -367,11 +411,20 @@ pub fn manifest_diagnostics(source: &str) -> Vec<Diagnostic> {
 pub fn package_manifest_diagnostics(package: &Path, source: &str) -> Vec<Diagnostic> {
     let mut found = manifest_diagnostics(source);
     if let Some((listed, line)) = crate::package::manifest::unsafe_modules(source) {
-        let marked = marked_modules(package);
+        let files = marked_module_files(package);
+        let marked: Vec<String> = files.iter().map(|(name, _, _)| name.clone()).collect();
         let span = line_span(source, line);
-        for module in marked.iter().filter(|m| !listed.contains(m)) {
+        // The marker of a module that is not listed is related (C-8), in a file named
+        // relative to the package; the caller places it beside the manifest.
+        for (module, file, marker) in files.iter().filter(|(m, _, _)| !listed.contains(m)) {
             let message = catalog::unsafe_module_not_listed(module);
-            found.push(Diagnostic::error("E0089", span, message));
+            let related = Related {
+                symbol: Some(module.clone()),
+                message: catalog::marked_here(module),
+                file: Some(file.clone()),
+                span: *marker,
+            };
+            found.push(Diagnostic::error("E0089", span, message).with_related(related));
         }
         let mut seen = Vec::new();
         for module in listed.iter().filter(|m| !marked.contains(m)) {
@@ -391,6 +444,15 @@ pub fn package_manifest_diagnostics(package: &Path, source: &str) -> Vec<Diagnos
 /// (`package::tree`), names that start with a dot and `target/` at the top are left out, and a
 /// link is not followed; a directory with a `unio.toml` of its own is another package.
 pub fn marked_modules(package: &Path) -> Vec<String> {
+    marked_module_files(package)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect()
+}
+
+/// Like marked_modules, with the file of each module relative to the package, its parts
+/// joined by `/`, and the span of the line of its marker.
+fn marked_module_files(package: &Path) -> Vec<(String, String, Span)> {
     let mut marked = Vec::new();
     let mut stack: Vec<(PathBuf, Vec<String>)> = vec![(package.to_path_buf(), Vec::new())];
     while let Some((dir, parts)) = stack.pop() {
@@ -426,13 +488,19 @@ pub fn marked_modules(package: &Path) -> Vec<String> {
                     .file()
                     .unsafe_module
                 {
+                    let mut file = child.clone();
+                    file.push(name.clone());
                     child.push(stem.to_string());
-                    marked.push(child.join("."));
+                    let line = source
+                        .lines()
+                        .position(|l| l.trim_start().starts_with("unsafe module"))
+                        .map_or(1, |i| i + 1);
+                    marked.push((child.join("."), file.join("/"), line_span(&source, line)));
                 }
             }
         }
     }
-    marked.sort();
+    marked.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
     marked
 }
 
@@ -914,6 +982,16 @@ impl Program {
                     given.ancestors().nth(below.components().count())
                 })
                 .map_or(path.clone(), |dir| dir.join("unio.toml"));
+            // A related module is named beside the manifest, as the manifest is named.
+            let mut diagnostics = diagnostics;
+            let beside = shown.parent().map(Path::to_path_buf).unwrap_or_default();
+            for d in &mut diagnostics {
+                for r in &mut d.related {
+                    if let Some(file) = &r.file {
+                        r.file = Some(beside.join(file).to_string_lossy().into_owned());
+                    }
+                }
+            }
             self.manifests.push(Analysis {
                 path: shown.to_string_lossy().into_owned(),
                 source,
@@ -929,6 +1007,147 @@ impl Program {
 
     pub fn error(&mut self, module: ModId, diagnostic: Diagnostic) {
         self.diagnostics.push((module, diagnostic));
+    }
+
+    /// A related location in module `at` for a diagnostic of module `from` (C-8): its file is
+    /// named when it is another module. None in the standard library, which the user does not
+    /// change and `unio symbol` shows.
+    pub fn related_at(
+        &self,
+        from: ModId,
+        at: ModId,
+        span: Span,
+        message: crate::diag::Msg,
+    ) -> Option<crate::diag::Related> {
+        let module = self.modules.get(at)?;
+        if module.stdlib {
+            return None;
+        }
+        Some(crate::diag::Related {
+            symbol: None,
+            message,
+            file: (from != at).then(|| module.analysis.path.clone()),
+            span,
+        })
+    }
+
+    /// The declaration of a function, type or constant as a related location of a diagnostic of
+    /// module `from`, with its full name; None in the standard library.
+    pub fn related_node(
+        &self,
+        from: ModId,
+        node: crate::symbol::Node,
+        message: crate::diag::Msg,
+    ) -> Option<crate::diag::Related> {
+        let (module, span) = match node {
+            crate::symbol::Node::Func(f) => (self.funcs[f].module, self.funcs[f].span),
+            crate::symbol::Node::Def(d) => (self.defs[d].module, self.defs[d].span),
+            crate::symbol::Node::Const(c) => (self.consts[c].module, self.consts[c].span),
+        };
+        let symbol = crate::symbol::node_name(self, node);
+        Some(
+            self.related_at(from, module, span, message)?
+                .with_symbol(symbol),
+        )
+    }
+
+    /// The manifest of the package of a module as a related location (C-8): the header of
+    /// `[table]`, or the first line of a manifest without it; None without a manifest.
+    pub fn manifest_related(&self, module: ModId, table: &str) -> Option<crate::diag::Related> {
+        let m = &self.modules[module];
+        if m.stdlib {
+            return None;
+        }
+        let path = m.package.join("unio.toml");
+        let source = crate::vfs::read_to_string(&path).ok()?;
+        let (line, message) = match table_line(&source, table) {
+            Some(line) if table == "permissions" => (line, catalog::permissions_here()),
+            Some(line) => (line, catalog::dependencies_here()),
+            None if table == "permissions" => (1, catalog::manifest_without_permissions()),
+            None => (1, catalog::dependencies_here()),
+        };
+        Some(crate::diag::Related {
+            symbol: None,
+            message,
+            file: Some(self.shown_manifest(module)),
+            span: line_span(&source, line),
+        })
+    }
+
+    /// The manifest of the package of a module, named as the file of the module was given:
+    /// `unio.toml` beside `main.unio`.
+    pub fn shown_manifest(&self, module: ModId) -> String {
+        let m = &self.modules[module];
+        let path = m.package.join("unio.toml");
+        m.path
+            .parent()
+            .and_then(|dir| dir.strip_prefix(&m.package).ok())
+            .and_then(|below| {
+                let given = Path::new(&m.analysis.path).parent()?;
+                given.ancestors().nth(below.components().count())
+            })
+            .map_or(path, |dir| dir.join("unio.toml"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// What a name taken by a declaration or an earlier import of the module is bound by:
+    /// the declaration, or the import (E0052, C-8).
+    fn first_binding(&self, module: ModId, name: &ast::Name) -> Option<crate::diag::Related> {
+        if let Some(symbol) = self.modules[module].symbols.get(&name.text) {
+            return self.related_node(
+                module,
+                symbol_node(*symbol),
+                catalog::first_declared_here(&name.text),
+            );
+        }
+        self.modules[module]
+            .analysis
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ast::Item::Import(import) => Some(import),
+                _ => None,
+            })
+            .flat_map(|import| {
+                let bound: Vec<&ast::Name> = if import.names.is_empty() {
+                    import
+                        .alias
+                        .as_ref()
+                        .or(import.module.last())
+                        .into_iter()
+                        .collect()
+                } else {
+                    import.names.iter().collect()
+                };
+                bound
+            })
+            .find(|n| n.text == name.text && n.span.start.offset < name.span.start.offset)
+            .and_then(|n| {
+                self.related_at(
+                    module,
+                    module,
+                    n.span,
+                    catalog::first_declared_here(&name.text),
+                )
+            })
+    }
+
+    /// The declaration of the type a named type is, as a related location (C-8): the struct,
+    /// enum, error or interface the user declared; None for other types.
+    pub fn related_type(&self, from: ModId, ty: &Ty) -> Option<crate::diag::Related> {
+        match ty {
+            Ty::Named(d, _) => {
+                let name = self.defs[*d].name.clone();
+                self.related_node(
+                    from,
+                    crate::symbol::Node::Def(*d),
+                    catalog::type_declared_here(&name),
+                )
+            }
+            _ => None,
+        }
     }
 
     // ------------------------------------------------------------ declarations
@@ -947,10 +1166,16 @@ impl Program {
     }
 
     fn declare(&mut self, module: ModId, name: &ast::Name, symbol: Symbol) {
-        if self.modules[module].symbols.contains_key(&name.text) {
+        if let Some(first) = self.modules[module].symbols.get(&name.text).copied() {
+            let related = self.related_node(
+                module,
+                symbol_node(first),
+                catalog::first_declared_here(&name.text),
+            );
             self.error(
                 module,
-                Diagnostic::error("E0051", name.span, catalog::duplicate(&name.text)),
+                Diagnostic::error("E0051", name.span, catalog::duplicate(&name.text))
+                    .with_all_related(related),
             );
             return;
         }
@@ -1222,7 +1447,11 @@ impl Program {
                     }
                     if path.len() > 1 && path[0] == "deps" {
                         let message = catalog::dependency_missing(&path[1], &problem);
-                        self.error(module, Diagnostic::error("E0048", span, message));
+                        let related = self.manifest_related(module, "dependencies");
+                        self.error(
+                            module,
+                            Diagnostic::error("E0048", span, message).with_all_related(related),
+                        );
                         continue;
                     }
                     let message = catalog::module_not_found(&dotted);
@@ -1263,13 +1492,15 @@ impl Program {
                     let taken = self.modules[module].symbols.contains_key(&name.text)
                         || self.modules[module].imports.contains_key(&name.text);
                     if taken {
+                        let related = self.first_binding(module, &name);
                         self.error(
                             module,
                             Diagnostic::error(
                                 "E0052",
                                 name.span,
                                 catalog::import_collision(&name.text),
-                            ),
+                            )
+                            .with_all_related(related),
                         );
                     } else {
                         self.modules[module]
@@ -1310,13 +1541,27 @@ impl Program {
                         .iter()
                         .map(|m| self.modules[*m].name.clone())
                         .collect();
+                    // The import by which the next module continues the cycle (C-8).
+                    let related = match (chain.get(1), chain.get(2)) {
+                        (Some(&next), Some(&after)) => self.modules[next]
+                            .edges
+                            .iter()
+                            .find(|(m, _)| *m == after)
+                            .and_then(|(_, at)| {
+                                let name = &self.modules[next].name;
+                                let message = catalog::cycle_continues_here(name);
+                                self.related_at(start, next, *at, message)
+                            }),
+                        _ => None,
+                    };
                     self.error(
                         start,
                         Diagnostic::error(
                             "E0058",
                             span,
                             catalog::import_cycle(&names.join(" -> ")),
-                        ),
+                        )
+                        .with_all_related(related),
                     );
                     break;
                 }
@@ -1455,13 +1700,19 @@ impl Program {
         match found {
             Some((owner, Symbol::Def(def))) => {
                 if owner != module && !self.defs[def].public {
+                    let related = self.related_node(
+                        module,
+                        crate::symbol::Node::Def(def),
+                        catalog::declared_here(&self.defs[def].name),
+                    );
                     self.error(
                         module,
                         Diagnostic::error(
                             "E0057",
                             ty.span,
                             catalog::private_used(&names.join(".")),
-                        ),
+                        )
+                        .with_all_related(related),
                     );
                 }
                 if !arity(self, self.defs[def].generics.len()) {
@@ -1469,13 +1720,19 @@ impl Program {
                 }
                 if value {
                     if let Some(method) = self.not_object_safe(def) {
+                        let related = self.related_node(
+                            module,
+                            crate::symbol::Node::Def(def),
+                            catalog::declared_here(&self.defs[def].name),
+                        );
                         self.error(
                             module,
                             Diagnostic::error(
                                 "E0071",
                                 ty.span,
                                 catalog::not_object_safe(&self.defs[def].name, &method),
-                            ),
+                            )
+                            .with_all_related(related),
                         );
                     }
                 }
@@ -1624,15 +1881,24 @@ impl Program {
         always_public: bool,
     ) -> Vec<FieldDef> {
         let mut result = Vec::new();
-        for field in fields.iter().flatten() {
+        for (i, field) in fields.iter().flatten().enumerate() {
             if result.iter().any(|f: &FieldDef| f.name == field.name.text) {
+                let first = fields
+                    .iter()
+                    .flatten()
+                    .take(i)
+                    .find(|f| f.name.text == field.name.text)
+                    .map(|f| {
+                        Related::here(f.name.span, catalog::first_declared_here(&f.name.text))
+                    });
                 self.error(
                     module,
                     Diagnostic::error(
                         "E0051",
                         field.name.span,
                         catalog::duplicate(&field.name.text),
-                    ),
+                    )
+                    .with_all_related(first),
                 );
             }
             let ty = self.resolve_type(module, &field.ty, scope, true);
@@ -1689,10 +1955,12 @@ impl Program {
                     Diagnostic::error("E0041", name.span, catalog::parameter_grouping()),
                 );
             }
-            if params.iter().any(|p: &ParamDef| p.name == name.text) {
+            if let Some(first) = params.iter().find(|p: &&ParamDef| p.name == name.text) {
+                let related = Related::here(first.span, catalog::first_declared_here(&name.text));
                 self.error(
                     module,
-                    Diagnostic::error("E0055", name.span, catalog::local_repeats(&name.text)),
+                    Diagnostic::error("E0055", name.span, catalog::local_repeats(&name.text))
+                        .with_related(related),
                 );
             }
             let ty = self.resolve_type(module, ty, &scope, true);
@@ -1788,15 +2056,25 @@ impl Program {
                             let scope =
                                 self.generic_scope(module, &generics, &e.generics, &HashMap::new());
                             let mut variants: Vec<VariantDef> = Vec::new();
-                            for v in &e.variants {
+                            for (i, v) in e.variants.iter().enumerate() {
                                 if variants.iter().any(|x| x.name == v.name.text) {
+                                    let first = e.variants[..i]
+                                        .iter()
+                                        .find(|x| x.name.text == v.name.text)
+                                        .map(|x| {
+                                            Related::here(
+                                                x.name.span,
+                                                catalog::first_declared_here(&x.name.text),
+                                            )
+                                        });
                                     self.error(
                                         module,
                                         Diagnostic::error(
                                             "E0051",
                                             v.name.span,
                                             catalog::duplicate(&v.name.text),
-                                        ),
+                                        )
+                                        .with_all_related(first),
                                     );
                                 }
                                 let fields = v
@@ -1905,11 +2183,17 @@ impl Program {
                 None => {
                     for f in self.impls[impl_id].methods.clone() {
                         let name = self.funcs[f].name.clone();
-                        if seen.insert((key.clone(), name.clone()), f).is_some() {
+                        if let Some(first) = seen.insert((key.clone(), name.clone()), f) {
                             let span = self.funcs[f].span;
+                            let related = self.related_node(
+                                module,
+                                crate::symbol::Node::Func(first),
+                                catalog::first_declared_here(&name),
+                            );
                             self.error(
                                 module,
-                                Diagnostic::error("E0051", span, catalog::duplicate(&name)),
+                                Diagnostic::error("E0051", span, catalog::duplicate(&name))
+                                    .with_all_related(related),
                             );
                         }
                     }
@@ -1918,27 +2202,44 @@ impl Program {
                     let span = self.impls[impl_id].span;
                     let iface_name = self.defs[iface].name.clone();
                     let type_name = self.show(&target);
-                    if implemented.insert((key.clone(), iface), impl_id).is_some() {
+                    if let Some(first) = implemented.insert((key.clone(), iface), impl_id) {
+                        let at = self.impls[first].module;
+                        let related = self.related_at(
+                            module,
+                            at,
+                            self.impls[first].span,
+                            catalog::first_one_here(),
+                        );
                         self.error(
                             module,
                             Diagnostic::error(
                                 "E0044",
                                 span,
                                 catalog::second_implementation(&iface_name, &type_name),
-                            ),
+                            )
+                            .with_all_related(related),
                         );
                         continue;
                     }
                     if !self.owns(module, &target)
                         && !self.owns(module, &Ty::Named(iface, Vec::new()))
                     {
+                        let related = self.related_type(module, &target).into_iter().chain(
+                            self.related_node(
+                                module,
+                                crate::symbol::Node::Def(iface),
+                                catalog::declared_here(&iface_name),
+                            ),
+                        );
+                        let related: Vec<Related> = related.collect();
                         self.error(
                             module,
                             Diagnostic::error(
                                 "E0044",
                                 span,
                                 catalog::foreign_implementation(&iface_name, &type_name),
-                            ),
+                            )
+                            .with_all_related(related),
                         );
                     }
                     self.check_implementation(impl_id, iface, &args);
@@ -1972,13 +2273,19 @@ impl Program {
             match provided {
                 None if self.funcs[r].body.is_none() => {
                     let iface_name = self.defs[iface].name.clone();
+                    let related = self.related_node(
+                        module,
+                        crate::symbol::Node::Func(r),
+                        catalog::interface_method_here(&name),
+                    );
                     self.error(
                         module,
                         Diagnostic::error(
                             "E0069",
                             span,
                             catalog::missing_method(&iface_name, &name),
-                        ),
+                        )
+                        .with_all_related(related),
                     );
                 }
                 None => {}
@@ -2011,9 +2318,15 @@ impl Program {
                             .all(|(a, b)| a.var == b.var && a.named_only == b.named_only);
                     if !same {
                         let span = self.funcs[m].span;
+                        let related = self.related_node(
+                            module,
+                            crate::symbol::Node::Func(r),
+                            catalog::interface_method_here(&name),
+                        );
                         self.error(
                             module,
-                            Diagnostic::error("E0069", span, catalog::signature_differs(&name)),
+                            Diagnostic::error("E0069", span, catalog::signature_differs(&name))
+                                .with_all_related(related),
                         );
                     }
                 }

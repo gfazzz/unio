@@ -90,6 +90,106 @@ impl Target {
             _ => "",
         }
     }
+
+    /// The name of the target for `unio build --target`: the triple of Rust, for which the
+    /// runtime library of the target is built (`cargo build --target`).
+    pub fn rust_triple(self) -> &'static str {
+        match self {
+            Target::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+            Target::LinuxAarch64 => "aarch64-unknown-linux-gnu",
+            Target::MacosAarch64 => "aarch64-apple-darwin",
+            Target::WindowsX86_64 => "x86_64-pc-windows-msvc",
+        }
+    }
+
+    /// The target that `unio build --target` names, by its triple of Rust.
+    pub fn parse(name: &str) -> Option<Target> {
+        Target::ALL.into_iter().find(|t| t.rust_triple() == name)
+    }
+
+    /// The machine of an object file in the format of this target: `e_machine` of ELF, the CPU
+    /// type of Mach-O, or the machine of COFF.
+    fn machine(self) -> u32 {
+        match self {
+            Target::LinuxX86_64 => 62,
+            Target::LinuxAarch64 => 183,
+            Target::MacosAarch64 => 0x0100_000c,
+            Target::WindowsX86_64 => 0x8664,
+        }
+    }
+}
+
+/// The names of the four targets of `--target`, for messages.
+pub fn target_names() -> String {
+    Target::ALL
+        .iter()
+        .map(|t| format!("{} ({})", t.rust_triple(), t.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Why this machine cannot build executables for `target`, or `None` when it can. The host's
+/// own target is built as always. The two Linux targets are built for each other on Linux with
+/// a cross C compiler and the runtime library of the other target. Every other pair needs what
+/// only the system of the target provides, so it stops with this message before anything is
+/// compiled, and no file is written.
+pub fn cross_problem(target: Target) -> Option<String> {
+    let Some(host) = Target::host() else {
+        return Some(unsupported());
+    };
+    let linux = |t: Target| matches!(t, Target::LinuxX86_64 | Target::LinuxAarch64);
+    if host == target || (linux(host) && linux(target)) {
+        return None;
+    }
+    let tail = format!(
+        "this compiler runs on {}; from it unio builds for {}",
+        host.name(),
+        if linux(host) {
+            "Linux on x86-64 and Linux on AArch64".to_string()
+        } else {
+            format!("{} only", host.name())
+        }
+    );
+    Some(match target {
+        Target::MacosAarch64 => format!(
+            "cannot build for macOS on AArch64 (aarch64-apple-darwin) here: an executable for macOS is linked by Apple's linker with the macOS SDK, which come with the Xcode command line tools on a Mac and are not licensed for other systems; run unio build on a Mac; {tail}"
+        ),
+        Target::WindowsX86_64 => format!(
+            "cannot build for Windows on x86-64 (x86_64-pc-windows-msvc) here: an executable for Windows is linked by link.exe of Visual Studio with the libraries of MSVC and the Windows SDK, which are installed on Windows only; run unio build on Windows; {tail}"
+        ),
+        Target::LinuxX86_64 | Target::LinuxAarch64 => format!(
+            "cannot build for {} ({}) here: an executable for Linux is linked by a GNU C compiler for that machine with its C library, which unio uses only on Linux; run unio build on Linux on x86-64 or AArch64, where each builds for both; {tail}",
+            target.name(),
+            target.rust_triple()
+        ),
+    })
+}
+
+/// The variable that names the cross C compiler of a Linux target, as the `cc` crate of Rust
+/// reads it: `CC_aarch64_unknown_linux_gnu`.
+pub fn cross_compiler_variable(target: Target) -> String {
+    format!("CC_{}", target.rust_triple().replace('-', "_"))
+}
+
+/// The C compiler that links for a Linux target that is not the host: the variable of
+/// [`cross_compiler_variable`], or the GNU cross compiler of Debian and Ubuntu
+/// (`aarch64-linux-gnu-gcc`, `x86_64-linux-gnu-gcc`).
+pub fn linux_compiler_for(target: Target) -> String {
+    if let Ok(cc) = std::env::var(cross_compiler_variable(target)) {
+        return cc;
+    }
+    match target {
+        Target::LinuxAarch64 => "aarch64-linux-gnu-gcc".into(),
+        _ => "x86_64-linux-gnu-gcc".into(),
+    }
+}
+
+/// The package of Debian and Ubuntu with the cross C compiler of a Linux target.
+pub fn cross_package(target: Target) -> &'static str {
+    match target {
+        Target::LinuxAarch64 => "gcc-aarch64-linux-gnu",
+        _ => "gcc-x86-64-linux-gnu",
+    }
 }
 
 /// Whether this compiler can make executables for the machine it runs on.
@@ -192,6 +292,141 @@ fn compile(
 /// the compiler (`<prefix>/bin/unio` and `<prefix>/lib/unio/libunio.a`, docs/runtime.md 8.4);
 /// `cargo build` leaves it in the directory of the compiler itself.
 pub fn runtime_library() -> Result<PathBuf, String> {
+    let Some(target) = Target::host() else {
+        return host_runtime_library();
+    };
+    runtime_library_for(target)
+}
+
+/// The variable that names the runtime library of a target that is not the host:
+/// `UNIO_RUNTIME_LIB_AARCH64_UNKNOWN_LINUX_GNU`.
+pub fn runtime_variable(target: Target) -> String {
+    format!(
+        "UNIO_RUNTIME_LIB_{}",
+        target.rust_triple().replace('-', "_").to_ascii_uppercase()
+    )
+}
+
+/// The runtime library of `target`, checked to hold objects for that machine. For the host it
+/// is that of [`runtime_library`]. For another target it is the variable of
+/// [`runtime_variable`], else the library in `lib/unio/<triple>/` of an installation (the file
+/// `lib/unio/libunio.a` of the release for that platform), else the one that
+/// `cargo build --target <triple>` leaves in `target/<triple>/<profile>/` beside the compiler's
+/// `target/<profile>/`.
+pub fn runtime_library_for(target: Target) -> Result<PathBuf, String> {
+    let found = if Some(target) == Target::host() {
+        host_runtime_library()?
+    } else {
+        cross_runtime_library(target)?
+    };
+    match archive_target(&found) {
+        Some(other) if other != target => Err(format!(
+            "the runtime library {} holds code for {}, not for {} ({}); it is the runtime of another target",
+            found.display(),
+            other.name(),
+            target.name(),
+            target.rust_triple()
+        )),
+        _ => Ok(found),
+    }
+}
+
+fn cross_runtime_library(target: Target) -> Result<PathBuf, String> {
+    let variable = runtime_variable(target);
+    if let Some(p) = std::env::var_os(&variable) {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        return Err(format!(
+            "the runtime library {} that {variable} names is missing",
+            p.display()
+        ));
+    }
+    let name = target.runtime_file();
+    let triple = target.rust_triple();
+    let exe = std::env::current_exe().map_err(|e| format!("the compiler's location: {e}"))?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let dir = exe.parent().ok_or("the compiler's location")?;
+    let mut candidates = Vec::new();
+    if let Some(prefix) = dir.parent() {
+        candidates.push(prefix.join("lib").join("unio").join(triple).join(name));
+        // cargo: target/release/unio and target/<triple>/release/libunio.a.
+        if let Some(profile) = dir.file_name() {
+            candidates.push(prefix.join(triple).join(profile).join(name));
+        }
+    }
+    if let Some(found) = candidates.iter().find(|c| c.is_file()) {
+        return Ok(found.clone());
+    }
+    let places: Vec<String> = candidates.iter().map(|c| c.display().to_string()).collect();
+    Err(format!(
+        "the runtime library {name} for {} ({triple}) is missing: it belongs in {}; copy there lib/unio/{name} of the release of unio for that platform, or build it in compiler/ with rustup target add {triple} and cargo build --release -p unio --lib --target {triple}, or set {variable}; it must come from the same version of unio as this compiler",
+        target.name(),
+        places.join(" or ")
+    ))
+}
+
+/// The target whose objects a runtime library (an archive of `ar`, as `libunio.a` and
+/// `unio.lib` are) holds: that of its first object file. `None` when it cannot be told.
+pub fn archive_target(path: &Path) -> Option<Target> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic).ok()?;
+    if &magic != b"!<arch>\n" {
+        return None;
+    }
+    let mut at: u64 = 8;
+    for _ in 0..4096 {
+        file.seek(SeekFrom::Start(at)).ok()?;
+        let mut header = [0u8; 60];
+        file.read_exact(&mut header).ok()?;
+        let size: u64 = std::str::from_utf8(&header[48..58])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        let mut data = [0u8; 24];
+        let n = (size as usize).min(data.len());
+        file.read_exact(&mut data[..n]).ok()?;
+        if let Some(target) = object_target(&data[..n]) {
+            return Some(target);
+        }
+        at += 60 + size + (size & 1);
+    }
+    None
+}
+
+/// The target of an object file from the start of its bytes.
+fn object_target(object: &[u8]) -> Option<Target> {
+    let u16_at = |i: usize| -> Option<u32> {
+        Some(u16::from_le_bytes([*object.get(i)?, *object.get(i + 1)?]) as u32)
+    };
+    let u32_at = |i: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(object.get(i..i + 4)?.try_into().ok()?))
+    };
+    let (format, machine) = if object.starts_with(b"\x7fELF") {
+        ("elf", u16_at(18)?)
+    } else if u32_at(0)? == 0xfeed_facf {
+        ("macho", u32_at(4)?)
+    } else if u16_at(0)? == 0x8664 {
+        ("coff", 0x8664)
+    } else {
+        return None;
+    };
+    Target::ALL.into_iter().find(|t| {
+        t.machine() == machine
+            && match t {
+                Target::LinuxX86_64 | Target::LinuxAarch64 => format == "elf",
+                Target::MacosAarch64 => format == "macho",
+                Target::WindowsX86_64 => format == "coff",
+            }
+    })
+}
+
+/// The runtime library of the host: `UNIO_RUNTIME_LIB`, or the one next to this compiler.
+fn host_runtime_library() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("UNIO_RUNTIME_LIB") {
         return Ok(PathBuf::from(p));
     }
@@ -256,8 +491,37 @@ pub fn link_command(object: &Path, runtime: &Path, out: &Path) -> Result<Linker,
     let Some(target) = Target::host() else {
         return Err(unsupported());
     };
+    link_command_for(target, object, runtime, out)
+}
+
+/// The linker and its arguments that link for `target` ([`link_command`] for the host). For
+/// the other Linux target it is the cross C compiler ([`linux_compiler_for`]), and the link
+/// step may also read the directories where that compiler finds the C library of the target
+/// (`-print-search-dirs`), which lie outside the library directories of the host.
+pub fn link_command_for(
+    target: Target,
+    object: &Path,
+    runtime: &Path,
+    out: &Path,
+) -> Result<Linker, String> {
+    if let Some(problem) = cross_problem(target) {
+        return Err(problem);
+    }
     let os = |items: &[&str]| -> Vec<OsString> { items.iter().map(OsString::from).collect() };
     match target {
+        Target::LinuxX86_64 | Target::LinuxAarch64 if Some(target) != Target::host() => {
+            let program = linux_compiler_for(target);
+            let mut args: Vec<OsString> =
+                vec!["-o".into(), out.into(), object.into(), runtime.into()];
+            args.push("-Wl,--gc-sections".into());
+            args.extend(os(system_libraries(target)));
+            Ok(Linker {
+                read: search_directories(&program),
+                program,
+                args,
+                env: Vec::new(),
+            })
+        }
         Target::LinuxX86_64 | Target::LinuxAarch64 => {
             let mut args: Vec<OsString> =
                 vec!["-o".into(), out.into(), object.into(), runtime.into()];
@@ -319,6 +583,36 @@ pub fn system_libraries(target: Target) -> &'static [&'static str] {
             "/DEFAULTLIB:msvcrt",
         ],
     }
+}
+
+/// The directories where a C compiler finds libraries and its own files: the `libraries:` and
+/// `install:` lines of `-print-search-dirs`, those that exist, without repetition.
+fn search_directories(cc: &str) -> Vec<PathBuf> {
+    let Ok(output) = std::process::Command::new(cc)
+        .arg("-print-search-dirs")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut found: Vec<PathBuf> = Vec::new();
+    for line in text.lines() {
+        let list = line
+            .strip_prefix("libraries: =")
+            .or_else(|| line.strip_prefix("libraries: "))
+            .or_else(|| line.strip_prefix("install: "));
+        for entry in list.into_iter().flat_map(|l| l.split(':')) {
+            let Ok(dir) = std::fs::canonicalize(entry) else {
+                continue;
+            };
+            if dir.is_dir() && !found.contains(&dir) {
+                found.push(dir);
+            }
+        }
+    }
+    found
 }
 
 /// The C compiler that links on Linux: `CC`, or `cc`.

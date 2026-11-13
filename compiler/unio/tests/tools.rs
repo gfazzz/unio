@@ -84,10 +84,16 @@ fn unio_tools_agree_with_the_python_checkers() {
         ("invalid sources", "spec/check_grammar.py", invalid),
         ("parse trees", "spec/check_grammar.py", tree),
         ("standard library API", "spec/check_api.py", vec![]),
+        (
+            "corpus and control coverage",
+            "spec/check_coverage.py",
+            vec![],
+        ),
     ];
     let unio_tool = |script: &str| match script {
         ".github/scripts/check_docs.py" => "tools/check_docs.unio",
         "spec/check_grammar.py" => "tools/check_grammar.unio",
+        "spec/check_coverage.py" => "tools/check_coverage.unio",
         _ => "tools/check_api.unio",
     };
     let mut differences = Vec::new();

@@ -253,6 +253,35 @@ pub fn prepare(files: &[PathBuf], options: &Options, loads_later: bool) -> Resul
     })
 }
 
+impl Plan {
+    /// The limits of the tests of each file of `unio test` (T-12): the `[limits]` of the
+    /// policy, of which the wall and processor time then hold for each test, kept by the
+    /// harness (`interp::run_test_limited`), and no longer for the whole run of a file, so that
+    /// a test that uses up its time fails and the next test still runs.
+    pub fn take_test_limits(&mut self) -> Vec<unio_runtime::sandbox::Limits> {
+        self.sandboxes
+            .iter_mut()
+            .map(|sandbox| {
+                let limits = sandbox.limits.clone();
+                sandbox.limits.wall_seconds = None;
+                sandbox.limits.cpu_seconds = None;
+                limits
+            })
+            .collect()
+    }
+
+    /// What the program at `index` may do, as the key of a cached test result binds it
+    /// (C-11b): its effective permissions and limits, the permissions of the process, and
+    /// whether a weaker sandbox is allowed.
+    pub fn describe(&self, index: usize) -> String {
+        let sandbox = &self.sandboxes[index];
+        format!(
+            "{:?}|{:?}|{:?}|{}",
+            sandbox.permissions, sandbox.limits, self.process_wide, self.allow_weaker
+        )
+    }
+}
+
 /// Starts the writer processes that must start before any restriction applies (macOS, where
 /// Seatbelt restricts the whole process once), or stops with code 103.
 fn start_writers(sandboxes: &mut [Sandbox]) -> Result<(), i32> {

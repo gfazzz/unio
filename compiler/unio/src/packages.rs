@@ -57,6 +57,10 @@ struct Report {
     /// revocation list it was verified with.
     signer: String,
     revocations: u64,
+    /// The target and runtime requirements of its manifest (T-14): `package.unio_version`, or
+    /// empty, and `package.targets`, when it is given.
+    unio_version: String,
+    targets: Option<Vec<String>>,
 }
 
 fn encode_list(out: &mut worker::Enc, items: &[String]) {
@@ -74,7 +78,7 @@ fn decode_list(d: &mut worker::Dec) -> Option<Vec<String>> {
 impl Report {
     fn encode(&self) -> Vec<u8> {
         let mut out = worker::Enc::default();
-        out.text("unio-unpack-report-2")
+        out.text("unio-unpack-report-3")
             .text(&self.name)
             .text(&self.version)
             .text(&self.content)
@@ -87,12 +91,22 @@ impl Report {
             out.text(alias).u32(*kind).text(a).text(b).text(req);
         }
         out.text(&self.signer).text(&self.revocations.to_string());
+        out.text(&self.unio_version);
+        match &self.targets {
+            Some(targets) => {
+                out.u32(1);
+                encode_list(&mut out, targets);
+            }
+            None => {
+                out.u32(0);
+            }
+        }
         out.0
     }
 
     fn decode(data: &[u8]) -> Option<Report> {
         let mut d = worker::Dec::new(data);
-        if d.text()? != "unio-unpack-report-2" {
+        if d.text()? != "unio-unpack-report-3" {
             return None;
         }
         let mut r = Report {
@@ -106,6 +120,8 @@ impl Report {
             dependencies: Vec::new(),
             signer: String::new(),
             revocations: 0,
+            unio_version: String::new(),
+            targets: None,
         };
         let n = d.u32()?;
         for _ in 0..n {
@@ -114,6 +130,11 @@ impl Report {
         }
         r.signer = d.text()?;
         r.revocations = d.text()?.parse().ok()?;
+        r.unio_version = d.text()?;
+        r.targets = match d.u32()? {
+            0 => None,
+            _ => Some(decode_list(&mut d)?),
+        };
         d.end().then_some(r)
     }
 
@@ -126,6 +147,17 @@ impl Report {
             .cloned()
             .collect();
         set.into_iter().collect()
+    }
+
+    /// The target and runtime requirements of the package's manifest, checked against this
+    /// toolchain and machine (T-14).
+    fn requirements_met(&self) -> Result<(), String> {
+        let req = if self.unio_version.is_empty() {
+            None
+        } else {
+            Some(Req::parse(&self.unio_version)?)
+        };
+        unio::package::manifest::requirements_met(req.as_ref(), self.targets.as_deref())
     }
 
     fn manifest_dependencies(&self) -> Result<Vec<Dependency>, String> {
@@ -305,6 +337,7 @@ fn finish(
     };
     let text = String::from_utf8(text.clone()).map_err(|_| "unio.toml is not UTF-8")?;
     let manifest = Manifest::parse(&text).map_err(|e| format!("its unio.toml: {e}"))?;
+    // The target and runtime requirements are checked by the tool, which installs (T-14).
     if manifest.name.is_empty() {
         return Err("its unio.toml has no package.name".into());
     }
@@ -362,6 +395,11 @@ fn finish(
         dependencies,
         signer: String::new(),
         revocations: 0,
+        unio_version: manifest
+            .unio_version
+            .as_ref()
+            .map_or(String::new(), |r| r.text().to_string()),
+        targets: manifest.targets.clone(),
     })
 }
 
@@ -1509,6 +1547,13 @@ impl Session {
                 )
                 .into());
             }
+            // The target and runtime requirements of the package hold here (T-14).
+            report.requirements_met().map_err(|problem| {
+                format!(
+                    "{} {} cannot be installed: {problem}; nothing was installed",
+                    entry.id, entry.version
+                )
+            })?;
             if review_all || changed.contains(&entry.id) {
                 to_review.push(entry.id.clone());
             }
@@ -1829,6 +1874,7 @@ fn settle(
     unlocked: Option<BTreeSet<String>>,
     manifest: Option<String>,
 ) -> Res<()> {
+    root_requirements(s)?;
     let (lock, changed) = s.resolve(unlocked)?;
     let to_review = s.obtain(&lock, false, &changed)?;
     s.review(&lock, &to_review)?;
@@ -1844,6 +1890,16 @@ fn settle(
         }
     }
     Ok(())
+}
+
+/// The target and runtime requirements of the root package hold on this machine (T-14).
+fn root_requirements(s: &Session) -> Res<()> {
+    s.manifest.requirements_met().map_err(|problem| {
+        Fail::Message(format!(
+            "the package {} cannot be installed here: {problem}",
+            s.root.join("unio.toml").display()
+        ))
+    })
 }
 
 fn add(o: Options) -> Res<()> {
@@ -1942,6 +1998,7 @@ fn install(o: Options) -> Res<()> {
         return Err("usage: unio install [--offline] [--unsafe-ok]".into());
     }
     let mut s = open(&o)?;
+    root_requirements(&s)?;
     let lock = s
         .old
         .clone()

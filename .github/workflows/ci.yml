@@ -53,6 +53,10 @@ jobs:
         run: compiler/target/release/unio run tools/check_grammar.unio -- docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
       - name: Unio sources use only the standard library API
         run: compiler/target/release/unio run tools/check_api.unio
+      # T-5b: a grammar rule without a valid and an invalid corpus file, or a code of the
+      # catalog without a control program, fails the run unless its exemption is documented.
+      - name: Every grammar rule has corpus files and every code a control program (T-5b)
+        run: compiler/target/release/unio run tools/check_coverage.unio
       - name: Unio test blocks (stdlib, examples, tools)
         run: compiler/target/release/unio test docs/examples/*.unio docs/ru/examples/*.unio examples/*.unio $(find stdlib -name '*.unio') tools/*.unio
       # D-1, D-3: docs/stdlib-reference.md and its Russian twin are generated from the documentation
@@ -202,6 +206,13 @@ jobs:
         run: cargo test --release -p unio --test native
       - name: The linker and SDK are the pinned ones
         run: python3 ../.github/scripts/expected_toolchain.py check target/release/unio
+      # unio build --target (table 6.1; docs/tools.md section 10): Linux AArch64 for x86-64.
+      - name: Cross build for the other Linux target
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-x86-64-linux-gnu qemu-user
+          rustup target add x86_64-unknown-linux-gnu
+          cargo build --release --locked -p unio --lib --target x86_64-unknown-linux-gnu
+          UNIO_TEST_CROSS=1 cargo test --release -p unio --test cross
       # R-7a: the job `release` needs this job, so no release is built while a test of SB-8 or
       # SB-15 fails here.
       - name: Sandbox suites SB-8 and SB-15 (R-7a)
@@ -280,6 +291,14 @@ jobs:
       # and Windows SDK (docs/runtime.md 8.4); Linux AArch64 in native-linux-arm.
       - name: Native executables give the output of unio run, builds are deterministic (C-4, C-5)
         run: cargo test --release -p unio --test native
+      # unio build --target (table 6.1; docs/tools.md section 10): Linux x86-64 for AArch64.
+      - name: Cross build for the other Linux target
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          cargo build --release --locked -p unio --lib --target aarch64-unknown-linux-gnu
+          UNIO_TEST_CROSS=1 cargo test --release -p unio --test cross
       - name: Seatbelt denials, when the tests or the native link step fail on macOS
         if: failure() && runner.os == 'macOS'
         run: log show --last 10m --style compact --predicate 'sender == "Sandbox"' | tail -80

@@ -742,18 +742,26 @@ struct Parser:
     contextual as List[Text]
     tokens as List[Token]
     build_tree as Bool
+    ## Whether to record the rules in progress at the farthest position (failing_rules).
+    coverage as Bool = false
     var results as Map[Text, Match] = {}
     var failed as Map[Text, Bool] = {}
     var farthest as Int = 0
     var expected as List[Text] = []
     var interpolation_errors as List[InterpolationError] = []
+    var stack as List[Text] = []
+    var frontier as List[Text] = []
 
 extend Parser:
     function note(var self, position as Int, what as Text):
         if position > self.farthest:
             self.farthest = position
             self.expected = [what]
+            self.frontier = []
         else if position == self.farthest and what not in self.expected: self.expected.append(what)
+        if self.coverage and position == self.farthest:
+            for name in self.stack:
+                if name not in self.frontier: self.frontier.append(name)
 
     ## The tree of the whole token list as the start rule; none if it does not match all of it.
     function parse(var self, start as Text) returns Option[Tree]:
@@ -766,6 +774,13 @@ extend Parser:
             case none: return none
 
     function rule(var self, name as Text, position as Int) returns Option[Match]:
+        if not self.coverage: return self.attempt(name, position)
+        self.stack.append(name)
+        let result = self.attempt(name, position)
+        let _ = self.stack.remove_last()
+        return result
+
+    function attempt(var self, name as Text, position as Int) returns Option[Match]:
         let key = "{name}@{position}"
         if key in self.failed: return none
         if key in self.results: return self.results.get(key)
@@ -866,6 +881,44 @@ extend Parser:
         return true
 
 # ---------------------------------------------------------------- checking a source
+
+## The rules in progress where a source that does not parse fails: every rule whose attempt was
+## on the way when the parser noted what it expected at the farthest token, sorted. Empty when
+## the source parses or has a lexical error. An invalid corpus file covers these rules
+## (check_coverage).
+public function failing_rules(source as Text, language as Grammar) returns List[Text]:
+    let text = source.slice(1, source.length()) if source.starts_with("\u{FEFF}") else source
+    let tokens = try tokenize(text, language) on LexError as e:
+        return []
+    var parser = Parser(
+        rules = language.rules,
+        contextual = language.contextual,
+        tokens = tokens,
+        build_tree = false,
+        coverage = true,
+    )
+    match parser.parse("file"):
+        case some(_): return []
+        case none: return parser.frontier.sorted()
+
+## The syntactic rules of the grammar in the order of the file: the rules that the parser
+## interprets, without the lexical rules that the lexer implements.
+public function syntactic_rules(language as Grammar) returns List[Text]:
+    return language.order.filter(function (name as Text) returns Bool: name not in LEXICAL_RULES)
+
+## The names of the rules of a parse tree, each once, sorted.
+public function rules_in(tree as Tree) returns List[Text]:
+    var found = Set[Text]()
+    collect_rules(tree, found)
+    return found.items().sorted()
+
+function collect_rules(tree as Tree, var found as Set[Text]):
+    match tree:
+        case Tree.Branch(rule, children):
+            found.insert(rule)
+            for child in children:
+                collect_rules(child, found)
+        case Tree.Leaf(_): pass
 
 ## The parse tree of a source, or its first error. build_tree = false checks only.
 public function check_source(

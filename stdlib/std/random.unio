@@ -75,6 +75,15 @@ public function seeded(seed as Int) returns Generator:
 public function from_entropy() returns Generator:
     return seeded(entropy())
 
+## A generator seeded from the random source of the operating system, or RandomError when the
+## system cannot give randomness: the safe form of from_entropy. It has the effect random.
+## Example:
+##     var generator = try checked_from_entropy() on RandomError as e:
+##         assert_fail(e.reason)
+##     assert generator.next_float() < 1.0
+public function checked_from_entropy() returns Generator fails with RandomError:
+    return seeded(try secure_int(MINIMUM_INT, MAXIMUM_INT))
+
 ## 64 bits from the random source of the operating system; a system without one is a fault.
 external function entropy() returns Int
 
@@ -91,6 +100,16 @@ public error RandomError:
 ##     assert key.length() == 32
 public external function secure_bytes(count as Int) returns Bytes fails with RandomError
 
+## count bytes as secure_bytes gives them, or none for a count below 0 or above 1048576: the safe
+## form of secure_bytes. It has the effect random.
+## Example:
+##     let none_for_negative = try checked_secure_bytes(-1) on RandomError as e:
+##         assert_fail(e.reason)
+##     assert none_for_negative == none
+public function checked_secure_bytes(count as Int) returns Option[Bytes] fails with RandomError:
+    if count < 0 or count > 1048576: return none
+    return some(try secure_bytes(count))
+
 ## An Int in low..high, high excluded, each equally likely, from the random source of the operating
 ## system: for secret choices such as a one-time code. low >= high is a fault; a system that cannot
 ## give randomness fails with RandomError. It has the effect random.
@@ -99,6 +118,16 @@ public external function secure_bytes(count as Int) returns Bytes fails with Ran
 ##         assert_fail(e.reason)
 ##     assert code >= 0 and code < 1000000
 public external function secure_int(low as Int, high as Int) returns Int fails with RandomError
+
+## An Int as secure_int gives it, or none when low >= high: the safe form of secure_int. It has the
+## effect random.
+## Example:
+##     let empty = try checked_secure_int(5, 5) on RandomError as e:
+##         assert_fail(e.reason)
+##     assert empty == none
+public function checked_secure_int(low as Int, high as Int) returns Option[Int] fails with RandomError:
+    if low >= high: return none
+    return some(try secure_int(low, high))
 
 extend Generator:
     ## The next output of MRG32k3a, in 0..M1.
@@ -153,6 +182,15 @@ extend Generator:
             let value = self.next_any_int()
             if value >= low and value < high: return value
         return low
+
+    ## An Int in low..high as next_int gives it, or none when low >= high: the safe form of
+    ## next_int.
+    ## Example:
+    ##     var generator = seeded(7)
+    ##     assert generator.checked_next_int(3, 4) == some(3) and generator.checked_next_int(4, 4) == none
+    public function checked_next_int(var self, low as Int, high as Int) returns Option[Int]:
+        if low >= high: return none
+        return some(self.next_int(low, high))
 
     ## A Float in 0.0..1.0, 1.0 excluded, from 53 uniform bits.
     ## Example:

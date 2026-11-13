@@ -1,0 +1,2 @@
+# expect-error: 2
+let twice = function(x as): x * 2

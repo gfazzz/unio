@@ -28,6 +28,8 @@ pub struct Facts {
     pub locals: Vec<Local>,
     /// A local name used at the first span, bound at the second.
     pub local_refs: Vec<(ModId, Span, Span)>,
+    /// The type expected where a name is used, when the place gives one (T-13).
+    pub expected: Vec<(ModId, Span, Ty)>,
 }
 
 thread_local! {
@@ -57,6 +59,7 @@ pub(crate) struct Noted {
     types: Vec<(ModId, Span, Ty)>,
     locals: Vec<Local>,
     local_refs: Vec<(ModId, Span, Span)>,
+    expected: Vec<(ModId, Span, Ty)>,
 }
 
 impl Noted {
@@ -68,7 +71,10 @@ impl Noted {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.types.is_empty() && self.locals.is_empty() && self.local_refs.is_empty()
+        self.types.is_empty()
+            && self.locals.is_empty()
+            && self.local_refs.is_empty()
+            && self.expected.is_empty()
     }
 
     pub(crate) fn local(&mut self, module: ModId, name: &str, span: Span, ty: &Ty, param: bool) {
@@ -88,6 +94,10 @@ impl Noted {
         }
     }
 
+    pub(crate) fn expected(&mut self, module: ModId, span: Span, ty: &Ty) {
+        self.expected.push((module, span, ty.clone()));
+    }
+
     /// Adds what was noted to the facts of this thread, with the types resolved.
     pub(crate) fn finish(self, resolve: impl Fn(&Ty) -> Ty) {
         FACTS.with(|f| {
@@ -100,6 +110,11 @@ impl Noted {
                     l
                 }));
                 facts.local_refs.extend(self.local_refs);
+                facts.expected.extend(
+                    self.expected
+                        .into_iter()
+                        .map(|(m, s, t)| (m, s, resolve(&t))),
+                );
             }
         });
     }

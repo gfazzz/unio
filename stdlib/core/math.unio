@@ -144,6 +144,13 @@ public function clamp[T with Order](value as T, low as T, high as T) returns T:
     if high < value: return high
     return value
 
+## The value limited to low..high, or none when low is greater than high: the safe form of clamp.
+## Example:
+##     assert checked_clamp(15, 0, 10) == some(10) and checked_clamp(1, 10, 0) == none
+public function checked_clamp[T with Order](value as T, low as T, high as T) returns Option[T]:
+    if high < low: return none
+    return some(clamp(value, low, high))
+
 ## The greatest common divisor, never negative; gcd(0, 0) is 0. A result of 2^63, which only
 ## gcd(MINIMUM_INT, 0) and gcd(MINIMUM_INT, MINIMUM_INT) give, is a fault, as for overflow.
 ## Example:
@@ -157,6 +164,15 @@ public function gcd(a as Int, b as Int) returns Int:
         x = y
         y = rest
     return x.abs()
+
+## The greatest common divisor, or none when it is 2^63, which does not fit in Int: the safe form
+## of gcd.
+## Example:
+##     assert checked_gcd(12, -18) == some(6) and checked_gcd(MINIMUM_INT, 0) == none
+public function checked_gcd(a as Int, b as Int) returns Option[Int]:
+    if (a == MINIMUM_INT and (b == 0 or b == MINIMUM_INT)) or (a == 0 and b == MINIMUM_INT):
+        return none
+    return some(gcd(a, b))
 
 ## The least common multiple, never negative; 0 if either is 0, and none if it does not fit in Int.
 ## Example:
@@ -203,6 +219,13 @@ public function integer_sqrt(n as Int) returns Int:
         else: high = middle - 1
     return low
 
+## The integer square root, or none for a negative n: the safe form of integer_sqrt.
+## Example:
+##     assert checked_integer_sqrt(17) == some(4) and checked_integer_sqrt(-1) == none
+public function checked_integer_sqrt(n as Int) returns Option[Int]:
+    if n < 0: return none
+    return some(integer_sqrt(n))
+
 ## The quotient rounded toward negative infinity, unlike /, which truncates toward zero. A zero
 ## divisor and floor_divide(MINIMUM_INT, -1) are faults, as for /.
 ## Example:
@@ -211,6 +234,14 @@ public function floor_divide(a as Int, b as Int) returns Int:
     let quotient = a / b
     if (a % b != 0) and ((a < 0) != (b < 0)): return quotient - 1
     return quotient
+
+## The quotient rounded toward negative infinity, or none for a zero divisor and for
+## MINIMUM_INT divided by -1: the safe form of floor_divide.
+## Example:
+##     assert checked_floor_divide(-7, 2) == some(-4) and checked_floor_divide(1, 0) == none
+public function checked_floor_divide(a as Int, b as Int) returns Option[Int]:
+    if b == 0 or (a == MINIMUM_INT and b == -1): return none
+    return some(floor_divide(a, b))
 
 ## The remainder of floor_divide: it has the sign of the divisor, unlike %, which has the sign of
 ## the dividend. A zero divisor is a fault.
@@ -221,6 +252,13 @@ public function modulo(a as Int, b as Int) returns Int:
     let rest = a % b
     if rest != 0 and ((rest < 0) != (b < 0)): return rest + b
     return rest
+
+## The remainder of floor_divide, or none for a zero divisor: the safe form of modulo.
+## Example:
+##     assert checked_modulo(-7, 3) == some(2) and checked_modulo(7, 0) == none
+public function checked_modulo(a as Int, b as Int) returns Option[Int]:
+    if b == 0: return none
+    return some(modulo(a, b))
 
 test "the elementary functions keep their IEEE meaning":
     assert sqrt(-1.0).is_nan()

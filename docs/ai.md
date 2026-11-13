@@ -20,15 +20,19 @@ The criterion, at least 160 of 200 within three attempts, is met. The agents wer
 
 ## 2. JSON formats
 
-Codes, field names and the shape of the JSON do not depend on the language of messages (C-10): `--lang=ru` or `UNIO_LANG=ru` changes only `message`, `explanation` and fix descriptions. Paths are as given on the command line, lines and columns count from 1, and columns count characters.
+Codes, field names and the shape of the JSON do not depend on the language of messages (C-10): `--lang=ru` or `UNIO_LANG=ru` changes only `message`, `explanation`, fix descriptions and the messages of related locations. Paths are as given on the command line, lines and columns count from 1, and columns count characters.
+
+The examples are the output of the commands named above each of them, run on the files of [compiler/unio/tests/data/ai/](../compiler/unio/tests/data/ai); `tests/ai_examples.rs` runs them and compares the output with these blocks and with the Russian version, so the examples cannot drift from the compiler. Only paths are shortened to that directory and the repository, hashes end in `...`, and `time_ms` may differ.
 
 ### 2.1 Diagnostics: `unio check --diagnostics=json FILE...`
 
 An array of diagnostics, empty when the files are clean; the exit code is 0 when the array is empty and 1 otherwise. `unio check` reports every error it finds in one run (C-2), syntax errors first: name and type checks run only on files that parse.
 
+<!-- example: check --diagnostics=json total.unio -->
 ```json
 [
-  {"code":"E0056","severity":"error","message":"unknown name 'summ'","explanation":"The name is not declared where it is used. Check the spelling; the fix suggests the closest visible name.","spans":[{"file":"total.unio","start":{"line":5,"column":12,"offset":123},"end":{"line":5,"column":16,"offset":127},"label":null}],"fixes":[{"file":"total.unio","range":{"start":{"line":5,"column":12,"offset":123},"end":{"line":5,"column":16,"offset":127}},"new_text":"sum","description":"replace with 'sum'"}],"related":[]}
+  {"code":"E0056","severity":"error","message":"unknown name 'summ'","explanation":"The name is not declared where it is used. Check the spelling; the fix suggests the closest visible name.","spans":[{"file":"total.unio","start":{"line":5,"column":15,"offset":130},"end":{"line":5,"column":19,"offset":134},"label":null}],"fixes":[{"file":"total.unio","range":{"start":{"line":5,"column":15,"offset":130},"end":{"line":5,"column":19,"offset":134}},"new_text":"sum","description":"replace with 'sum'"}],"related":[]},
+  {"code":"E0051","severity":"error","message":"'total' is declared twice; rename one of them","explanation":"A module declares each name once, and a type has one method of each name. Rename or remove one of the declarations.","spans":[{"file":"total.unio","start":{"line":8,"column":10,"offset":168},"end":{"line":8,"column":15,"offset":173},"label":null}],"fixes":[],"related":[{"symbol":"total.total","message":"'total' is first declared here","span":{"file":"total.unio","start":{"line":2,"column":10,"offset":35},"end":{"line":2,"column":15,"offset":40},"label":null}}]}
 ]
 ```
 
@@ -40,7 +44,7 @@ An array of diagnostics, empty when the files are clean; the exit code is 0 when
 | `explanation` | how to fix it; `unio explain CODE` adds an example and its fix |
 | `spans` | where: `file`, `start` and `end` with `line`, `column` and byte `offset`, and an optional `label` |
 | `fixes` | replacements, present when the fix is unambiguous: replace `range` of `file` by `new_text`; `description` says what it does |
-| `related` | other places and symbols; always empty in 0.1 |
+| `related` | other locations that matter, each with `message`, `span` (as in `spans`, `label` null) and `symbol`, the full name when the location is a declaration, else null: the earlier declaration of a duplicate, the declaration of a type in a mismatch or of the function a call does not fit, the `fails with` list of a function called without `try`, the handlers and the signature for an unhandled error, the binding of a name that cannot change, the manifest line for E0085, E0088 and E0089. Locations in the standard library are left out, except for a layer violation in it (E0084); `unio symbol` shows them. The text form shows each as `= note: FILE:LINE:COLUMN: MESSAGE` |
 
 The format is versioned with the compiler, and its JSON Schema is published as [compiler/diagnostics.schema.json](../compiler/diagnostics.schema.json) (`urn:unio:diagnostics:1`); `tests/diagnostics.rs` checks the output against it (C-8).
 
@@ -48,21 +52,24 @@ The format is versioned with the compiler, and its JSON Schema is published as [
 
 An array with one object per `test` block; the exit code is 0 when every test passed and 1 otherwise. A test that does not compile fails alone with its diagnostics in `message`, and the other tests still run (T-5a).
 
+<!-- example: test --json double.unio -->
 ```json
-[{"file": "double.unio", "name": "double of two", "status": "failed", "time_ms": 0, "output": "", "message": "fault: assertion failed: double(2) == 5\n    at test \"double of two\" (double.unio:5)\n"},
- {"file": "double.unio", "name": "uses a missing name", "status": "failed", "time_ms": 0, "output": "", "message": "the test does not compile:\n5:E0056: unknown name 'duble'\n"}]
+[{"file": "double.unio", "name": "double of two", "status": "failed", "time_ms": 0, "output": "", "message": "fault: assertion failed: double(2) == 5\n    at test \"double of two\" (double.unio:5)\n", "properties": [], "hash": "unio-hash-v1:sha384:...", "cached": false},
+ {"file": "double.unio", "name": "uses a missing name", "status": "failed", "time_ms": 0, "output": "", "message": "the test does not compile:\n8:E0056: unknown name 'duble'\n", "properties": [], "hash": "unio-hash-v1:sha384:...", "cached": false}]
 ```
 
-`status` is `passed` or `failed`; `output` is what the test printed; `message` is the fault with its trace, or the diagnostics that keep the test from compiling. A filter after the options runs only the tests whose names contain it: `unio test --json "parse_command" todo.unio`.
+`status` is `passed` or `failed`; `output` is what the test printed; `message` is the fault with its trace, or the diagnostics that keep the test from compiling; `properties` holds the replay records of the property tests ([tools.md](tools.md)); `hash` is the key of the test result and `cached` says whether the result was reused. A filter after the options runs only the tests whose names contain it: `unio test --json "parse_command" todo.unio`.
 
 ### 2.3 Outline: `unio outline --json FILE`
 
 What a file declares, without bodies: an array of declarations, each with `kind` (`function`, `struct`, `enum`, `error`, `interface`, `constant`, `extend` or `test`), `name`, `signature` on one line, `line`, and `members` in the same shape: the fields (`field`) of a struct or error, the variants (`variant`) of an enum, the methods (`method`) of an interface or an `extend` block. It is the cheap way to see a file before reading it.
 
+<!-- example: outline --json double.unio -->
 ```json
 [
   {"kind": "function", "name": "double", "signature": "function double(n as Int) returns Int", "line": 1, "members": []},
-  {"kind": "test", "name": "double of two", "signature": "test \"double of two\"", "line": 4, "members": []}
+  {"kind": "test", "name": "double of two", "signature": "test \"double of two\"", "line": 4, "members": []},
+  {"kind": "test", "name": "uses a missing name", "signature": "test \"uses a missing name\"", "line": 7, "members": []}
 ]
 ```
 
@@ -70,14 +77,16 @@ What a file declares, without bodies: an array of declarations, each with `kind`
 
 One declaration with what it means for a caller (C-11): `name`, `kind`, `signature`, `documentation` (its `##` comment), `declared` (file, line and column), `usages` in the program, and for a function `errors` (its `fails with`), `effects` derived from its calls (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`), `argument_effects` (parameters whose effects are the caller's), `layer` (the lowest library layer it needs), `calls`, `hash`, a content hash of the declaration and what it depends on, `default_of` and `implementations`. A method declared in an interface shows only its own signature. For a type, `implementations` lists the interfaces it implements in `extend ... with` blocks (L-6c), each with `interface`, `declared` (the `extend` block), and `methods`: for every method of the interface, the `function` the type uses, where it is `declared`, and `default`, true when the type uses the default of the interface instead of replacing it. A method that a type gets from a default is found through the type: `unio symbol m.Square.name` reports the default under that name, `declared` at the interface, with `default_of` naming it (`m.Shape.name`); `default_of` is empty for every other declaration, and `implementations` is empty for everything but a type. Names of the standard library start with `std.`; names of the program are relative to its package, run from its directory.
 
+<!-- example: symbol --json std.files.write_text -->
 ```json
-[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.","declared":"stdlib/std/files.unio:212:17","default_of":"","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"implementations":[],"hash":"unio-hash-v1:sha384:..."}]
+[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.\nExample:\n    try:\n        try write_text(Path(\"no-such-directory/report.txt\"), \"done\\n\")\n    on IoError as e:\n        assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied","declared":"stdlib/std/files.unio:262:17","default_of":"","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"implementations":[],"hash":"unio-hash-v1:sha384:..."}]
 ```
 
 A type `Square` that implements an interface `Shape`, replacing `area` and using the default `name`; the text form shows the same as `implements: m.Shape` with one line per method:
 
+<!-- example: symbol --json m.Square -->
 ```json
-[{"name":"m.Square","kind":"type","signature":"public struct Square:","documentation":"","declared":"m.unio:9:15","default_of":"","usages":["m.unio:13:14","m.unio:26:17"],"errors":[],"effects":[],"argument_effects":[],"layer":"core","calls":[],"implementations":[{"interface":"m.Shape","declared":"m.unio:12:1","methods":[{"name":"area","function":"m.Square.area","declared":"m.unio:13:14","default":false},{"name":"name","function":"m.Shape.name","declared":"m.unio:5:14","default":true}]}],"hash":"unio-hash-v1:sha384:..."}]
+[{"name":"m.Square","kind":"type","signature":"public struct Square:","documentation":"A square with a side of a whole number of units.","declared":"m.unio:9:15","default_of":"","usages":["m.unio:13:14","m.unio:17:17"],"errors":[],"effects":[],"argument_effects":[],"layer":"core","calls":[],"implementations":[{"interface":"m.Shape","declared":"m.unio:12:1","methods":[{"name":"area","function":"m.Square.area","declared":"m.unio:13:14","default":false},{"name":"name","function":"m.Shape.name","declared":"m.unio:5:14","default":true}]}],"hash":"unio-hash-v1:sha384:..."}]
 ```
 
 ### 2.5 Explanations: `unio explain CODE`
@@ -118,7 +127,6 @@ Prompts to avoid ask the agent to "make the errors go away": an agent can always
 
 ## 5. Limits in 0.1
 
-- `related` in the diagnostics is always empty (C-8).
 - Warnings (`W`) and style hints (`H`) are defined by C-6 but none exists: every diagnostic is an error.
 - `unio test --json` has no replay data for property tests yet (T-12), and the REPL of T-13 does not exist.
 - The language server `unio lsp` gives the same diagnostics to an editor as LSP messages ([editors/README.md](../editors/README.md)).

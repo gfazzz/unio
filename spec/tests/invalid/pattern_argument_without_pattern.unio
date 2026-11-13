@@ -1,0 +1,5 @@
+# expect-error: 4
+function f(x as Option[Int]) returns Int:
+    match x:
+        case some(value = ): return value
+        case none: return 0

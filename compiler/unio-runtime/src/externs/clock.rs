@@ -63,7 +63,18 @@ fn wall_nanoseconds(_: &mut Runtime, _: &mut [Value]) -> Outcome {
 fn sleep_nanoseconds(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let nanos = int(runtime, arguments, 0)?;
     if nanos > 0 {
-        std::thread::sleep(Duration::from_nanos(nanos as u64));
+        // In steps, so that the time limit of a test ends the sleep too (T-12).
+        let end = Instant::now() + Duration::from_nanos(nanos as u64);
+        loop {
+            if crate::deadline::time_up() {
+                return Err(Unwind::Exhausted(crate::fault::Exhaustion::Time));
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(10)));
+        }
     }
     Ok(Value::Unit)
 }

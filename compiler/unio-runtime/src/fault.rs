@@ -54,6 +54,8 @@ impl From<Fault> for Unwind {
 pub enum Exhaustion {
     Heap,
     Stack,
+    /// The time limit of a test of `unio test` (T-12, [`crate::deadline`]).
+    Time,
 }
 
 impl Exhaustion {
@@ -64,6 +66,7 @@ impl Exhaustion {
             Exhaustion::Stack => {
                 "fault: stack exhausted by recursion; the program ends with code 102\n"
             }
+            Exhaustion::Time => "fault: the time limit of the test is used up\n",
         }
     }
 }

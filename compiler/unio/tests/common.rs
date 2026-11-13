@@ -296,3 +296,104 @@ public function main():
 "
     )
 }
+
+/// The depth of [`deep_values`] for the tests: 10 million in a release build, where `==` of two
+/// chains of that depth overflowed the 1 GiB stack of `unio run` while it compared by recursion
+/// (code 134); 1 million in a debug build, which is several times slower.
+#[allow(dead_code)]
+pub const DEEP_VALUES: usize = if cfg!(debug_assertions) {
+    1_000_000
+} else {
+    10_000_000
+};
+
+/// A program that walks chains of `depth` enum values and a tree of lists `depth / 10` deep with
+/// every operation that walks a value (L-17a, C-18): `==`, a key of a set and of a map (hash and
+/// equality). It prints [`DEEP_VALUES_OUTPUT`]. Interpolation of such values calls their
+/// `to_text` (E0067), so the text of a value by its structure is tested in `value.rs`.
+#[allow(dead_code)]
+pub fn deep_values(depth: usize) -> String {
+    let trees = depth / 10;
+    format!(
+        "enum Chain:
+    End
+    Link(next as Chain)
+
+enum Tree:
+    Leaf
+    Node(children as List[Tree])
+
+function chain(depth as Int, last as Chain) returns Chain:
+    var link = last
+    for i in range(0, depth):
+        link = Link(next = link)
+    return link
+
+function tree(depth as Int) returns Tree:
+    var node = Leaf
+    for i in range(0, depth):
+        node = Node(children = [Leaf, node])
+    return node
+
+public function main():
+    let a = chain({depth}, End)
+    let b = chain({depth}, End)
+    let c = Link(next = a)
+    print(\"equal {{a == b}} {{a == c}} {{a != c}}\")
+    var seen = Set[Chain]()
+    seen.insert(a)
+    print(\"set {{seen.contains(b)}} {{seen.contains(c)}}\")
+    let table = {{a: 1}}
+    print(\"map {{table.get(b) or 0}} {{table.get(c) or 0}}\")
+    let t = tree({trees})
+    var forest = Set[Tree]()
+    forest.insert(t)
+    print(\"tree {{t == tree({trees})}} {{t == tree({trees} - 1)}} {{forest.contains(tree({trees}))}}\")
+"
+    )
+}
+
+/// What [`deep_values`] prints.
+#[allow(dead_code)]
+pub const DEEP_VALUES_OUTPUT: &str =
+    "equal true false true\nset true false\nmap 1 0\ntree true false true\n";
+
+/// A program that converts a value 5,000 levels deep from JSON and one 20,000 levels deep
+/// (S-5, L-17a, C-18): each level of `std.json.from_value` and `std.json.to_value` counts as a
+/// call, so the second ends with exhaustion of the stack, code 102, at the stack limit of 10,000
+/// calls. Before, the conversions recursed on the native stack without a bound and
+/// overflowed it on a value deep enough. It prints [`DEEP_JSON_OUTPUT`] before it ends.
+#[allow(dead_code)]
+pub const DEEP_JSON: &str = "import std.json as json
+from std.json import Value
+
+enum Chain:
+    End
+    Link(next as Chain)
+
+function chain(depth as Int) returns Chain:
+    var link = End
+    for i in range(0, depth):
+        link = Link(next = link)
+    return link
+
+function document(depth as Int) returns Value:
+    var link = Value.Text(\"End\")
+    for i in range(0, depth):
+        link = Value.Object({\"Link\": Value.Object({\"next\": link})})
+    return link
+
+function decoded(depth as Int) returns Bool:
+    let back = try json.decode[Chain](document(depth)) on DecodeError as e:
+        assert_fail(e.message)
+    return back == chain(depth)
+
+public function main():
+    print(\"decoded {decoded(5000)}\")
+    print(\"encoded {json.encode(chain(100)).length()}\")
+    print(\"decoded {decoded(20000)}\")
+";
+
+/// What [`DEEP_JSON`] prints before the conversion of 20,000 levels ends it with code 102.
+#[allow(dead_code)]
+pub const DEEP_JSON_OUTPUT: &str = "decoded true\nencoded 1805\n";

@@ -1,0 +1,9 @@
+## The total of an order.
+function total(prices as List[Int]) returns Int:
+    var sum = 0
+    for price in prices:
+        sum = summ + price
+    return sum
+
+function total(prices as List[Int]) returns Int:
+    return 0

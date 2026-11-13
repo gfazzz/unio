@@ -1,0 +1,3 @@
+# expect-error: 3
+function f() returns Int:
+    return max(a = , 2)

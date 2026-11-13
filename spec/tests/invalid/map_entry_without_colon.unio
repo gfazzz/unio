@@ -1,0 +1,2 @@
+# expect-error: 2
+let ages = {"ann" 31}

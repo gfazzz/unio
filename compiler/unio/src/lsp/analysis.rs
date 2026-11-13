@@ -297,7 +297,8 @@ impl Context<'_> {
         if self.doc.file_name().is_some_and(|n| n == "unio.toml") {
             for d in &manifest_found {
                 let at = range(&manifest_text, d.span.start.offset, d.span.end.offset);
-                items.push(lsp_diagnostic(d, at, lang, None));
+                let own = self.related_items(d, None, &manifest, &manifest_text, &package);
+                items.push(lsp_diagnostic(d, at, lang, None, own));
             }
             return Json::object(vec![("diagnostics", Json::Array(items))]);
         }
@@ -328,12 +329,16 @@ impl Context<'_> {
                             Json::str(format!("unio.toml:{}", d.span.start.line)),
                         ),
                     ]);
-                    items.push(lsp_diagnostic(d, range(source, 0, 0), lang, Some(related)));
+                    let own = self.related_items(d, None, &manifest, &manifest_text, &package);
+                    let at = range(source, 0, 0);
+                    items.push(lsp_diagnostic(d, at, lang, Some(related), own));
                 }
             }
+            let mut holes = 0;
             for d in all {
                 let at = range(source, d.span.start.offset, d.span.end.offset);
-                let mut item = lsp_diagnostic(&d, at, lang, None);
+                let own = self.related_items(&d, Some(&program), &self.doc, source, &package);
+                let mut item = lsp_diagnostic(&d, at, lang, None, own);
                 // The fixes and the expected type travel with the diagnostic; the server binds
                 // them to the revision of the document they were made for (T-13).
                 if let Some(Json::Object(data)) = match &mut item {
@@ -342,8 +347,18 @@ impl Context<'_> {
                     }
                     _ => None,
                 } {
-                    if let Some(expected) = &d.expected {
-                        data.push(("expected".to_string(), Json::str(expected.clone())));
+                    let expected = d.expected.clone().or_else(|| {
+                        // A syntax error of incomplete code: the type expected where the code
+                        // is missing, found by checking a name put there (T-13).
+                        if holes < 3 && hole_text(source, &d).is_some() {
+                            holes += 1;
+                            self.hole_expected(source, &d)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(expected) = expected {
+                        data.push(("expected".to_string(), Json::str(expected)));
                     }
                     let fixes: Vec<Json> = d
                         .fixes
@@ -370,10 +385,171 @@ impl Context<'_> {
     }
 }
 
+/// The name put in the place of missing code (T-13). It is an ordinary name: if the program
+/// declares it too, the expected type is found all the same.
+const HOLE: &str = "unio_expected_here";
+
+/// The text of a document with a name in the place of the code that a syntax error of
+/// incomplete code misses, and the offset of the name: for E0012 that expects an expression,
+/// at the place of the error; for E0009, at the end of the line of the unclosed bracket, after
+/// an operator, a comma or an opening bracket, followed by the brackets that close the line.
+fn hole_text(text: &str, d: &Diagnostic) -> Option<(String, usize)> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    match d.code {
+        "E0012" if d.message.en.starts_with("expected an expression") => {
+            let at = d.span.start.offset.min(text.len());
+            let mut out = text[..at].to_string();
+            if out.chars().last().is_some_and(word) {
+                out.push(' ');
+            }
+            let hole = out.len();
+            out.push_str(HOLE);
+            if text[at..].chars().next().is_some_and(word) {
+                out.push(' ');
+            }
+            out.push_str(&text[at..]);
+            Some((out, hole))
+        }
+        "E0009" => {
+            let open = d.span.start.offset.min(text.len());
+            let end = text[open..].find('\n').map_or(text.len(), |i| open + i);
+            let mut closers = Vec::new();
+            let mut in_text = false;
+            let mut escaped = false;
+            let mut content = end;
+            for (i, c) in text[open..end].char_indices() {
+                if in_text {
+                    match c {
+                        '\\' if !escaped => escaped = true,
+                        '"' if !escaped => in_text = false,
+                        _ => escaped = false,
+                    }
+                    continue;
+                }
+                match c {
+                    '"' => in_text = true,
+                    '(' => closers.push(')'),
+                    '[' => closers.push(']'),
+                    '{' => closers.push('}'),
+                    ')' | ']' | '}' => {
+                        closers.pop();
+                    }
+                    '#' => {
+                        content = open + i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if in_text || closers.is_empty() {
+                return None;
+            }
+            let content = open + text[open..content].trim_end().len();
+            let last = text[..content].chars().last()?;
+            if !"([{,=+-*/%<>".contains(last) {
+                return None;
+            }
+            let mut out = text[..content].to_string();
+            if !"([{".contains(last) {
+                out.push(' ');
+            }
+            let hole = out.len();
+            out.push_str(HOLE);
+            out.extend(closers.iter().rev());
+            out.push_str(&text[content..]);
+            Some((out, hole))
+        }
+        _ => None,
+    }
+}
+
+impl Context<'_> {
+    /// The type expected in the place of the code that a syntax error of incomplete code
+    /// misses: the document is checked with a name there, the rest of its lines that do not
+    /// parse blanked, and the checker records the type expected where the name is (T-13).
+    fn hole_expected(&self, text: &str, d: &Diagnostic) -> Option<String> {
+        let (filled, hole) = hole_text(text, d)?;
+        let filled = repair_lines(&filled);
+        if !filled.is_char_boundary(hole) || !filled[hole..].starts_with(HOLE) {
+            return None;
+        }
+        let doc = self.doc.clone();
+        crate::vfs::with_replaced(&self.doc, filled, || {
+            super::facts::start();
+            let program = crate::load_checked(
+                std::slice::from_ref(&doc),
+                crate::effects::Profile::Application,
+            );
+            let facts = super::facts::take().unwrap_or_default();
+            let m = module_of(&program, &doc)?;
+            facts
+                .expected
+                .iter()
+                .find(|(module, span, _)| *module == m && span.start.offset == hole)
+                .filter(|(_, _, ty)| !ty.is_partial())
+                .map(|(_, _, ty)| program.show(ty))
+        })
+    }
+
+    /// The related locations of a diagnostic (C-8) as related information of the protocol. A
+    /// location without a file is in `path`, whose text is `text`; another file is a module of
+    /// the program, or a file relative to the package (E0089) or named by the command.
+    fn related_items(
+        &self,
+        d: &Diagnostic,
+        program: Option<&crate::program::Program>,
+        path: &Path,
+        text: &str,
+        package: &Path,
+    ) -> Vec<Json> {
+        let lang = self.request.lang;
+        d.related
+            .iter()
+            .filter_map(|r| {
+                let (file, source) = match &r.file {
+                    None => (path.to_path_buf(), text.to_string()),
+                    Some(f) => {
+                        let module =
+                            program.and_then(|p| p.modules.iter().find(|m| m.analysis.path == *f));
+                        match module {
+                            Some(m) => (m.path.clone(), m.analysis.source.clone()),
+                            None => {
+                                let named = Path::new(f);
+                                let file = if named.is_absolute() {
+                                    named.to_path_buf()
+                                } else {
+                                    package.join(named)
+                                };
+                                let source = crate::vfs::read_to_string(&file).ok()?;
+                                (file, source)
+                            }
+                        }
+                    }
+                };
+                let uri = self.paths.uri(&file)?;
+                let at = range(&source, r.span.start.offset, r.span.end.offset);
+                Some(Json::object(vec![
+                    (
+                        "location",
+                        Json::object(vec![("uri", Json::str(uri)), ("range", at)]),
+                    ),
+                    ("message", Json::str(r.message.get(lang))),
+                ]))
+            })
+            .collect()
+    }
+}
+
 /// A diagnostic of the protocol: the range, the code with the link to its explanation, and the
-/// message; with `related`, a manifest diagnostic shown in a source document, whose message
-/// starts with its place.
-fn lsp_diagnostic(d: &Diagnostic, at: Json, lang: Lang, related: Option<Json>) -> Json {
+/// message; with `manifest`, a manifest diagnostic shown in a source document, whose message
+/// starts with its place; `own` holds the related locations of the diagnostic itself (C-8).
+fn lsp_diagnostic(
+    d: &Diagnostic,
+    at: Json,
+    lang: Lang,
+    manifest: Option<Json>,
+    own: Vec<Json>,
+) -> Json {
     let severity = match d.severity {
         Severity::Error => 1,
         Severity::Warning => 2,
@@ -383,7 +559,7 @@ fn lsp_diagnostic(d: &Diagnostic, at: Json, lang: Lang, related: Option<Json>) -
     if let Some(label) = &d.label {
         message.push_str(&format!(" ({})", label.get(lang)));
     }
-    if related.is_some() {
+    if manifest.is_some() {
         message = format!("unio.toml:{}: {message}", d.span.start.line);
     }
     let mut fields = vec![
@@ -404,8 +580,9 @@ fn lsp_diagnostic(d: &Diagnostic, at: Json, lang: Lang, related: Option<Json>) -
             )]),
         ),
     ];
-    if let Some(related) = related {
-        fields.push(("relatedInformation", Json::Array(vec![related])));
+    let related: Vec<Json> = manifest.into_iter().chain(own).collect();
+    if !related.is_empty() {
+        fields.push(("relatedInformation", Json::Array(related)));
     }
     Json::object(fields)
 }

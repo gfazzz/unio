@@ -468,12 +468,19 @@ impl Lexer {
                             ));
                             return None;
                         }
-                        Some((open, _)) if open != expected => {
-                            self.diagnostics.push(Diagnostic::error(
-                                "E0010",
-                                span,
-                                catalog::mismatched(p, open),
-                            ));
+                        Some((open, at)) if open != expected => {
+                            // The bracket that is still open is related (C-8).
+                            let mut end = at;
+                            end.offset += 1;
+                            end.column += 1;
+                            let opened = crate::diag::Related::here(
+                                Span::new(at, end),
+                                catalog::opened_here(&open.to_string()),
+                            );
+                            self.diagnostics.push(
+                                Diagnostic::error("E0010", span, catalog::mismatched(p, open))
+                                    .with_related(opened),
+                            );
                             // `[g(1, 2]`: the bracket closes its own opening bracket, and the
                             // message names the one left open between them, so that the
                             // opening bracket is not reported as unclosed too.

@@ -20,15 +20,19 @@ Unio рассчитан на то, что его пишут люди и аген
 
 ## 2. Форматы JSON
 
-Коды, имена полей и форма JSON не зависят от языка сообщений (К-10): `--lang=ru` или `UNIO_LANG=ru` меняют только `message`, `explanation` и описания исправлений. Пути такие, как в командной строке, строки и столбцы считаются с 1, столбцы — в символах.
+Коды, имена полей и форма JSON не зависят от языка сообщений (К-10): `--lang=ru` или `UNIO_LANG=ru` меняют только `message`, `explanation`, описания исправлений и сообщения связанных мест. Пути такие, как в командной строке, строки и столбцы считаются с 1, столбцы — в символах.
+
+Примеры — это вывод команд, указанных над каждым из них, на файлах [compiler/unio/tests/data/ai/](../../compiler/unio/tests/data/ai); `tests/ai_examples.rs` выполняет их и сравнивает вывод с этими блоками и с английской версией, так что примеры не могут разойтись с компилятором. Только пути сокращены до этого каталога и репозитория, хэши заканчиваются на `...`, а `time_ms` может отличаться.
 
 ### 2.1 Диагностики: `unio check --diagnostics=json FILE...`
 
 Массив диагностик, пустой, если файлы чисты; код завершения 0 при пустом массиве и 1 иначе. `unio check` за один запуск сообщает все найденные ошибки (К-2), сначала синтаксические: проверки имён и типов выполняются только для файлов, которые разобраны.
 
+<!-- example: check --diagnostics=json total.unio -->
 ```json
 [
-  {"code":"E0056","severity":"error","message":"unknown name 'summ'","explanation":"The name is not declared where it is used. Check the spelling; the fix suggests the closest visible name.","spans":[{"file":"total.unio","start":{"line":5,"column":12,"offset":123},"end":{"line":5,"column":16,"offset":127},"label":null}],"fixes":[{"file":"total.unio","range":{"start":{"line":5,"column":12,"offset":123},"end":{"line":5,"column":16,"offset":127}},"new_text":"sum","description":"replace with 'sum'"}],"related":[]}
+  {"code":"E0056","severity":"error","message":"unknown name 'summ'","explanation":"The name is not declared where it is used. Check the spelling; the fix suggests the closest visible name.","spans":[{"file":"total.unio","start":{"line":5,"column":15,"offset":130},"end":{"line":5,"column":19,"offset":134},"label":null}],"fixes":[{"file":"total.unio","range":{"start":{"line":5,"column":15,"offset":130},"end":{"line":5,"column":19,"offset":134}},"new_text":"sum","description":"replace with 'sum'"}],"related":[]},
+  {"code":"E0051","severity":"error","message":"'total' is declared twice; rename one of them","explanation":"A module declares each name once, and a type has one method of each name. Rename or remove one of the declarations.","spans":[{"file":"total.unio","start":{"line":8,"column":10,"offset":168},"end":{"line":8,"column":15,"offset":173},"label":null}],"fixes":[],"related":[{"symbol":"total.total","message":"'total' is first declared here","span":{"file":"total.unio","start":{"line":2,"column":10,"offset":35},"end":{"line":2,"column":15,"offset":40},"label":null}}]}
 ]
 ```
 
@@ -40,7 +44,7 @@ Unio рассчитан на то, что его пишут люди и аген
 | `explanation` | как исправить; `unio explain CODE` добавляет пример и его исправление |
 | `spans` | где: `file`, `start` и `end` со `line`, `column` и байтовым `offset`, необязательная `label` |
 | `fixes` | замены, если исправление однозначно: заменить `range` в `file` на `new_text`; `description` говорит, что это делает |
-| `related` | другие места и символы; в 0.1 всегда пусто |
+| `related` | другие важные места, каждое с `message`, `span` (как в `spans`, `label` равен null) и `symbol`, полным именем, если место — объявление, иначе null: прежнее объявление повторённого имени, объявление типа при несовпадении типов или функции, которой не подходит вызов, список `fails with` функции, вызванной без `try`, обработчики и сигнатура для необработанной ошибки, связывание имени, которое нельзя изменить, строка манифеста для E0085, E0088 и E0089. Места в стандартной библиотеке опускаются, кроме нарушения слоя в ней (E0084); их показывает `unio symbol`. Текстовый вывод показывает каждое как `= примечание: ФАЙЛ:СТРОКА:СТОЛБЕЦ: СООБЩЕНИЕ` |
 
 Формат версионируется вместе с компилятором, а его JSON Schema опубликована как [compiler/diagnostics.schema.json](../../compiler/diagnostics.schema.json) (`urn:unio:diagnostics:1`); `tests/diagnostics.rs` проверяет вывод по ней (К-8).
 
@@ -48,21 +52,24 @@ Unio рассчитан на то, что его пишут люди и аген
 
 Массив с объектом на каждый блок `test`; код завершения 0, если прошли все тесты, и 1 иначе. Тест, который не компилируется, не проходит один, с диагностиками в `message`, а остальные тесты всё равно выполняются (И-5a).
 
+<!-- example: test --json double.unio -->
 ```json
-[{"file": "double.unio", "name": "double of two", "status": "failed", "time_ms": 0, "output": "", "message": "fault: assertion failed: double(2) == 5\n    at test \"double of two\" (double.unio:5)\n"},
- {"file": "double.unio", "name": "uses a missing name", "status": "failed", "time_ms": 0, "output": "", "message": "the test does not compile:\n5:E0056: unknown name 'duble'\n"}]
+[{"file": "double.unio", "name": "double of two", "status": "failed", "time_ms": 0, "output": "", "message": "fault: assertion failed: double(2) == 5\n    at test \"double of two\" (double.unio:5)\n", "properties": [], "hash": "unio-hash-v1:sha384:...", "cached": false},
+ {"file": "double.unio", "name": "uses a missing name", "status": "failed", "time_ms": 0, "output": "", "message": "the test does not compile:\n8:E0056: unknown name 'duble'\n", "properties": [], "hash": "unio-hash-v1:sha384:...", "cached": false}]
 ```
 
-`status` — `passed` или `failed`; `output` — то, что тест напечатал; `message` — сбой с трассой или диагностики, из-за которых тест не компилируется. Фильтр после параметров выполняет только тесты, имена которых его содержат: `unio test --json "parse_command" todo.unio`.
+`status` — `passed` или `failed`; `output` — то, что тест напечатал; `message` — сбой с трассой или диагностики, из-за которых тест не компилируется; `properties` — записи воспроизведения тестов свойств ([tools.md](tools.md)); `hash` — ключ результата теста, а `cached` говорит, взят ли результат повторно. Фильтр после параметров выполняет только тесты, имена которых его содержат: `unio test --json "parse_command" todo.unio`.
 
 ### 2.3 Структура файла: `unio outline --json FILE`
 
 Что объявляет файл, без тел: массив объявлений, у каждого `kind` (`function`, `struct`, `enum`, `error`, `interface`, `constant`, `extend` или `test`), `name`, однострочная `signature`, `line` и `members` той же формы: поля (`field`) структуры или ошибки, варианты (`variant`) перечисления, методы (`method`) интерфейса или блока `extend`. Это дешёвый способ увидеть файл, прежде чем его читать.
 
+<!-- example: outline --json double.unio -->
 ```json
 [
   {"kind": "function", "name": "double", "signature": "function double(n as Int) returns Int", "line": 1, "members": []},
-  {"kind": "test", "name": "double of two", "signature": "test \"double of two\"", "line": 4, "members": []}
+  {"kind": "test", "name": "double of two", "signature": "test \"double of two\"", "line": 4, "members": []},
+  {"kind": "test", "name": "uses a missing name", "signature": "test \"uses a missing name\"", "line": 7, "members": []}
 ]
 ```
 
@@ -70,14 +77,16 @@ Unio рассчитан на то, что его пишут люди и аген
 
 Одно объявление с тем, что оно значит для вызывающего (К-11): `name`, `kind`, `signature`, `documentation` (его комментарий `##`), `declared` (файл, строка и столбец), `usages` в программе, а для функции — `errors` (её `fails with`), `effects`, выведенные из вызовов (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`), `argument_effects` (параметры, эффекты которых — эффекты вызывающего), `layer` (самый низкий слой библиотеки, который ей нужен), `calls`, `hash` — хэш содержимого объявления и того, от чего оно зависит, `default_of` и `implementations`. Метод, объявленный в интерфейсе, показывает только свою сигнатуру. Для типа `implementations` перечисляет интерфейсы, которые он реализует в блоках `extend ... with` (Я-6c), каждый с `interface`, `declared` (блок `extend`) и `methods`: для каждого метода интерфейса — `function`, которую использует тип, где она объявлена (`declared`), и `default`, истинное, когда тип использует реализацию интерфейса по умолчанию, а не заменяет её. Метод, который тип получает по умолчанию, находится через тип: `unio symbol m.Square.name` показывает реализацию по умолчанию под этим именем, с `declared` в интерфейсе и с `default_of`, который её называет (`m.Shape.name`); у всех остальных объявлений `default_of` пуст, а `implementations` пуст у всего, кроме типов. Имена стандартной библиотеки начинаются с `std.`; имена программы считаются от её пакета, команда запускается из его каталога.
 
+<!-- example: symbol --json std.files.write_text -->
 ```json
-[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.","declared":"stdlib/std/files.unio:212:17","default_of":"","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"implementations":[],"hash":"unio-hash-v1:sha384:..."}]
+[{"name":"std.files.write_text","kind":"function","signature":"function write_text(path as Path, text as Text, durable as Bool = false) fails with IoError","documentation":"Replaces the file with the text atomically (guarantees 1 and 2); durable = true adds guarantee 3. Permission: files.write.\nExample:\n    try:\n        try write_text(Path(\"no-such-directory/report.txt\"), \"done\\n\")\n    on IoError as e:\n        assert e.kind == IoErrorKind.NotFound or e.kind == IoErrorKind.PermissionDenied","declared":"stdlib/std/files.unio:262:17","default_of":"","usages":[],"errors":["IoError"],"effects":["files.write","allocates"],"argument_effects":[],"layer":"std","calls":["std.files.AtomicFile.commit","std.files.AtomicFile.write","std.files.open_atomic"],"implementations":[],"hash":"unio-hash-v1:sha384:..."}]
 ```
 
 Тип `Square`, реализующий интерфейс `Shape`: `area` он заменяет, а `name` использует по умолчанию; текстовый вывод показывает то же как `implements: m.Shape` со строкой на каждый метод:
 
+<!-- example: symbol --json m.Square -->
 ```json
-[{"name":"m.Square","kind":"type","signature":"public struct Square:","documentation":"","declared":"m.unio:9:15","default_of":"","usages":["m.unio:13:14","m.unio:26:17"],"errors":[],"effects":[],"argument_effects":[],"layer":"core","calls":[],"implementations":[{"interface":"m.Shape","declared":"m.unio:12:1","methods":[{"name":"area","function":"m.Square.area","declared":"m.unio:13:14","default":false},{"name":"name","function":"m.Shape.name","declared":"m.unio:5:14","default":true}]}],"hash":"unio-hash-v1:sha384:..."}]
+[{"name":"m.Square","kind":"type","signature":"public struct Square:","documentation":"A square with a side of a whole number of units.","declared":"m.unio:9:15","default_of":"","usages":["m.unio:13:14","m.unio:17:17"],"errors":[],"effects":[],"argument_effects":[],"layer":"core","calls":[],"implementations":[{"interface":"m.Shape","declared":"m.unio:12:1","methods":[{"name":"area","function":"m.Square.area","declared":"m.unio:13:14","default":false},{"name":"name","function":"m.Shape.name","declared":"m.unio:5:14","default":true}]}],"hash":"unio-hash-v1:sha384:..."}]
 ```
 
 ### 2.5 Объяснения: `unio explain CODE`
@@ -118,7 +127,6 @@ Unio рассчитан на то, что его пишут люди и аген
 
 ## 5. Ограничения 0.1
 
-- `related` в диагностиках всегда пусто (К-8).
 - Предупреждения (`W`) и подсказки стиля (`H`) определены в К-6, но ни одного нет: каждая диагностика — ошибка.
 - У `unio test --json` пока нет данных для воспроизведения тестов свойств (И-12), а REPL из И-13 не существует.
 - Языковой сервер `unio lsp` отдаёт редактору те же диагностики в виде сообщений LSP ([editors/README.md](../../editors/README.md)).

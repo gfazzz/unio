@@ -168,6 +168,29 @@ fn expect(output: &Output, code: i32, stdout: &str) {
     assert!(!err.contains("without the sandbox"), "{err}");
 }
 
+/// L-18, S-2: `tools/check_library.unio` passes on the repository: every faulting operation of
+/// the standard library has a row in the inventory of docs/stdlib.md with a safe form that
+/// returns `Option` or fails with an error, the Russian table names the same, and no function of
+/// `stdlib/` declares `fails with Error`.
+#[test]
+fn every_faulting_operation_of_the_library_has_a_safe_form() {
+    let output = unio()
+        .args(["run", "tools/check_library.unio"])
+        .output()
+        .unwrap();
+    let out = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{out}{}",
+        program_err(&output)
+    );
+    assert!(
+        out.ends_with("no fails with Error; every faulting operation has a safe form\n"),
+        "{out}"
+    );
+}
+
 #[test]
 fn reference_utilities_work_end_to_end() {
     let root = repo_root();
@@ -933,6 +956,48 @@ test \"a few small values\":
 
 /// What [`common::deep_closures`] prints when it runs to its end.
 const DEEP_CLOSURES_OUTPUT: &str = "closures 3\nmixed 3\nfreed\n";
+
+/// L-17a, C-18: `==`, and the hash and equality of a key of a set or a map, walk a value
+/// without recursion on the native stack: two chains of 10 million enum values and trees of
+/// lists a million levels deep compare and serve as keys, and the program ends normally. Before,
+/// `==` of the two chains overflowed the stack of 1 GiB: `fatal runtime error: stack overflow`
+/// and code 134. Under a heap limit the chains do not fit, and the program ends with 102.
+#[test]
+fn deep_values_are_compared_and_hashed_without_recursion() {
+    let source = common::deep_values(common::DEEP_VALUES);
+    let dir = common::reserve_package("unio-interpreter", "deep-values", &source);
+    common::set_heap_limit(&dir, None);
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(output.status.code(), Some(0), "{}", program_err(&output));
+    assert_eq!(text(&output.stdout), common::DEEP_VALUES_OUTPUT);
+    assert_eq!(program_err(&output), "");
+    common::set_heap_limit(&dir, Some(8_388_608));
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(output.status.code(), Some(102), "{}", program_err(&output));
+    assert_eq!(
+        program_err(&output),
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// S-5, L-17a, C-18: the conversions of `std.json` count each level of a value as a call, so a
+/// value deeper than the stack limit ends the program with exhaustion of the stack, code 102,
+/// and what it printed before stays printed. Before, they recursed on the native stack without
+/// a bound, and decoding 20,000 levels succeeded where the program's own recursion could not.
+#[test]
+fn json_conversions_of_deep_values_end_with_102() {
+    let dir = common::reserve_package("unio-interpreter", "deep-json", common::DEEP_JSON);
+    common::set_heap_limit(&dir, None);
+    let output = run_reserve(&dir, "run", None);
+    assert_eq!(output.status.code(), Some(102), "{}", program_err(&output));
+    assert_eq!(text(&output.stdout), common::DEEP_JSON_OUTPUT);
+    assert_eq!(
+        program_err(&output),
+        "fault: stack exhausted by recursion; the program ends with code 102\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
 
 /// A chain of 10 million closures, each capturing the one before, and a mixed chain in which a
 /// closure captures a list, a map, a struct, or an Option holding the closure before, are freed

@@ -1478,7 +1478,10 @@ pub fn report(p: &mut Program, profile: Profile) {
                 } else {
                     catalog::effect_without_manifest(effect, (&en, &ru))
                 };
-                found.push((u.module, Diagnostic::error("E0085", u.span, message)));
+                // The permissions of the manifest, or the manifest without them (C-8).
+                let related = p.manifest_related(u.module, "permissions");
+                let diagnostic = Diagnostic::error("E0085", u.span, message);
+                found.push((u.module, diagnostic.with_all_related(related)));
             }
         }
     }

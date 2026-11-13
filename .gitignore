@@ -1,5 +1,7 @@
 __pycache__/
 /compiler/target/
+# The build directory of a package (SB-11): the cache of unio build and unio test (C-11b).
+target/
 /bench/data/
 /bench/build/
 /bench/results*.json

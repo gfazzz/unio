@@ -1,0 +1,3 @@
+# expect-error: 2
+function first[](items as List[Int]) returns Int:
+    return items[0]

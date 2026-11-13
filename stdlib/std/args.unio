@@ -134,36 +134,59 @@ public function parser(
     about as Text,
     parameters as List[Parameter],
 ) returns Parser:
+    match declaration_problem(parameters):
+        case some(message): assert_fail("args.parser: {message}")
+        case none: pass
+    return Parser(program = program, about = about, parameters = parameters)
+
+## A declaration of parameters that cannot work; its message says why.
+public error DeclarationError:
+    message as Text
+
+## The declared parameters of a program, or DeclarationError for a declaration that cannot work:
+## the safe form of parser.
+## Example:
+##     try:
+##         let _ = try checked_parser("x", "", [flag("a", ""), flag("a", "")])
+##         assert_fail("declared twice")
+##     on DeclarationError as e:
+##         assert e.message == "'a' is declared twice"
+public function checked_parser(
+    program as Text,
+    about as Text,
+    parameters as List[Parameter],
+) returns Parser fails with DeclarationError:
+    match declaration_problem(parameters):
+        case some(message): fail DeclarationError(message = message)
+        case none: pass
+    return Parser(program = program, about = about, parameters = parameters)
+
+## Why the parameters cannot be declared together, if they cannot.
+function declaration_problem(parameters as List[Parameter]) returns Option[Text]:
     var names = Set[Text]()
     var shorts = Set[Text]()
     var optional_seen = false
     for index, parameter in parameters.enumerate():
         if parameter.name.is_empty() or parameter.name.starts_with("-"):
-            assert_fail("args.parser: the name '{parameter.name}' is empty or starts with -")
-        if parameter.name in names: assert_fail("args.parser: '{parameter.name}' is declared twice")
+            return some("the name '{parameter.name}' is empty or starts with -")
+        if parameter.name in names: return some("'{parameter.name}' is declared twice")
         names.insert(parameter.name)
         if not parameter.short.is_empty():
             if parameter.short.length() != 1 or parameter.short == "-":
-                assert_fail(
-                    "args.parser: the short name of '{parameter.name}' is not one character",
-                )
+                return some("the short name of '{parameter.name}' is not one character")
             if parameter.short in shorts:
-                assert_fail("args.parser: the short name '{parameter.short}' is declared twice")
+                return some("the short name '{parameter.short}' is declared twice")
             shorts.insert(parameter.short)
         match parameter.kind:
             case ParameterKind.Positional:
                 if parameter.default.is_some(): optional_seen = true
                 else if optional_seen:
-                    assert_fail(
-                        "args.parser: the required '{parameter.name}' follows an optional positional",
-                    )
+                    return some("the required '{parameter.name}' follows an optional positional")
             case ParameterKind.Rest:
                 if index != parameters.length() - 1:
-                    assert_fail(
-                        "args.parser: the rest '{parameter.name}' is not the last parameter",
-                    )
+                    return some("the rest '{parameter.name}' is not the last parameter")
             case _: pass
-    return Parser(program = program, about = about, parameters = parameters)
+    return none
 
 ## The usage text: the usage line, the description, and every parameter with its help and default.
 ## --help and -h give it unless the program declares parameters of those names.
@@ -328,6 +351,26 @@ extend Arguments:
             case ParameterKind.Flag: return name in self.flags
             case _: assert_fail("Arguments.flag: '{name}' is not a flag")
 
+    ## Whether the flag was given, or DeclarationError for a name that is not a declared flag: the
+    ## safe form of flag.
+    ## Example:
+    ##     let cli = parser("ls", "Lists.", [flag("long", "Long format.")])
+    ##     let arguments = try parse(cli, ["--long"]) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     let long = try arguments.checked_flag("long") on DeclarationError as e:
+    ##         assert_fail(e.message)
+    ##     assert long
+    ##     try:
+    ##         let _ = try arguments.checked_flag("wide")
+    ##         assert_fail("wide is not declared")
+    ##     on DeclarationError as e:
+    ##         assert e.message == "'wide' is not a declared parameter"
+    public function checked_flag(self, name as Text) returns Bool fails with DeclarationError:
+        let parameter = try lookup(self.parser, name)
+        match parameter.kind:
+            case ParameterKind.Flag: return name in self.flags
+            case _: fail DeclarationError(message = "'{name}' is not a flag")
+
     ## The value of an option or positional: the last one given, else its default, else none. A
     ## name that is not declared, or that is a flag, is a fault.
     ## Example:
@@ -339,6 +382,25 @@ extend Arguments:
         let parameter = declared(self.parser, name)
         match parameter.kind:
             case ParameterKind.Flag: assert_fail("Arguments.get: '{name}' is a flag")
+            case _: pass
+        match self.values.get(name):
+            case some(given): return given.last() or parameter.default
+            case none: return parameter.default
+
+    ## The value of an option or positional as get gives it, or DeclarationError for a name that is
+    ## not declared or that is a flag: the safe form of get, and with none for a missing value, of
+    ## value.
+    ## Example:
+    ##     let cli = parser("run", "Runs.", [option("config", "Configuration file.")])
+    ##     let arguments = try parse(cli, []) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     let config = try arguments.checked_get("config") on DeclarationError as e:
+    ##         assert_fail(e.message)
+    ##     assert config == none
+    public function checked_get(self, name as Text) returns Option[Text] fails with DeclarationError:
+        let parameter = try lookup(self.parser, name)
+        match parameter.kind:
+            case ParameterKind.Flag: fail DeclarationError(message = "'{name}' is a flag")
             case _: pass
         match self.values.get(name):
             case some(given): return given.last() or parameter.default
@@ -368,8 +430,22 @@ extend Arguments:
         let _ = declared(self.parser, name)
         return self.values.get(name) or []
 
+    ## The values as values gives them, or DeclarationError for a name that is not declared: the
+    ## safe form of values.
+    ## Example:
+    ##     let cli = parser("tag", "Tags.", [option("tag", "A tag.")])
+    ##     let arguments = try parse(cli, ["--tag", "a"]) on ArgsError as e:
+    ##         assert_fail(e.message)
+    ##     let tags = try arguments.checked_values("tag") on DeclarationError as e:
+    ##         assert_fail(e.message)
+    ##     assert tags == ["a"]
+    public function checked_values(self, name as Text) returns List[Text] fails with DeclarationError:
+        let _ = try lookup(self.parser, name)
+        return self.values.get(name) or []
+
     ## The value as a decimal integer; none when the parameter has no value. A value that is not an
-    ## integer fails with kind InvalidValue.
+    ## integer fails with kind InvalidValue; a name that is not declared, or that is a flag, is a
+    ## fault, as for get.
     ## Example:
     ##     let cli = parser("head", "Prints lines.", [option("lines", "How many.", short = "n", default = some("10"))])
     ##     let arguments = try parse(cli, ["-n", "3"]) on ArgsError as e:
@@ -453,6 +529,11 @@ function declared(parser as Parser, name as Text) returns Parameter:
     match parser.parameters.find(function (p as Parameter) returns Bool: p.name == name):
         case some(parameter): return parameter
         case none: assert_fail("args: '{name}' is not a declared parameter")
+
+function lookup(parser as Parser, name as Text) returns Parameter fails with DeclarationError:
+    match parser.parameters.find(function (p as Parameter) returns Bool: p.name == name):
+        case some(parameter): return parameter
+        case none: fail DeclarationError(message = "'{name}' is not a declared parameter")
 
 function add_value(var values as Map[Text, List[Text]], name as Text, value as Text):
     var given = values.get(name) or []

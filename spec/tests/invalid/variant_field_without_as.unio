@@ -1,0 +1,3 @@
+# expect-error: 3
+enum Shape:
+    Circle(radius Float)

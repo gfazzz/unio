@@ -89,6 +89,27 @@ fn overlaid(path: &Path) -> Option<&'static String> {
     OVERLAY.get().and_then(|o| o.get(path))
 }
 
+/// A text that takes the place of one file for a while, over the overlay: the language server
+/// checks a document with a name in the place of missing code to learn the type expected there
+/// (T-13).
+static REPLACED: std::sync::Mutex<Option<(PathBuf, String)>> = std::sync::Mutex::new(None);
+
+fn replaced(path: &Path) -> Option<String> {
+    let replaced = REPLACED.lock().unwrap_or_else(|e| e.into_inner());
+    replaced
+        .as_ref()
+        .filter(|(p, _)| p == path)
+        .map(|(_, text)| text.clone())
+}
+
+/// Runs the work with the text in the place of the file at the canonical path.
+pub fn with_replaced<T>(path: &Path, text: String, work: impl FnOnce() -> T) -> T {
+    *REPLACED.lock().unwrap_or_else(|e| e.into_inner()) = Some((path.to_path_buf(), text));
+    let result = work();
+    *REPLACED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    result
+}
+
 /// Makes the embedded files the only files programs are loaded from.
 pub fn install(stdlib: Option<PathBuf>, files: Vec<(PathBuf, String)>) {
     let _ = EMBEDDED.set(Embedded {
@@ -107,7 +128,7 @@ pub(crate) fn embedded_stdlib() -> Option<Option<PathBuf>> {
 }
 
 pub(crate) fn is_file(path: &Path) -> bool {
-    if overlaid(path).is_some() {
+    if overlaid(path).is_some() || replaced(path).is_some() {
         return true;
     }
     match EMBEDDED.get() {
@@ -118,6 +139,9 @@ pub(crate) fn is_file(path: &Path) -> bool {
 }
 
 pub(crate) fn read_to_string(path: &Path) -> std::io::Result<String> {
+    if let Some(text) = replaced(path) {
+        return Ok(text);
+    }
     if let Some(text) = overlaid(path) {
         return Ok(text.clone());
     }
@@ -136,7 +160,7 @@ pub(crate) fn read_to_string(path: &Path) -> std::io::Result<String> {
 
 /// Embedded paths are already canonical, and so are those of the embedded library.
 pub(crate) fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
-    if overlaid(path).is_some() {
+    if overlaid(path).is_some() || replaced(path).is_some() {
         return Ok(path.to_path_buf());
     }
     match EMBEDDED.get() {

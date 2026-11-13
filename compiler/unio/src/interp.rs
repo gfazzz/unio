@@ -203,6 +203,9 @@ pub struct Interp {
     pub(crate) sig_of: Vec<Option<(usize, Option<usize>)>>,
     /// The bound external of each function without a body.
     pub(crate) externs: Vec<Option<unio_runtime::externs::ExternFn>>,
+    /// Whether each external function reads nothing from outside the program: no file,
+    /// environment, argument, clock, randomness or process (C-11b, [`inputs`]).
+    pub(crate) extern_pure: Vec<bool>,
     /// The item of each struct or error declaration.
     pub(crate) decl_of: Vec<Option<usize>>,
     /// The type name of each declaration, shared by its values.
@@ -479,6 +482,7 @@ impl Interp {
             names: RefCell::new(names),
             codes,
             pool: RefCell::new(Vec::new()),
+            extern_pure: external_names.iter().map(|n| inputs::pure(n)).collect(),
             externs_json: external_names
                 .iter()
                 .map(|n| u8::from(n == "std.json.to_value" || n == "std.json.from_value"))
@@ -763,7 +767,10 @@ impl Interp {
             }
             frame[slot] = Value::Int(seed);
         }
-        let result = self.invoke_code(rt, f, frame, types)?;
+        property::enter();
+        let result = self.invoke_code(rt, f, frame, types);
+        property::leave();
+        let result = result?;
         if let Value::Enum(e) = &result {
             if &*e.variant == "some" {
                 if let Some((_, Value::Struct(found))) = e.fields.first() {
@@ -922,6 +929,9 @@ impl Interp {
         types: &Types,
     ) -> Outcome {
         let def = &self.program.funcs[f];
+        if !self.extern_pure[f] {
+            inputs::used();
+        }
         if !def.params.iter().any(|p| p.has_default) {
             if let (0, Some(function)) = (self.externs_json[f], self.externs[f]) {
                 return function(rt, args);
@@ -950,12 +960,14 @@ impl Interp {
         match self.external_names[f].as_str() {
             "std.json.to_value" => {
                 let v = args.first().cloned().unwrap_or(Value::Unit);
-                self.encode_json(rt, &v)
+                let at = self.json_site(rt, f);
+                self.encode_json(rt, &v, at)
             }
             "std.json.from_value" => {
                 let ty = types.values().next().cloned().unwrap_or(RtTy::Unknown);
                 let v = args.first().cloned().unwrap_or(Value::Unit);
-                self.decode_json(rt, &ty, &v, "")
+                let at = self.json_site(rt, f);
+                self.decode_json(rt, &ty, &v, "", at)
             }
             name => match self.externs[f] {
                 Some(function) => function(rt, args),
@@ -1741,6 +1753,10 @@ impl Interp {
                 }
             }
             S::While(condition, body) => loop {
+                // The time limit of a test ends a loop that makes no call (T-12).
+                if unio_runtime::deadline::time_up() {
+                    return Err(Unwind::Exhausted(rf::Exhaustion::Time));
+                }
                 if !self.truth(rt, env, condition)? {
                     return Ok(Flow::Normal);
                 }
@@ -1754,6 +1770,9 @@ impl Interp {
                 let source = self.eval(rt, env, iterable)?;
                 let mut cursor = self.cursor(rt, source)?;
                 loop {
+                    if unio_runtime::deadline::time_up() {
+                        return Err(Unwind::Exhausted(rf::Exhaustion::Time));
+                    }
                     let Some(item) = self.next(rt, &mut cursor)? else {
                         return Ok(Flow::Normal);
                     };
@@ -2727,42 +2746,84 @@ impl Interp {
             // The same text as the externals Int.to_text and Float.to_text.
             Value::Int(i) => i.to_string(),
             Value::Float(x) => unio_runtime::externs::float_text::float_to_text(*x),
-            Value::Resource(cell) => {
-                let inner = cell.value.borrow().clone();
-                self.display(rt, &inner)?
-            }
-            Value::Struct(s) => {
-                if self.method(&s.type_name, "to_text").is_some() {
-                    match self.call_method_value(rt, v.clone(), "to_text", Vec::new())? {
-                        Value::Text(t) => t.as_str().to_string(),
-                        _ => String::new(),
-                    }
-                } else {
-                    let mut parts = Vec::new();
-                    for (n, f) in &s.fields {
-                        parts.push(format!("{n} = {}", self.display(rt, f)?));
-                    }
-                    format!("{}({})", short_type_name(&s.type_name), parts.join(", "))
-                }
-            }
-            Value::Enum(e) => {
-                if self.method(&e.type_name, "to_text").is_some() {
-                    match self.call_method_value(rt, v.clone(), "to_text", Vec::new())? {
-                        Value::Text(t) => t.as_str().to_string(),
-                        _ => String::new(),
-                    }
-                } else if e.fields.is_empty() {
-                    e.variant.to_string()
-                } else {
-                    let mut parts = Vec::new();
-                    for (_, f) in &e.fields {
-                        parts.push(self.display(rt, f)?);
-                    }
-                    format!("{}({})", e.variant, parts.join(", "))
-                }
+            Value::Resource(_) | Value::Struct(_) | Value::Enum(_) => {
+                let mut out = String::new();
+                self.display_nested(rt, v, &mut out)?;
+                out
             }
             other => format!("{other:?}"),
         })
+    }
+
+    /// The text of a struct, an enum, or a resource, written by a loop over the parts still to
+    /// write rather than by recursion, so that the native stack does not depend on the depth of
+    /// the value (L-17a, C-18). A `to_text` of the program is called where its value is met;
+    /// its own calls count against the stack limit as every call does.
+    fn display_nested(&self, rt: &mut Runtime, v: &Value, out: &mut String) -> Result<(), Unwind> {
+        enum Part {
+            Value(Value),
+            Text(Rc<str>),
+            Static(&'static str),
+        }
+        let mut pending: Vec<Part> = Vec::new();
+        let mut next = Some(Part::Value(v.clone()));
+        while let Some(part) = next {
+            match part {
+                Part::Text(t) => out.push_str(&t),
+                Part::Static(t) => out.push_str(t),
+                Part::Value(v) => match &v {
+                    Value::Resource(cell) => {
+                        let inner = cell.value.borrow().clone();
+                        pending.push(Part::Value(inner));
+                    }
+                    Value::Struct(s) => {
+                        if self.method(&s.type_name, "to_text").is_some() {
+                            self.display_to_text(rt, &v, out)?;
+                        } else {
+                            out.push_str(short_type_name(&s.type_name));
+                            out.push('(');
+                            pending.push(Part::Static(")"));
+                            for (i, (n, f)) in s.fields.iter().enumerate().rev() {
+                                pending.push(Part::Value(f.clone()));
+                                pending.push(Part::Static(" = "));
+                                pending.push(Part::Text(Rc::clone(n)));
+                                if i > 0 {
+                                    pending.push(Part::Static(", "));
+                                }
+                            }
+                        }
+                    }
+                    Value::Enum(e) => {
+                        if self.method(&e.type_name, "to_text").is_some() {
+                            self.display_to_text(rt, &v, out)?;
+                        } else {
+                            out.push_str(&e.variant);
+                            if !e.fields.is_empty() {
+                                out.push('(');
+                                pending.push(Part::Static(")"));
+                                for (i, (_, f)) in e.fields.iter().enumerate().rev() {
+                                    pending.push(Part::Value(f.clone()));
+                                    if i > 0 {
+                                        pending.push(Part::Static(", "));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    other => out.push_str(&self.display(rt, other)?),
+                },
+            }
+            next = pending.pop();
+        }
+        Ok(())
+    }
+
+    /// Appends what the program's `to_text` of the value returns.
+    fn display_to_text(&self, rt: &mut Runtime, v: &Value, out: &mut String) -> Result<(), Unwind> {
+        if let Value::Text(t) = self.call_method_value(rt, v.clone(), "to_text", Vec::new())? {
+            out.push_str(t.as_str());
+        }
+        Ok(())
     }
 
     pub(crate) fn enum_has_variant(&self, type_name: &str, variant: &str) -> bool {
@@ -2835,7 +2896,28 @@ impl Interp {
         }))
     }
 
-    pub(crate) fn encode_json(&self, rt: &mut Runtime, v: &Value) -> Outcome {
+    /// The site of `std.json.to_value` or `std.json.from_value` and its line: each level of a
+    /// value they convert enters it as a call (see [`Interp::encode_json`]).
+    fn json_site(&self, rt: &mut Runtime, f: FnId) -> (u32, u32) {
+        let base = rt.site_base(|| self.sites());
+        (
+            base + f as u32,
+            self.program.funcs[f].span.start.line as u32,
+        )
+    }
+
+    /// `std.json.to_value`. Each level of the value enters the site `at` as a call, so that a
+    /// value nested deeper than the stack limit ends the program with exhaustion of the stack,
+    /// code 102, as recursion of the program does (L-17a, C-18), instead of overflowing the
+    /// native stack; JSON text is limited to 128 levels by `parse` (docs/runtime.md 3.5).
+    pub(crate) fn encode_json(&self, rt: &mut Runtime, v: &Value, at: (u32, u32)) -> Outcome {
+        rt.enter_site(at.0, at.1)?;
+        let result = self.encode_json_level(rt, v, at);
+        rt.leave();
+        result
+    }
+
+    fn encode_json_level(&self, rt: &mut Runtime, v: &Value, at: (u32, u32)) -> Outcome {
         Ok(match v {
             Value::Int(i) => self.json("Int", Some(("value", Value::Int(*i)))),
             Value::Float(f) => self.json("Float", Some(("value", Value::Float(*f)))),
@@ -2846,14 +2928,14 @@ impl Interp {
             Value::List(l) | Value::Tuple(l) => {
                 let items = l
                     .iter()
-                    .map(|x| self.encode_json(rt, x))
+                    .map(|x| self.encode_json(rt, x, at))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.json("Array", Some(("items", Value::list(items))))
             }
             Value::Set(s) => {
                 let items = s
                     .items()
-                    .map(|x| self.encode_json(rt, x))
+                    .map(|x| self.encode_json(rt, x, at))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.json("Array", Some(("items", Value::list(items))))
             }
@@ -2861,14 +2943,14 @@ impl Interp {
                 let mut out = OrderedMap::new();
                 for (k, x) in m.entries() {
                     let key = self.display(rt, k)?;
-                    out.put(Value::text(key), self.encode_json(rt, x)?);
+                    out.put(Value::text(key), self.encode_json(rt, x, at)?);
                 }
                 self.json("Object", Some(("fields", Value::map(out))))
             }
             Value::Struct(s) => {
                 let mut out = OrderedMap::new();
                 for (n, x) in &s.fields {
-                    out.put(Value::text(n.to_string()), self.encode_json(rt, x)?);
+                    out.put(Value::text(n.to_string()), self.encode_json(rt, x, at)?);
                 }
                 self.json("Object", Some(("fields", Value::map(out))))
             }
@@ -2886,7 +2968,7 @@ impl Interp {
                         .first()
                         .map(|(_, x)| x.clone())
                         .unwrap_or(Value::Unit);
-                    self.encode_json(rt, &inner)?
+                    self.encode_json(rt, &inner, at)?
                 }
             }
             Value::Enum(e) => {
@@ -2895,7 +2977,7 @@ impl Interp {
                 } else {
                     let mut fields = OrderedMap::new();
                     for (n, x) in &e.fields {
-                        fields.put(Value::text(n.to_string()), self.encode_json(rt, x)?);
+                        fields.put(Value::text(n.to_string()), self.encode_json(rt, x, at)?);
                     }
                     let mut outer = OrderedMap::new();
                     outer.put(
@@ -2925,12 +3007,29 @@ impl Interp {
         )))
     }
 
+    /// `std.json.from_value`; each level enters the site `at` as a call, as in
+    /// [`Interp::encode_json`].
     pub(crate) fn decode_json(
         &self,
         rt: &mut Runtime,
         ty: &RtTy,
         v: &Value,
         path: &str,
+        at: (u32, u32),
+    ) -> Outcome {
+        rt.enter_site(at.0, at.1)?;
+        let result = self.decode_json_level(rt, ty, v, path, at);
+        rt.leave();
+        result
+    }
+
+    fn decode_json_level(
+        &self,
+        rt: &mut Runtime,
+        ty: &RtTy,
+        v: &Value,
+        path: &str,
+        at: (u32, u32),
     ) -> Outcome {
         let (variant, payload) = match v {
             Value::Enum(e) if &*e.type_name == "Value" => (
@@ -2975,7 +3074,7 @@ impl Interp {
                 Some(Value::List(items)) if variant == "Array" => {
                     let mut out = Vec::new();
                     for (i, x) in items.iter().enumerate() {
-                        out.push(self.decode_json(rt, t, x, &format!("{path}/{i}"))?);
+                        out.push(self.decode_json(rt, t, x, &format!("{path}/{i}"), at)?);
                     }
                     if matches!(ty, RtTy::Set(_)) {
                         let mut s = OrderedSet::new();
@@ -2993,7 +3092,7 @@ impl Interp {
                 Some(Value::List(items)) if variant == "Array" && items.len() == ts.len() => {
                     let mut out = Vec::new();
                     for (i, (t, x)) in ts.iter().zip(items.iter()).enumerate() {
-                        out.push(self.decode_json(rt, t, x, &format!("{path}/{i}"))?);
+                        out.push(self.decode_json(rt, t, x, &format!("{path}/{i}"), at)?);
                     }
                     Ok(Value::tuple(out))
                 }
@@ -3005,7 +3104,7 @@ impl Interp {
                     for (k, x) in m.entries() {
                         let key = self.display(rt, k)?;
                         let value =
-                            self.decode_json(rt, vt, x, &format!("{path}/{}", pointer(&key)))?;
+                            self.decode_json(rt, vt, x, &format!("{path}/{}", pointer(&key)), at)?;
                         out.put(k.clone(), value);
                     }
                     Ok(Value::map(out))
@@ -3031,7 +3130,7 @@ impl Interp {
                             Ok(Value::none())
                         } else {
                             let inner = args.first().cloned().unwrap_or(RtTy::Unknown);
-                            Ok(Value::some(self.decode_json(rt, &inner, v, path)?))
+                            Ok(Value::some(self.decode_json(rt, &inner, v, path, at)?))
                         }
                     }
                     DefKind::Enum(vs) => match (variant.as_str(), payload) {
@@ -3074,6 +3173,7 @@ impl Interp {
                                         &self.ty_to_rt(t, &subst),
                                         fv,
                                         &sub,
+                                        at,
                                     )?),
                                     None => return Err(self.decode_error(&sub, "missing field")),
                                 }
@@ -3115,6 +3215,7 @@ impl Interp {
                                     &self.ty_to_rt(&f.ty, &subst),
                                     fv,
                                     &sub,
+                                    at,
                                 )?)),
                                 None if f.has_default => values.push(None),
                                 None => return Err(self.decode_error(&sub, "missing field")),
@@ -3692,6 +3793,36 @@ pub struct TestResult {
     pub millis: u128,
     /// The counterexamples `std.test.check_property` returned in the test (T-12).
     pub properties: Vec<property::Report>,
+    /// Whether the test read something from outside the program that no key records: a file,
+    /// the environment, the arguments, the clock, randomness or a process (C-11b). Its result
+    /// is then never reused.
+    pub external_inputs: bool,
+}
+
+/// The inputs from outside the program that a test reads (C-11b): any external function but
+/// those of `std.math`, `std.text` and `std.json`, which compute on their arguments alone.
+pub mod inputs {
+    use std::cell::Cell;
+
+    thread_local! {
+        static USED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Whether the external function of this name reads nothing from outside the program.
+    pub fn pure(name: &str) -> bool {
+        ["std.math.", "std.text.", "std.json."]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    }
+
+    pub(crate) fn used() {
+        USED.with(|u| u.set(true));
+    }
+
+    /// Whether an input from outside was read on this thread since the last call.
+    pub fn take() -> bool {
+        USED.with(|u| u.replace(false))
+    }
 }
 
 /// The counterexamples of property tests for the runner (T-12, scheme `unio-property-v1`).
@@ -3715,6 +3846,30 @@ pub mod property {
     thread_local! {
         static SEED: Cell<Option<i64>> = const { Cell::new(None) };
         static FOUND: RefCell<Vec<Report>> = const { RefCell::new(Vec::new()) };
+        /// How many calls of `check_property` run, and whether one ran when the test ended.
+        static ACTIVE: Cell<u32> = const { Cell::new(0) };
+        static ENDED_IN: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn enter() {
+        ACTIVE.with(|a| a.set(a.get() + 1));
+    }
+
+    pub(crate) fn leave() {
+        ACTIVE.with(|a| {
+            // A time limit ends the test inside the property: the runner says so (T-12).
+            if unio_runtime::deadline::time_up() {
+                ENDED_IN.with(|e| e.set(true));
+            }
+            a.set(a.get().saturating_sub(1));
+        });
+    }
+
+    /// Whether the test that ended last ran out of time inside `check_property`: in its
+    /// generator, its predicate, or its shrinker. Clears the mark.
+    pub fn ended_in_property() -> bool {
+        ACTIVE.with(|a| a.set(0));
+        ENDED_IN.with(|e| e.replace(false))
     }
 
     /// The seed every `check_property` of the tests on this thread uses (`unio test --seed`).
@@ -3736,14 +3891,76 @@ pub mod property {
     }
 }
 
-/// Runs one test block of a module in a fresh runtime with captured output.
+/// The limits of one test of `unio test` (T-12, docs/tools.md): the wall and processor time
+/// and the heap of each test, from the `[limits]` of the policy, or the defaults of the runner
+/// where the policy gives none, so that a test or a generator that never returns, or that
+/// allocates without end, fails and the next test runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestLimits {
+    pub wall_seconds: u64,
+    pub cpu_seconds: Option<u64>,
+    pub heap_bytes: u64,
+}
+
+/// The wall time of a test without a `limits.wall_seconds` in the policy: 60 seconds.
+pub const DEFAULT_TEST_WALL_SECONDS: u64 = 60;
+/// The heap of a test without a `limits.heap_bytes` in the policy: 1 GiB.
+pub const DEFAULT_TEST_HEAP_BYTES: u64 = 1 << 30;
+
+impl TestLimits {
+    /// The limits of a policy, with the defaults where it gives none.
+    pub fn of(policy: &unio_runtime::sandbox::Limits) -> TestLimits {
+        TestLimits {
+            wall_seconds: policy.wall_seconds.unwrap_or(DEFAULT_TEST_WALL_SECONDS),
+            cpu_seconds: policy.cpu_seconds,
+            heap_bytes: policy.heap_bytes.unwrap_or(DEFAULT_TEST_HEAP_BYTES),
+        }
+    }
+}
+
+impl Default for TestLimits {
+    fn default() -> TestLimits {
+        TestLimits::of(&unio_runtime::sandbox::Limits::default())
+    }
+}
+
+/// Runs one test block of a module in a fresh runtime with captured output, with the default
+/// limits of a test.
 pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
+    run_test_limited(interp, module, item, TestLimits::default())
+}
+
+/// Runs one test block of a module in a fresh runtime with captured output, within `limits`
+/// (T-12): a test that uses up its time or its heap fails with the limit it used up.
+pub fn run_test_limited(
+    interp: &Rc<Interp>,
+    module: ModId,
+    item: usize,
+    limits: TestLimits,
+) -> TestResult {
     let Item::Test(test) = &interp.program.modules[module].analysis.file.items[item] else {
         unreachable!("a test item")
     };
     let name = description(&test.description);
     property::take();
+    property::ended_in_property();
+    inputs::take();
     let (mut rt, out, err) = Runtime::captured(Vec::new());
+    // The heap limit of the policy holds for each test already; without one, the default.
+    let default_heap = rt.heap_limit().is_none();
+    if default_heap {
+        let bytes = usize::try_from(limits.heap_bytes).unwrap_or(usize::MAX);
+        rt.set_heap_limit(Some(bytes));
+        // A list or a text that doubles past the limit ends the test, not the run.
+        rt.set_heap_overdraft(bytes);
+    }
+    let deadline = unio_runtime::deadline::Deadline::start(
+        unio_runtime::deadline::Limits {
+            wall: std::time::Duration::from_secs(limits.wall_seconds),
+            cpu: limits.cpu_seconds.map(std::time::Duration::from_secs),
+        },
+        format!("\"{name}\""),
+    );
     let started = std::time::Instant::now();
     let label = format!("test \"{name}\"");
     let mut lower = Lowering::new(interp, module);
@@ -3770,9 +3987,45 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
         other => other,
     };
     drop(env);
+    let expired = deadline.expired();
+    drop(deadline);
+    let in_property = property::ended_in_property();
     let (passed, message) = match result {
         Ok(_) => (true, String::new()),
         Err(Unwind::Fault(f)) => (false, unio_runtime::reserve::outside(|| f.render())),
+        Err(Unwind::Exhausted(rf::Exhaustion::Time)) => {
+            let (what, seconds) = match expired {
+                Some(unio_runtime::deadline::Expired::Cpu) => {
+                    ("processor time", limits.cpu_seconds.unwrap_or(0))
+                }
+                _ => ("wall time", limits.wall_seconds),
+            };
+            let source = if limits.wall_seconds == DEFAULT_TEST_WALL_SECONDS
+                && what == "wall time"
+            {
+                "the default of unio test; set limits.wall_seconds in a policy to change it"
+            } else {
+                "the [limits] of the policy"
+            };
+            let place = if in_property {
+                "a generator, predicate or shrinker of std.test.check_property did not return"
+            } else {
+                "the test did not end"
+            };
+            (
+                false,
+                format!(
+                    "fault: the test used up its {what} limit of {seconds} s ({source}): {place}; the test was stopped (T-12)\n"
+                ),
+            )
+        }
+        Err(Unwind::Exhausted(rf::Exhaustion::Heap)) if default_heap => (
+            false,
+            format!(
+                "fault: memory exhausted: the test holds more than the default heap limit of {} bytes of unio test (set limits.heap_bytes in a policy to change it); the test was stopped (T-12)\n",
+                limits.heap_bytes
+            ),
+        ),
         Err(Unwind::Exhausted(x)) => (false, x.message().to_string()),
         Err(Unwind::Error(e)) => {
             let text = interp.display(&mut rt, &e).unwrap_or_default();
@@ -3788,6 +4041,7 @@ pub fn run_test(interp: &Rc<Interp>, module: ModId, item: usize) -> TestResult {
         output,
         millis,
         properties: property::take(),
+        external_inputs: inputs::take(),
     }
 }
 

@@ -64,25 +64,25 @@ public function nanoseconds(n as Int) returns Duration:
 public function microseconds(n as Int) returns Duration:
     return Duration(nanos = n * 1000)
 
-## A duration of n milliseconds.
+## A duration of n milliseconds; one that does not fit in Int nanoseconds is a fault.
 ## Example:
 ##     assert milliseconds(1500) == seconds(1) + milliseconds(500)
 public function milliseconds(n as Int) returns Duration:
     return Duration(nanos = n * 1000000)
 
-## A duration of n seconds.
+## A duration of n seconds; one that does not fit in Int nanoseconds is a fault.
 ## Example:
 ##     assert seconds(90) == minutes(1) + seconds(30)
 public function seconds(n as Int) returns Duration:
     return Duration(nanos = n * NANOS_PER_SECOND)
 
-## A duration of n minutes.
+## A duration of n minutes; one that does not fit in Int nanoseconds is a fault.
 ## Example:
 ##     assert minutes(60) == hours(1)
 public function minutes(n as Int) returns Duration:
     return Duration(nanos = n * 60 * NANOS_PER_SECOND)
 
-## A duration of n hours.
+## A duration of n hours; one that does not fit in Int nanoseconds is a fault.
 ## Example:
 ##     assert hours(24).total_seconds() == 86400
 public function hours(n as Int) returns Duration:
@@ -115,6 +115,34 @@ extend Duration:
         let rest = self.nanos % NANOS_PER_SECOND
         return whole.to_float() + rest.to_float() / NANOS_PER_SECOND.to_float()
 
+    ## The duration count times as long, or none when it does not fit in Int nanoseconds: the safe
+    ## form of microseconds, milliseconds, seconds, minutes and hours, as seconds(1).checked_times(n).
+    ## Example:
+    ##     assert seconds(1).checked_times(90) == some(minutes(1) + seconds(30))
+    ##     assert hours(1).checked_times(MAXIMUM_INT) == none
+    public function checked_times(self, count as Int) returns Option[Duration]:
+        match self.nanos.checked_multiply(count):
+            case some(nanos): return some(Duration(nanos = nanos))
+            case none: return none
+
+    ## The sum, or none when it does not fit: the safe form of +.
+    ## Example:
+    ##     assert seconds(1).checked_add(seconds(2)) == some(seconds(3))
+    ##     assert nanoseconds(MAXIMUM_INT).checked_add(nanoseconds(1)) == none
+    public function checked_add(self, other as Duration) returns Option[Duration]:
+        match self.nanos.checked_add(other.nanos):
+            case some(nanos): return some(Duration(nanos = nanos))
+            case none: return none
+
+    ## The difference, or none when it does not fit: the safe form of -.
+    ## Example:
+    ##     assert seconds(1).checked_subtract(seconds(3)) == some(seconds(-2))
+    ##     assert nanoseconds(MINIMUM_INT).checked_subtract(nanoseconds(1)) == none
+    public function checked_subtract(self, other as Duration) returns Option[Duration]:
+        match self.nanos.checked_subtract(other.nanos):
+            case some(nanos): return some(Duration(nanos = nanos))
+            case none: return none
+
     ## Whether the duration is below zero.
     ## Example:
     ##     assert (seconds(1) - seconds(2)).is_negative()
@@ -145,18 +173,37 @@ extend Duration with Display:
         return seconds_text(self.nanos) + "s"
 
 extend Instant:
-    ## The time from earlier to this reading; negative when earlier is later.
+    ## The time from earlier to this reading; negative when earlier is later, and a fault when it
+    ## does not fit in Int nanoseconds.
     ## Example:
     ##     assert monotonic().since(monotonic()) <= seconds(0)
     public function since(self, earlier as Instant) returns Duration:
         return Duration(nanos = self.nanos - earlier.nanos)
 
-    ## The reading the duration after this one.
+    ## The time from earlier to this reading, or none when it does not fit: the safe form of since.
+    ## Example:
+    ##     let start = monotonic()
+    ##     assert start.checked_since(start) == some(seconds(0))
+    ##     assert Instant(nanos = MINIMUM_INT).checked_since(Instant(nanos = 1)) == none
+    public function checked_since(self, earlier as Instant) returns Option[Duration]:
+        return nanoseconds(self.nanos).checked_subtract(nanoseconds(earlier.nanos))
+
+    ## The reading the duration after this one; a fault when it does not fit in Int nanoseconds.
     ## Example:
     ##     let start = monotonic()
     ##     assert start.plus(seconds(1)) > start
     public function plus(self, duration as Duration) returns Instant:
         return Instant(nanos = self.nanos + duration.nanos)
+
+    ## The reading the duration after this one, or none when it does not fit: the safe form of plus.
+    ## Example:
+    ##     let start = monotonic()
+    ##     assert start.checked_plus(seconds(1)) == some(start.plus(seconds(1)))
+    ##     assert Instant(nanos = 1).checked_plus(nanoseconds(MAXIMUM_INT)) == none
+    public function checked_plus(self, duration as Duration) returns Option[Instant]:
+        match self.nanos.checked_add(duration.nanos):
+            case some(nanos): return some(Instant(nanos = nanos))
+            case none: return none
 
 extend Instant with Order:
     function compare(self, other as Self) returns Int:
@@ -175,17 +222,37 @@ extend Timestamp:
     public function unix_seconds(self) returns Int:
         return floor_divide(self.nanos, NANOS_PER_SECOND)
 
-    ## The time from earlier to this timestamp; negative when earlier is later.
+    ## The time from earlier to this timestamp; negative when earlier is later, and a fault when it
+    ## does not fit in Int nanoseconds.
     ## Example:
     ##     assert from_unix_seconds(60).since(from_unix_seconds(0)) == minutes(1)
     public function since(self, earlier as Timestamp) returns Duration:
         return Duration(nanos = self.nanos - earlier.nanos)
 
-    ## The timestamp the duration after this one; a negative duration goes back.
+    ## The time from earlier to this timestamp, or none when it does not fit: the safe form of
+    ## since.
+    ## Example:
+    ##     assert from_unix_seconds(60).checked_since(from_unix_seconds(0)) == some(minutes(1))
+    ##     assert from_unix_nanoseconds(MINIMUM_INT).checked_since(from_unix_seconds(1)) == none
+    public function checked_since(self, earlier as Timestamp) returns Option[Duration]:
+        return nanoseconds(self.nanos).checked_subtract(nanoseconds(earlier.nanos))
+
+    ## The timestamp the duration after this one; a negative duration goes back. A result outside
+    ## the years 1677 to 2262 is a fault.
     ## Example:
     ##     assert from_unix_seconds(0).plus(hours(1)).unix_seconds() == 3600
     public function plus(self, duration as Duration) returns Timestamp:
         return Timestamp(nanos = self.nanos + duration.nanos)
+
+    ## The timestamp the duration after this one, or none outside the years 1677 to 2262: the safe
+    ## form of plus.
+    ## Example:
+    ##     assert from_unix_seconds(0).checked_plus(hours(1)) == some(from_unix_seconds(3600))
+    ##     assert from_unix_nanoseconds(MAXIMUM_INT).checked_plus(nanoseconds(1)) == none
+    public function checked_plus(self, duration as Duration) returns Option[Timestamp]:
+        match self.nanos.checked_add(duration.nanos):
+            case some(nanos): return some(Timestamp(nanos = nanos))
+            case none: return none
 
     ## The calendar fields in UTC.
     ## Example:
@@ -223,7 +290,8 @@ extend Timestamp with Display:
         if fields.nanosecond != 0: text = text + "." + fraction_digits(fields.nanosecond)
         return text + "Z"
 
-## The timestamp n seconds after 1970-01-01T00:00:00Z.
+## The timestamp n seconds after 1970-01-01T00:00:00Z; outside the years 1677 to 2262 a fault. Its
+## safe form is seconds(1).checked_times(n) with from_unix_nanoseconds.
 ## Example:
 ##     assert "{from_unix_seconds(0)}" == "1970-01-01T00:00:00Z"
 public function from_unix_seconds(n as Int) returns Timestamp:
@@ -385,6 +453,21 @@ extend ManualClock:
         if duration.is_negative(): assert_fail("ManualClock.advance: a negative duration")
         self.at = self.at.plus(duration)
         self.reading = self.reading.plus(duration)
+
+    ## Moves both times forward by the duration as advance does and returns the new wall time, or
+    ## none for a negative duration, which leaves the clock as it was: the safe form of advance.
+    ## Example:
+    ##     var clock = manual_clock(from_unix_seconds(0))
+    ##     assert clock.checked_advance(seconds(-1)) == none
+    ##     assert clock.checked_advance(seconds(5)) == some(from_unix_seconds(5))
+    public function checked_advance(var self, duration as Duration) returns Option[Timestamp]:
+        if duration.is_negative(): return none
+        match (self.at.checked_plus(duration), self.reading.checked_plus(duration)):
+            case (some(at), some(reading)):
+                self.at = at
+                self.reading = reading
+                return some(at)
+            case _: return none
 
     ## Sets the wall time, forward or back, as when the system time is changed; the monotonic reading
     ## stays.

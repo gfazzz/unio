@@ -6,6 +6,7 @@ Version 0.1-draft. Russian localization: [docs/ru/spec.md](../docs/ru/spec.md).
 |---|---|
 | [grammar.ebnf](grammar.ebnf) | Core grammar: lexical structure, declarations, statements, expressions, patterns, types |
 | [check_grammar.py](check_grammar.py) | Reference checker that interprets `grammar.ebnf` directly and parses programs with it |
+| [check_coverage.py](check_coverage.py) | Reference checker of T-5b: every grammar rule has corpus files, every diagnostic code a control program |
 | [tests/valid/](tests/valid) | Programs that must parse, one file per area of the grammar |
 | [tests/invalid/](tests/invalid) | Programs that must fail on the line, and with the code, stated in their first line |
 
@@ -72,6 +73,7 @@ E0004 is not used: because indentation grows one level at a time, a dedent alway
 - A file in `tests/valid/` must parse completely.
 - A file in `tests/invalid/` starts with `# expect-error: LINE` or `# expect-error: LINE CODE`. The checker must report the first error on that line, with that code when one is given. The checker reports codes for lexical errors only; every other syntax error is reported as `syntax`.
 - One file tests one thing. A new grammar rule comes with at least one valid and one invalid file.
+- CI enforces the last rule (T-5b) with `tools/check_coverage.unio`, whose reference is [check_coverage.py](check_coverage.py). A valid file covers the rules of its parse tree; an invalid file covers the rules in progress where it fails, that is, every rule whose attempt was on the way when the parser noted what it expected at the farthest token. A rule that cannot have such a file is exempt by a comment of the grammar beside it, `(* Corpus exemption: RULE has no invalid file. REASON *)`; today only `handled_head` is. The same check fails when a code of the catalog (`CODES` in `compiler/unio/src/catalog.rs`) has no program in [tests/control/](tests/control) and is not listed with its reason in `EXCLUDED` of `compiler/unio/tests/control.rs`, and when an exemption names something that is covered or does not exist.
 
 ## RFC 0001
 

@@ -1,0 +1,224 @@
+## Checks the test coverage that requirement T-5b asks CI to enforce.
+##
+## Usage (from the root of the repository):
+##     check_coverage
+##
+## Fails when a syntactic rule of spec/grammar.ebnf has no valid or no invalid file in the corpus
+## spec/tests, or when a code of the diagnostic catalog has no program in the control set
+## spec/tests/control, unless the exemption is documented.
+##
+## - A valid file covers the rules of its parse tree.
+## - An invalid file covers the rules in progress where it fails: every rule whose attempt was on
+##   the way when the parser noted what it expected at the farthest token (grammar.failing_rules).
+## - A rule is exempt by a comment of the grammar "Corpus exemption: RULE has no valid file" or
+##   "... no invalid file", which gives the reason.
+## - A control program is a file below spec/tests/control, other than a reference fix or a hidden
+##   check, whose first line is "# expect-error: LINE CODE". The codes are the list CODES of
+##   compiler/unio/src/catalog.rs; a code without a program is exempt when it is listed, with its
+##   reason, in EXCLUDED of compiler/unio/tests/control.rs.
+##
+## An exemption of something that is covered, or of a rule or code that does not exist, is an
+## error too, so that exemptions do not outlive their reason.
+## Exit code: 0 if everything is covered, 1 otherwise, 2 if an input cannot be read.
+## This is the Unio version of spec/check_coverage.py; both print the same lines.
+
+import grammar
+import std.args
+import std.files
+from std.text import split
+
+let GRAMMAR_PATH as Text = "spec/grammar.ebnf"
+
+let CORPUS as Text = "spec/tests"
+
+let CONTROL as Text = "spec/tests/control"
+
+let CATALOG as Text = "compiler/unio/src/catalog.rs"
+
+let CONTROL_TEST as Text = "compiler/unio/tests/control.rs"
+
+let USAGE as Text = "Usage: check_coverage   (from the root of the repository)"
+
+error SetupError:
+    message as Text
+
+## A documented exemption of a rule from valid or invalid corpus files.
+struct Exemption:
+    rule as Text
+    kind as Text
+
+## How many of the total are covered, and how many exemptions there are.
+struct Count:
+    covered as Int
+    total as Int
+    exempt as Int
+
+public function main() returns Int:
+    let arguments = args.list()
+    if not arguments.is_empty() and arguments[0] in ["-h", "--help"]:
+        print(USAGE)
+        return 0
+    var problems as List[Text] = []
+    let rules = try check_rules(problems) on SetupError as e:
+        print("check_coverage: {e.message}")
+        return 2
+    let codes = try check_codes(problems) on SetupError as e:
+        print("check_coverage: {e.message}")
+        return 2
+    for problem in problems:
+        print("FAIL {problem}")
+    print(
+        "grammar rules: {rules.covered}/{rules.total} with a valid and an invalid corpus file or an exemption ({rules.exempt} exempt)",
+    )
+    print("diagnostic codes: {codes.covered}/{codes.total} with a control program ({codes.exempt} exempt)")
+    if problems.is_empty():
+        print("coverage is complete")
+        return 0
+    print("{problems.length()} problem(s)")
+    return 1
+
+function read(name as Text) returns Text fails with SetupError:
+    return try files.read_text(Path(name)) on IoError as e:
+        fail SetupError(message = "{name}: {e.reason}")
+
+## The .unio files below the directory, sorted; none if it does not exist.
+function unio_files(directory as Text) returns List[Path]:
+    let found = try files.list_tree(Path(directory)) on IoError as e:
+        return []
+    return [path for path in found if path.extension() == "unio"]
+
+## The exemptions written in the grammar as "Corpus exemption: RULE has no KIND file".
+function exemptions(source as Text) returns List[Exemption]:
+    var found as List[Exemption] = []
+    let pieces = split(source, "Corpus exemption: ")
+    for piece in pieces.slice(1, pieces.length()):
+        let words = piece.split_whitespace()
+        if words.length() >= 5 and words[1] == "has" and words[2] == "no" and words[4].starts_with("file"):
+            found.append(Exemption(rule = words[0], kind = words[3]))
+    return found
+
+function check_rules(var problems as List[Text]) returns Count fails with SetupError:
+    let source = try read(GRAMMAR_PATH)
+    let language = try grammar.load_grammar(source) on grammar.GrammarError as e:
+        fail SetupError(message = "{GRAMMAR_PATH}: {e.message}")
+    let rules = grammar.syntactic_rules(language)
+    var valid = Set[Text]()
+    var invalid = Set[Text]()
+    for path in unio_files("{CORPUS}/valid"):
+        let text = try read(path.to_text())
+        let result = grammar.check_source(text, language, build_tree = true)
+        if result.problem.is_none():
+            for name in grammar.rules_in(grammar.tree_of(result)):
+                valid.insert(name)
+    for path in unio_files("{CORPUS}/invalid"):
+        let text = try read(path.to_text())
+        for name in grammar.failing_rules(text, language):
+            invalid.insert(name)
+    let exempt = exemptions(source)
+    for exemption in exempt:
+        let name = exemption.rule
+        if exemption.kind not in ["valid", "invalid"]:
+            problems.append("exemption of rule {name}: unknown kind {exemption.kind}")
+        else if name not in rules:
+            problems.append("exemption of rule {name}: no such syntactic rule")
+        else if (valid if exemption.kind == "valid" else invalid).contains(name):
+            problems.append("rule {name} has {exemption.kind} corpus files; remove its exemption")
+    var covered = 0
+    for name in rules:
+        var complete = true
+        for kind in ["valid", "invalid"]:
+            let seen = valid if kind == "valid" else invalid
+            if not seen.contains(name) and Exemption(rule = name, kind = kind) not in exempt:
+                complete = false
+                problems.append("rule {name} has no {kind} corpus file in {CORPUS}/{kind}")
+        if complete: covered = covered + 1
+    return Count(covered = covered, total = rules.length(), exempt = exempt.length())
+
+## The texts in double quotes between the marker and the next "];".
+function quoted_block(text as Text, start as Text) returns Option[List[Text]]:
+    match text.index_of(start):
+        case some(first):
+            let begin = first + start.length()
+            let last = text.index_of("];", start = begin) or text.length()
+            let pieces = split(text.slice(begin, last), "\"")
+            var found as List[Text] = []
+            for index, piece in pieces.enumerate():
+                if index % 2 == 1: found.append(piece)
+            return some(found)
+        case none: return none
+
+## E followed by four digits, such as E0001.
+function is_code(word as Text) returns Bool:
+    if word.length() != 5 or not word.starts_with("E"): return false
+    return word.slice(1, 5).chars().filter(
+        function (character as Text) returns Bool: "0123456789".contains(character),
+    ).length() == 4
+
+## A reference fix or a hidden check of a control program.
+function is_helper(name as Text) returns Bool:
+    return name.ends_with(".fixed.unio") or name.ends_with(".check.unio") or name.contains(".fixed.")
+
+## The codes that the control programs below the directory expect.
+function control_codes(directory as Text) returns Set[Text] fails with SetupError:
+    var codes = Set[Text]()
+    let found = try files.list_tree(Path(directory)) on IoError as e:
+        fail SetupError(message = "{directory}: {e.reason}")
+    for path in found:
+        if is_helper(path.name()): continue
+        let text = try read(path.to_text())
+        let first = text.lines().first() or ""
+        if first.starts_with("# expect-error:"):
+            let words = first.slice("# expect-error:".length(), first.length()).split_whitespace()
+            if words.length() == 2: codes.insert(words[1])
+    return codes
+
+function check_codes(var problems as List[Text]) returns Count fails with SetupError:
+    let catalog = quoted_block(try read(CATALOG), "pub const CODES: &[&str] = &[") or []
+    let marker = "const EXCLUDED: &[(&str, &str)] = &["
+    let excluded_block = quoted_block(try read(CONTROL_TEST), marker) or []
+    if catalog.is_empty():
+        fail SetupError(message = "{CATALOG}: the list CODES is missing")
+    let excluded = excluded_block.filter(is_code)
+    let programs = try control_codes(CONTROL)
+    var covered = 0
+    for code in catalog:
+        if programs.contains(code):
+            covered = covered + 1
+            if code in excluded:
+                problems.append("code {code} has a control program; remove it from EXCLUDED")
+        else if code not in excluded:
+            problems.append("code {code} has no control program in {CONTROL}")
+    for code in programs.items().sorted():
+        if code not in catalog:
+            problems.append("control programs expect {code}, which is not a code of the catalog")
+    for code in excluded:
+        if code not in catalog:
+            problems.append("EXCLUDED lists {code}, which is not a code of the catalog")
+    return Count(covered = covered, total = catalog.length(), exempt = excluded.length())
+
+test "exemptions are read from the comments of the grammar":
+    let source = "a = b ;\n(* Corpus exemption: b has no invalid file. Reason. *)\n"
+    assert exemptions(source) == [Exemption(rule = "b", kind = "invalid")]
+    assert exemptions("(* Corpus exemption: b is fine *)") == []
+
+test "quoted texts are read up to the end of the list":
+    let text = "pub const CODES: &[&str] = &[\n    \"E0001\", \"E0002\",\n];\nlet x = \"E0003\";\n"
+    assert quoted_block(text, "pub const CODES: &[&str] = &[") == some(["E0001", "E0002"])
+    assert quoted_block(text, "missing") == none
+
+test "helpers of control programs are not programs":
+    assert is_helper("absorb_itself.fixed.unio")
+    assert is_helper("absorb_itself.check.unio")
+    assert is_helper("unio.fixed.toml")
+    assert not is_helper("absorb_itself.unio")
+    assert not is_helper("unio.toml")
+
+test "an invalid source covers the rules in progress where it fails":
+    let language = try grammar.load_grammar(SMALL_GRAMMAR) on grammar.GrammarError as e:
+        assert_fail(e.message)
+    assert grammar.failing_rules("let x = 1\nlet = 2\n", language) == ["file", "statement"]
+    assert grammar.failing_rules("let x = 1\n", language) == []
+    let result = grammar.check_source("let x = 1\n", language, build_tree = true)
+    assert grammar.rules_in(grammar.tree_of(result)) == ["file", "statement"]
+
+let SMALL_GRAMMAR as Text = "(* Keywords (fixed; adding one requires an RFC): let\n   Contextual keywords (ordinary names except where a rule uses them):\n   A contextual keyword is lexed as NAME.\n   Reserved (using them is E0032): uses\n   Punctuation and operators: = *)\nfile = \{ statement \} EOF ;\nstatement = \"let\" NAME \"=\" INT NEWLINE ;\n"

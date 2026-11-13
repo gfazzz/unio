@@ -7,9 +7,11 @@
 
 pub mod api;
 pub mod ast;
+pub mod cache;
 pub mod catalog;
 pub mod check;
 pub mod diag;
+pub mod doc;
 pub mod doctest;
 pub mod effects;
 pub mod envelope;
@@ -33,7 +35,7 @@ pub mod symbol;
 pub mod types;
 pub mod vfs;
 
-pub use diag::{explanation, Diagnostic, Lang, Msg, Severity, Span};
+pub use diag::{explanation, Diagnostic, Lang, Msg, Related, Severity, Span};
 
 /// The result of checking one source file.
 pub struct Analysis {

@@ -1,0 +1,409 @@
+## Checks two rules of the standard library in stdlib/.
+##
+## Usage (from the root of the repository):
+##     check_library
+##
+## - S-2: no function declares "fails with Error"; every error type is concrete.
+## - L-18: every faulting operation has a safe form that returns Option or fails with an error.
+##   The faulting operations are the operators of the built-in types in OPERATORS, and the public
+##   functions of stdlib/ whose documentation comment says that they fault ("a fault", "is a
+##   fault"), that call assert_fail, or that call a private function of their file that faults.
+##   A function whose comment calls it "the safe form of" another is not faulting for its comment;
+##   the methods of an interface (`extend Duration with Add`) count as public, since an operator
+##   calls them. A faulting call that a public function makes to another public function is not
+##   followed: such a function must say in its comment that it faults.
+##   The inventory is the table of the section "Faulting operations and their safe forms (L-18)"
+##   of docs/stdlib.md: a row names one operation and, in its last column, its safe form, or
+##   "none" ("нет") with the reason. A
+##   faulting operation without a row, a safe form that is not a public function of stdlib/ that
+##   returns Option or fails with an error, and a row whose operation is not an operator or a
+##   public function are errors. Only the operations of INTENTIONAL, whose purpose is the fault,
+##   may name no safe form. The table of docs/ru/stdlib.md must name the same operations and safe
+##   forms in the same order.
+##
+## Names: a method is Type.name (Text.slice), a function of a module is module.name
+## (std.math.clamp), a function of the prelude is its name (assert_fail).
+## Exit code: 0 if there are no problems, 1 otherwise, 2 if an input cannot be read.
+
+import std.args
+import std.files
+from std.text import join, split
+
+let STDLIB as Text = "stdlib"
+
+let INVENTORY as Text = "docs/stdlib.md"
+
+let INVENTORY_RU as Text = "docs/ru/stdlib.md"
+
+## The heading of the inventory in each language: the line that starts with "## " and holds it.
+let HEADING as Text = "(L-18)"
+
+let HEADING_RU as Text = "(Я-18)"
+
+## The faulting operators of the built-in types, as the inventory names them.
+let OPERATORS as List[Text] = [
+    "a + b",
+    "a - b",
+    "a * b",
+    "a / b",
+    "a % b",
+    "a ** b",
+    "-a",
+    "items[index]",
+    "map[key]",
+]
+
+## The operations whose purpose is the fault: they have no safe form.
+let INTENTIONAL as List[Text] = ["assert_fail", "expect_fault"]
+
+let NAME_CHARACTERS as Text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+let USAGE as Text = "Usage: check_library   (from the root of the repository)"
+
+error SetupError:
+    message as Text
+
+## A function of the standard library as the check sees it.
+struct Declared:
+    name as Text
+    file as Text
+    line as Int
+    exported as Bool
+    doc as Text
+    signature as Text
+    asserts as Bool
+    calls as List[Text]
+
+## One row of the inventory: the operation and the names in its last column.
+struct Row:
+    operation as Text
+    safe as List[Text]
+
+public function main() returns Int:
+    let arguments = args.list()
+    if not arguments.is_empty() and arguments[0] in ["-h", "--help"]:
+        print(USAGE)
+        return 0
+    var problems as List[Text] = []
+    var functions as List[Declared] = []
+    let found = try files.list_tree(Path(STDLIB)) on IoError as e:
+        print("check_library: {STDLIB}: {e.reason}")
+        return 2
+    for path in found:
+        if path.extension() != "unio": continue
+        let name = path.to_text().replace("\\", "/")
+        let source = try read(name) on SetupError as e:
+            print("check_library: {e.message}")
+            return 2
+        problems.append_all(error_problems(name, source))
+        functions.append_all(functions_of(name, source))
+    let rows = try inventory(INVENTORY, HEADING) on SetupError as e:
+        print("check_library: {e.message}")
+        return 2
+    let rows_ru = try inventory(INVENTORY_RU, HEADING_RU) on SetupError as e:
+        print("check_library: {e.message}")
+        return 2
+    let faulting = faulting_operations(functions)
+    problems.append_all(inventory_problems(faulting, rows, functions))
+    if rows != rows_ru:
+        problems.append(
+            "the table of {INVENTORY_RU} does not name the operations and safe forms of {INVENTORY}",
+        )
+    for problem in problems:
+        print("FAIL {problem}")
+    print("faulting operations: {faulting.length()}, rows of the inventory: {rows.length()}")
+    if problems.is_empty():
+        print("no fails with Error; every faulting operation has a safe form")
+        return 0
+    print("{problems.length()} problem(s)")
+    return 1
+
+function read(name as Text) returns Text fails with SetupError:
+    return try files.read_text(Path(name)) on IoError as e:
+        fail SetupError(message = "{name}: {e.reason}")
+
+## The module of a file of the library: none for the prelude (prelude.unio and builtin/).
+function module_of(file as Text) returns Option[Text]:
+    let name = split(file, "/").last() or file
+    if name == "prelude.unio" or file.contains("/builtin/"): return none
+    return some("std." + name.replace(".unio", ""))
+
+## S-2: the lines that declare "fails with" a list holding Error itself.
+function error_problems(file as Text, source as Text) returns List[Text]:
+    var found as List[Text] = []
+    for index, line in source.lines().enumerate():
+        match line.index_of("fails with "):
+            case some(at):
+                let rest = line.slice(at + "fails with ".length(), line.length())
+                for part in split(rest.replace(":", ","), ","):
+                    if part.trim() == "Error":
+                        found.append("{file}:{index + 1}: fails with Error (S-2): name concrete error types")
+            case none: pass
+    return found
+
+## The number of spaces at the start of the line.
+function indent(line as Text) returns Int:
+    return line.length() - line.trim_start().length()
+
+## The name after "function " up to "(" or "[".
+function function_name(text as Text) returns Text:
+    let at = text.index_of("function ") or 0
+    var name = ""
+    for character in text.slice(at + "function ".length(), text.length()).chars():
+        if character == "(" or character == "[" or character == " ": break
+        name = name + character
+    return name
+
+## The type an extend block extends: "extend[T] List[T] with X:" gives List.
+function extended_type(line as Text) returns Text:
+    var rest = line.slice("extend".length(), line.length())
+    if rest.starts_with("["):
+        rest = rest.slice((rest.index_of("] ") or 0) + 2, rest.length())
+    var name = ""
+    for character in rest.trim_start().chars():
+        if character == "[" or character == " " or character == ":": break
+        name = name + character
+    return name
+
+## Whether the character can be part of a name.
+function is_name_character(character as Text) returns Bool:
+    return character == "_" or NAME_CHARACTERS.contains(character)
+
+## The names called as name(...) in the text, not as methods (.name(...)).
+function called_names(text as Text) returns List[Text]:
+    var names as List[Text] = []
+    var current = ""
+    var previous = ""
+    var start = ""
+    for character in text.chars():
+        if is_name_character(character):
+            if current.is_empty(): start = previous
+            current = current + character
+        else:
+            if character == "(" and not current.is_empty() and start != ".":
+                names.append(current)
+            current = ""
+        previous = character
+    return names
+
+## The functions of a file with their comments, signatures and calls; test blocks are skipped.
+function functions_of(file as Text, source as Text) returns List[Declared]:
+    let lines = source.lines()
+    let module = module_of(file)
+    var found as List[Declared] = []
+    var target = ""
+    var implements = false
+    var index = 0
+    while index < lines.length():
+        let line = lines[index]
+        let stripped = line.trim()
+        if indent(line) == 0 and not stripped.is_empty() and not stripped.starts_with("#"):
+            if stripped.starts_with("extend"):
+                target = extended_type(stripped)
+                implements = stripped.contains(" with ")
+            else:
+                target = ""
+                implements = false
+        let level = indent(line)
+        var is_function = false
+        for start in ["function ", "public function ", "external function ", "public external function "]:
+            if stripped.starts_with(start): is_function = true
+        if not is_function or (level != 0 and target.is_empty()) or level > 4:
+            index = index + 1
+            continue
+        var doc as List[Text] = []
+        var back = index - 1
+        while back >= 0 and lines[back].trim().starts_with("##") and indent(lines[back]) == level:
+            doc.append(lines[back].trim().slice(2, lines[back].trim().length()).trim())
+            back = back - 1
+        doc = doc.reversed()
+        var signature = stripped
+        var depth = stripped.count("(") - stripped.count(")")
+        var next = index + 1
+        while depth > 0 and next < lines.length():
+            signature = signature + " " + lines[next].trim()
+            depth = depth + lines[next].count("(") - lines[next].count(")")
+            next = next + 1
+        var body as List[Text] = []
+        while next < lines.length() and (lines[next].trim().is_empty() or indent(lines[next]) > level):
+            let text = lines[next].trim()
+            if not text.starts_with("#"): body.append(text)
+            next = next + 1
+        let text = join(body, "\n")
+        let name = function_name(stripped)
+        var qualified = name
+        if not target.is_empty(): qualified = target + "." + name
+        else:
+            match module:
+                case some(prefix): qualified = prefix + "." + name
+                case none: pass
+        found.append(
+            Declared(
+                name = qualified,
+                file = file,
+                line = index + 1,
+                exported = stripped.starts_with("public ") or (implements and level == 4),
+                doc = join(doc, " "),
+                signature = signature,
+                asserts = text.contains("assert_fail("),
+                calls = called_names(text),
+            ),
+        )
+        index = next
+    return found
+
+## Whether the comment says the function faults, and is not the safe form of something.
+function documents_fault(doc as Text) returns Bool:
+    if doc.contains("the safe form of"): return false
+    for word in split(doc.replace(".", " ").replace(",", " ").replace(";", " ").replace(":", " "), " "):
+        if word == "fault" or word == "faults": return true
+    return false
+
+## The last part of a qualified name: std.math.clamp gives clamp.
+function short_name(name as Text) returns Text:
+    return split(name, ".").last() or name
+
+## The public functions that fault, with the reason, in the order of the files.
+function faulting_operations(functions as List[Declared]) returns List[Tuple[Text, Text]]:
+    # The private functions that fault, followed through their calls within a file.
+    var private_faults = Set[Text]()
+    var changed = true
+    while changed:
+        changed = false
+        for f in functions:
+            if f.exported or private_faults.contains(f.file + " " + short_name(f.name)): continue
+            var faults = f.asserts or documents_fault(f.doc)
+            for called in f.calls:
+                if private_faults.contains(f.file + " " + called): faults = true
+            if faults:
+                private_faults.insert(f.file + " " + short_name(f.name))
+                changed = true
+    var found as List[Tuple[Text, Text]] = []
+    for f in functions:
+        if not f.exported: continue
+        var reason = ""
+        if documents_fault(f.doc): reason = "its comment says it faults"
+        else if f.asserts: reason = "it calls assert_fail"
+        else:
+            for called in f.calls:
+                if reason.is_empty() and private_faults.contains(f.file + " " + called):
+                    reason = "it calls {called}, which faults"
+        if not reason.is_empty(): found.append(("{f.name} ({f.file}:{f.line})", reason))
+    return found
+
+## The code spans of a cell of a Markdown table.
+function code_spans(cell as Text) returns List[Text]:
+    var found as List[Text] = []
+    for index, piece in split(cell, "`").enumerate():
+        if index % 2 == 1: found.append(piece)
+    return found
+
+## The rows of the table below the heading that holds the marker.
+function inventory(name as Text, marker as Text) returns List[Row] fails with SetupError:
+    let text = try read(name)
+    match rows_of(text, marker):
+        case some(rows): return rows
+        case none: fail SetupError(message = "{name}: no section with {marker} and a table")
+
+function rows_of(text as Text, marker as Text) returns Option[List[Row]]:
+    var inside = false
+    var rows as List[Row] = []
+    var table = false
+    for line in text.lines():
+        if line.starts_with("## "):
+            if inside and table: return some(rows)
+            inside = line.contains(marker)
+            continue
+        if not inside: continue
+        if line.starts_with("|"):
+            table = true
+            let cells = split(line, "|")
+            if cells.length() < 4: continue
+            let operation = code_spans(cells[1])
+            if operation.is_empty(): continue
+            let last = cells[cells.length() - 2].trim()
+            let named = last.starts_with("none") or last.starts_with("нет")
+            rows.append(Row(operation = operation[0], safe = [] if named else code_spans(last)))
+        else if table and line.trim().is_empty():
+            return some(rows)
+    if table: return some(rows)
+    return none
+
+## Whether the function returns Option or fails with an error.
+function is_safe(f as Declared) returns Bool:
+    return f.signature.contains("returns Option[") or f.signature.contains(" fails with ")
+
+## L-18: every faulting operation has a row, and every row a safe form or a purpose.
+function inventory_problems(
+    faulting as List[Tuple[Text, Text]],
+    rows as List[Row],
+    functions as List[Declared],
+) returns List[Text]:
+    var problems as List[Text] = []
+    var public_names = Set[Text]()
+    for f in functions:
+        if f.exported: public_names.insert(f.name)
+    let listed = [row.operation for row in rows]
+    for operator in OPERATORS:
+        if operator not in listed:
+            problems.append("the operator {operator} faults and has no row in {INVENTORY} (L-18)")
+    for place, reason in faulting:
+        let name = split(place, " ")[0]
+        if name not in listed:
+            problems.append("{place} faults ({reason}) and has no row in {INVENTORY} (L-18)")
+    for row in rows:
+        if row.operation not in OPERATORS and not public_names.contains(row.operation):
+            problems.append("the row of {row.operation} names no operator and no public function of {STDLIB}")
+        if row.safe.is_empty():
+            if row.operation not in INTENTIONAL:
+                problems.append("the row of {row.operation} names no safe form (L-18)")
+            continue
+        let safe = row.safe[0]
+        let candidates = functions.filter(function (f as Declared) returns Bool: f.exported and f.name == safe)
+        if candidates.is_empty():
+            problems.append("the safe form {safe} of {row.operation} is not a public function of {STDLIB}")
+        else if not is_safe(candidates[0]):
+            problems.append("the safe form {safe} of {row.operation} neither returns Option nor fails with an error")
+    return problems
+
+test "fails with Error is found, concrete errors and bounds are not":
+    let source = "function a() fails with Error:\nfunction b() fails with IoError, Error:\nfunction c[E with Error]() fails with E:\nfunction d() fails with IoError:\n"
+    assert error_problems("x.unio", source) == [
+        "x.unio:1: fails with Error (S-2): name concrete error types",
+        "x.unio:2: fails with Error (S-2): name concrete error types",
+    ]
+
+test "functions are read with their comments, calls and names":
+    let source = "## A sum; a fault on overflow.\npublic function add(a as Int) returns Int:\n    return helper(a) + a.abs()\n\nextend[T] List[T]:\n    ## The item, or none: the safe form of items[index].\n    public external function get(self, index as Int) returns Option[T]\n\nextend Duration with Add:\n    function add(self, other as Self) returns Self:\n        assert_fail(\"x\")\n\ntest \"t\":\n    assert_fail(\"in a test\")\n"
+    let found = functions_of("stdlib/core/math.unio", source)
+    assert [f.name for f in found] == ["std.math.add", "List.get", "Duration.add"]
+    assert found[0].calls == ["helper"] and documents_fault(found[0].doc)
+    assert not documents_fault(found[1].doc) and is_safe(found[1])
+    assert found[2].exported and found[2].asserts
+    assert module_of("stdlib/alloc/builtin/list.unio") == none
+
+test "a faulting function without a row or with an unsafe safe form is reported":
+    let source = "## Clamped; a fault when low > high.\npublic function clamp(v as Int) returns Int:\n    return v\n\npublic function checked_clamp(v as Int) returns Option[Int]:\n    return some(v)\n\nfunction check(v as Int):\n    assert_fail(\"no\")\n\npublic function guarded(v as Int) returns Int:\n    check(v)\n    return v\n"
+    let functions = functions_of("stdlib/core/math.unio", source)
+    let faulting = faulting_operations(functions)
+    assert [name for name, _ in faulting] == [
+        "std.math.clamp (stdlib/core/math.unio:2)",
+        "std.math.guarded (stdlib/core/math.unio:11)",
+    ]
+    let rows = [
+        Row(operation = "std.math.clamp", safe = ["std.math.checked_clamp"]),
+        Row(operation = "std.math.guarded", safe = ["std.math.clamp"]),
+    ]
+    let problems = inventory_problems(faulting, rows, functions)
+    assert problems.length() == OPERATORS.length() + 1
+    assert problems.last() == some(
+        "the safe form std.math.clamp of std.math.guarded neither returns Option nor fails with an error",
+    )
+
+test "the rows of the inventory are read below their heading":
+    let text = "## Other (L-17)\n\n| `x` | `y` |\n\n## Faults (L-18)\n\nText.\n\n| Operation | Faults when | Safe form |\n|---|---|---|\n| `Text.slice` | outside | `Text.checked_slice` |\n| `assert_fail` | always | none: `test` only |\n\nAfter.\n"
+    assert rows_of(text, "(L-18)") == some([
+        Row(operation = "Text.slice", safe = ["Text.checked_slice"]),
+        Row(operation = "assert_fail", safe = []),
+    ])
+    assert rows_of(text, "(L-99)") == none

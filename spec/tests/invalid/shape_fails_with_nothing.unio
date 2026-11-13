@@ -1,0 +1,2 @@
+# expect-error: 2
+let handler as Function[(Int) -> Int fails with] = abs

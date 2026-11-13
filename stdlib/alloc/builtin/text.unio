@@ -73,6 +73,14 @@ extend Text:
     ##     assert "привет".slice(0, 3) == "при"
     public external function slice(self, start as Int, end as Int) returns Text
 
+    ## Scalars from start up to, but not including, end, or none unless
+    ## 0 <= start <= end <= length(): the safe form of slice.
+    ## Example:
+    ##     assert "привет".checked_slice(0, 3) == some("при") and "ab".checked_slice(1, 3) == none
+    public function checked_slice(self, start as Int, end as Int) returns Option[Text]:
+        if start < 0 or start > end or end > self.length(): return none
+        return some(self.slice(start, end))
+
     ## Position of the first occurrence of part at or after start. An empty part is found at start.
     ## Example:
     ##     assert "banana".index_of("an") == some(1) and "banana".index_of("an", start = 2) == some(3)
@@ -100,6 +108,13 @@ extend Text:
     ##     assert "héllo".char_at(1) == "é"
     public function char_at(self, index as Int) returns Text:
         return self.slice(index, index + 1)
+
+    ## The character at the position, or none outside 0..length(): the safe form of char_at.
+    ## Example:
+    ##     assert "héllo".checked_char_at(1) == some("é") and "ab".checked_char_at(2) == none
+    public function checked_char_at(self, index as Int) returns Option[Text]:
+        if index < 0 or index >= self.length(): return none
+        return some(self.slice(index, index + 1))
 
     ## Whether the text has no characters.
     ## Example:
@@ -162,6 +177,14 @@ extend Text:
     ## Example:
     ##     assert "ab".repeat(3) == "ababab"
     public external function repeat(self, times as Int) returns Text
+
+    ## The text repeated the given number of times, or none for a negative count: the safe form of
+    ## repeat.
+    ## Example:
+    ##     assert "ab".checked_repeat(2) == some("abab") and "ab".checked_repeat(-1) == none
+    public function checked_repeat(self, times as Int) returns Option[Text]:
+        if times < 0: return none
+        return some(self.repeat(times))
 
     ## A decimal integer with an optional sign; none for anything else, including overflow.
     ## Example:

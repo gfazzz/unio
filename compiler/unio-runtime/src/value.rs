@@ -390,87 +390,237 @@ impl Value {
     }
 }
 
+// ---------------------------------------------------------------- walking values
+
+// Operations that walk a value (`==`, the equality and the hash of a key, `Debug`) do it in a
+// loop over a list of the parts still to visit, not by recursion, so that the native stack they
+// use does not depend on the depth of the value (L-17a, C-18; as freeing, C-13): before, `==` of
+// two chains of 10 million enum values overflowed the 1 GiB stack of `unio run` and aborted the
+// process with code 134. The list lives on the heap and holds one entry per part still to
+// visit: a chain needs one, a structure as many as the siblings along one path. The order of
+// the visits is that of the recursion it replaces, so hashes and texts are unchanged.
+//
+// One case still nests: comparing two maps or sets looks each key up in the other, and when the
+// keys are maps or sets themselves the lookup compares them in turn. That nesting is bounded by
+// `NESTED_LOOKUPS`; past it the program ends with exhaustion of the stack, code 102 (L-17a).
+
+/// How deeply the comparison of maps or sets may nest through keys that are maps or sets.
+pub const NESTED_LOOKUPS: u32 = 10_000;
+
+thread_local! {
+    static LOOKUPS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Runs a lookup that may compare keys holding maps or sets; nesting past [`NESTED_LOOKUPS`]
+/// ends the program with code 102 and the prepared diagnostic of the stack.
+fn nested_lookup<R>(lookup: impl FnOnce() -> R) -> R {
+    let depth = LOOKUPS.with(|d| {
+        let depth = d.get() + 1;
+        d.set(depth);
+        depth
+    });
+    if depth > NESTED_LOOKUPS {
+        crate::fault::emergency_exit(crate::fault::Exhaustion::Stack);
+    }
+    let result = lookup();
+    LOOKUPS.with(|d| d.set(depth - 1));
+    result
+}
+
 impl fmt::Debug for Value {
+    /// The same text as the derived formats of Rust (`debug_list`, `debug_tuple("")`,
+    /// `debug_map`, `debug_set`, `debug_struct`), written without recursion.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Unit => write!(f, "()"),
-            Value::Int(i) => write!(f, "{i}"),
-            Value::Float(x) => write!(f, "{}", crate::externs::float_text::float_to_text(*x)),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Text(t) => write!(f, "{:?}", t.as_str()),
-            Value::Bytes(b) => write!(f, "Bytes({})", b.len()),
-            Value::Path(p) => write!(f, "Path({:?})", p.as_str()),
-            Value::List(items) => f.debug_list().entries(items.iter()).finish(),
-            Value::Tuple(items) => {
-                let mut t = f.debug_tuple("");
-                for item in items.iter() {
-                    t.field(item);
-                }
-                t.finish()
-            }
-            Value::Map(m) => f.debug_map().entries(m.entries()).finish(),
-            Value::Set(s) => f.debug_set().entries(s.items()).finish(),
-            Value::Struct(s) => {
-                let mut d = f.debug_struct(&s.type_name);
-                for (n, v) in &s.fields {
-                    d.field(n, v);
-                }
-                d.finish()
-            }
-            Value::Enum(e) => {
-                write!(f, "{}.{}", e.type_name, e.variant)?;
-                if !e.fields.is_empty() {
-                    let mut t = f.debug_tuple("");
-                    for (_, v) in &e.fields {
-                        t.field(v);
-                    }
-                    t.finish()?;
-                }
-                Ok(())
-            }
-            Value::Function(c) => write!(f, "function {}", c.name()),
-            Value::Resource(r) => write!(f, "resource #{}", r.id),
+        enum Step<'a> {
+            Value(&'a Value),
+            Text(&'a str),
         }
+        /// Pushes the parts of one level so that they are visited in order.
+        fn level<'a>(pending: &mut Vec<Step<'a>>, parts: Vec<Step<'a>>) {
+            pending.extend(parts.into_iter().rev());
+        }
+        /// The items separated by ", " and closed by `close`.
+        fn items<'a>(
+            pending: &mut Vec<Step<'a>>,
+            values: impl Iterator<Item = &'a Value>,
+            close: &'a str,
+        ) {
+            let mut parts = Vec::new();
+            for (i, v) in values.enumerate() {
+                if i > 0 {
+                    parts.push(Step::Text(", "));
+                }
+                parts.push(Step::Value(v));
+            }
+            parts.push(Step::Text(close));
+            level(pending, parts);
+        }
+        /// A tuple without a name: nothing when empty, `(a,)` for one field, `(a, b)` else.
+        fn tuple<'a>(pending: &mut Vec<Step<'a>>, values: Vec<&'a Value>) {
+            if values.is_empty() {
+                return;
+            }
+            let close = if values.len() == 1 { ",)" } else { ")" };
+            let mut parts = vec![Step::Text("(")];
+            for (i, v) in values.into_iter().enumerate() {
+                if i > 0 {
+                    parts.push(Step::Text(", "));
+                }
+                parts.push(Step::Value(v));
+            }
+            parts.push(Step::Text(close));
+            level(pending, parts);
+        }
+        let mut pending: Vec<Step<'_>> = Vec::new();
+        let mut next = Some(Step::Value(self));
+        while let Some(step) = next {
+            let value = match step {
+                Step::Text(t) => {
+                    f.write_str(t)?;
+                    next = pending.pop();
+                    continue;
+                }
+                Step::Value(v) => v,
+            };
+            match value {
+                Value::Unit => f.write_str("()")?,
+                Value::Int(i) => write!(f, "{i}")?,
+                Value::Float(x) => f.write_str(&crate::externs::float_text::float_to_text(*x))?,
+                Value::Bool(b) => write!(f, "{b}")?,
+                Value::Text(t) => write!(f, "{:?}", t.as_str())?,
+                Value::Bytes(b) => write!(f, "Bytes({})", b.len())?,
+                Value::Path(p) => write!(f, "Path({:?})", p.as_str())?,
+                Value::List(list) => {
+                    f.write_str("[")?;
+                    items(&mut pending, list.iter(), "]");
+                }
+                Value::Tuple(list) => tuple(&mut pending, list.iter().collect()),
+                Value::Map(m) => {
+                    f.write_str("{")?;
+                    let mut parts = Vec::new();
+                    for (i, (k, v)) in m.entries().enumerate() {
+                        if i > 0 {
+                            parts.push(Step::Text(", "));
+                        }
+                        parts.extend([Step::Value(k), Step::Text(": "), Step::Value(v)]);
+                    }
+                    parts.push(Step::Text("}"));
+                    level(&mut pending, parts);
+                }
+                Value::Set(s) => {
+                    f.write_str("{")?;
+                    items(&mut pending, s.items(), "}");
+                }
+                Value::Struct(s) => {
+                    f.write_str(&s.type_name)?;
+                    if !s.fields.is_empty() {
+                        let mut parts = vec![Step::Text(" { ")];
+                        for (i, (n, v)) in s.fields.iter().enumerate() {
+                            if i > 0 {
+                                parts.push(Step::Text(", "));
+                            }
+                            parts.extend([Step::Text(n), Step::Text(": "), Step::Value(v)]);
+                        }
+                        parts.push(Step::Text(" }"));
+                        level(&mut pending, parts);
+                    }
+                }
+                Value::Enum(e) => {
+                    write!(f, "{}.{}", e.type_name, e.variant)?;
+                    tuple(&mut pending, e.fields.iter().map(|(_, v)| v).collect());
+                }
+                Value::Function(c) => write!(f, "function {}", c.name())?,
+                Value::Resource(r) => write!(f, "resource #{}", r.id)?,
+            }
+            next = pending.pop();
+        }
+        Ok(())
     }
 }
 
 /// Structural equality as `==` defines it: `Float` follows IEEE 754, resources and functions
 /// have no `==` (the checker rejects it), so they compare by identity here.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Unit, Value::Unit) => true,
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Text(x), Value::Text(y)) | (Value::Path(x), Value::Path(y)) => x == y,
-        (Value::Bytes(x), Value::Bytes(y)) => x[..] == y[..],
-        (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
-        }
-        (Value::Map(x), Value::Map(y)) => {
-            x.len() == y.len()
-                && x.entries()
-                    .all(|(k, v)| y.get(k).is_some_and(|w| values_equal(v, w)))
-        }
-        (Value::Set(x), Value::Set(y)) => {
-            x.len() == y.len() && x.items().all(|item| y.contains(item))
-        }
-        (Value::Struct(x), Value::Struct(y)) => {
-            x.type_name == y.type_name && fields_equal(&x.fields, &y.fields)
-        }
-        (Value::Enum(x), Value::Enum(y)) => {
-            x.type_name == y.type_name
-                && x.variant == y.variant
-                && fields_equal(&x.fields, &y.fields)
-        }
-        (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
-        (Value::Resource(x), Value::Resource(y)) => Rc::ptr_eq(x, y),
-        _ => false,
-    }
+    equal_walk(a, b, false)
 }
 
-fn fields_equal(a: &[(Rc<str>, Value)], b: &[(Rc<str>, Value)]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|((_, x), (_, y))| values_equal(x, y))
+/// Equality of two values, walked without recursion. With `bits`, `Float` compares by its bits,
+/// as keys do, down to a map or a set, whose contents compare as `==` does.
+fn equal_walk(a: &Value, b: &Value, bits: bool) -> bool {
+    let mut pending: Vec<(&Value, &Value, bool)> = Vec::new();
+    let mut next = Some((a, b, bits));
+    while let Some((a, b, bits)) = next {
+        let same = match (a, b) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::Int(x), Value::Int(y)) => x == y,
+            (Value::Float(x), Value::Float(y)) => {
+                if bits {
+                    x.to_bits() == y.to_bits()
+                } else {
+                    x == y
+                }
+            }
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Text(x), Value::Text(y)) | (Value::Path(x), Value::Path(y)) => x == y,
+            (Value::Bytes(x), Value::Bytes(y)) => x[..] == y[..],
+            (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+                let same = x.len() == y.len();
+                if same {
+                    pending.extend(x.iter().zip(y.iter()).rev().map(|(a, b)| (a, b, bits)));
+                }
+                same
+            }
+            (Value::Map(x), Value::Map(y)) => {
+                x.len() == y.len()
+                    && x.entries().all(|(k, v)| match nested_lookup(|| y.get(k)) {
+                        Some(w) => {
+                            pending.push((v, w, false));
+                            true
+                        }
+                        None => false,
+                    })
+            }
+            (Value::Set(x), Value::Set(y)) => {
+                x.len() == y.len() && x.items().all(|item| nested_lookup(|| y.contains(item)))
+            }
+            (Value::Struct(x), Value::Struct(y)) => {
+                let same = x.type_name == y.type_name && x.fields.len() == y.fields.len();
+                if same {
+                    pending.extend(fields_pairs(&x.fields, &y.fields, bits));
+                }
+                same
+            }
+            (Value::Enum(x), Value::Enum(y)) => {
+                let same = x.type_name == y.type_name
+                    && x.variant == y.variant
+                    && x.fields.len() == y.fields.len();
+                if same {
+                    pending.extend(fields_pairs(&x.fields, &y.fields, bits));
+                }
+                same
+            }
+            (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
+            (Value::Resource(x), Value::Resource(y)) => Rc::ptr_eq(x, y),
+            _ => false,
+        };
+        if !same {
+            return false;
+        }
+        next = pending.pop();
+    }
+    true
+}
+
+/// The pairs of fields to compare, last first, so that they are popped in order.
+fn fields_pairs<'a>(
+    a: &'a [(Rc<str>, Value)],
+    b: &'a [(Rc<str>, Value)],
+    bits: bool,
+) -> impl Iterator<Item = (&'a Value, &'a Value, bool)> {
+    a.iter()
+        .zip(b)
+        .rev()
+        .map(move |((_, x), (_, y))| (x, y, bits))
 }
 
 impl PartialEq for Value {
@@ -789,30 +939,7 @@ impl PartialEq for Key {
 impl Eq for Key {}
 
 fn key_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
-        (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| key_equal(a, b))
-        }
-        (Value::Struct(x), Value::Struct(y)) => {
-            x.type_name == y.type_name
-                && x.fields.len() == y.fields.len()
-                && x.fields
-                    .iter()
-                    .zip(&y.fields)
-                    .all(|((_, a), (_, b))| key_equal(a, b))
-        }
-        (Value::Enum(x), Value::Enum(y)) => {
-            x.type_name == y.type_name
-                && x.variant == y.variant
-                && x.fields.len() == y.fields.len()
-                && x.fields
-                    .iter()
-                    .zip(&y.fields)
-                    .all(|((_, a), (_, b))| key_equal(a, b))
-        }
-        _ => values_equal(a, b),
-    }
+    equal_walk(a, b, true)
 }
 
 impl Hash for Key {
@@ -821,66 +948,66 @@ impl Hash for Key {
     }
 }
 
+/// Hashes a value in the order of a recursive walk, by a loop (see "walking values").
 fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
-    match value {
-        Value::Unit => state.write_u8(0),
-        Value::Int(i) => {
-            state.write_u8(1);
-            state.write_i64(*i);
-        }
-        Value::Float(x) => {
-            state.write_u8(2);
-            state.write_u64(x.to_bits());
-        }
-        Value::Bool(b) => {
-            state.write_u8(3);
-            state.write_u8(u8::from(*b));
-        }
-        Value::Text(t) | Value::Path(t) => {
-            state.write_u8(4);
-            state.write(t.as_str().as_bytes());
-            state.write_u8(0xff);
-        }
-        Value::Bytes(b) => {
-            state.write_u8(5);
-            state.write(&b[..]);
-            state.write_usize(b.len());
-        }
-        Value::List(items) | Value::Tuple(items) => {
-            state.write_u8(6);
-            state.write_usize(items.len());
-            for item in items.iter() {
-                hash_value(item, state);
+    let mut pending: Vec<&Value> = Vec::new();
+    let mut next = Some(value);
+    while let Some(value) = next {
+        match value {
+            Value::Unit => state.write_u8(0),
+            Value::Int(i) => {
+                state.write_u8(1);
+                state.write_i64(*i);
+            }
+            Value::Float(x) => {
+                state.write_u8(2);
+                state.write_u64(x.to_bits());
+            }
+            Value::Bool(b) => {
+                state.write_u8(3);
+                state.write_u8(u8::from(*b));
+            }
+            Value::Text(t) | Value::Path(t) => {
+                state.write_u8(4);
+                state.write(t.as_str().as_bytes());
+                state.write_u8(0xff);
+            }
+            Value::Bytes(b) => {
+                state.write_u8(5);
+                state.write(&b[..]);
+                state.write_usize(b.len());
+            }
+            Value::List(items) | Value::Tuple(items) => {
+                state.write_u8(6);
+                state.write_usize(items.len());
+                pending.extend(items.iter().rev());
+            }
+            Value::Map(m) => {
+                state.write_u8(7);
+                state.write_usize(m.len());
+            }
+            Value::Set(s) => {
+                state.write_u8(8);
+                state.write_usize(s.len());
+            }
+            Value::Struct(s) => {
+                state.write_u8(9);
+                state.write(s.type_name.as_bytes());
+                pending.extend(s.fields.iter().rev().map(|(_, v)| v));
+            }
+            Value::Enum(e) => {
+                state.write_u8(10);
+                state.write(e.type_name.as_bytes());
+                state.write(e.variant.as_bytes());
+                pending.extend(e.fields.iter().rev().map(|(_, v)| v));
+            }
+            Value::Function(_) => state.write_u8(11),
+            Value::Resource(r) => {
+                state.write_u8(12);
+                state.write_u64(r.id);
             }
         }
-        Value::Map(m) => {
-            state.write_u8(7);
-            state.write_usize(m.len());
-        }
-        Value::Set(s) => {
-            state.write_u8(8);
-            state.write_usize(s.len());
-        }
-        Value::Struct(s) => {
-            state.write_u8(9);
-            state.write(s.type_name.as_bytes());
-            for (_, v) in &s.fields {
-                hash_value(v, state);
-            }
-        }
-        Value::Enum(e) => {
-            state.write_u8(10);
-            state.write(e.type_name.as_bytes());
-            state.write(e.variant.as_bytes());
-            for (_, v) in &e.fields {
-                hash_value(v, state);
-            }
-        }
-        Value::Function(_) => state.write_u8(11),
-        Value::Resource(r) => {
-            state.write_u8(12);
-            state.write_u64(r.id);
-        }
+        next = pending.pop();
     }
 }
 
@@ -1324,6 +1451,154 @@ mod tests {
             .unwrap()
             .join();
         assert!(freed.is_ok());
+    }
+
+    /// A chain of `depth` levels that mixes every kind of value that holds values; `end` is the
+    /// innermost value.
+    fn mixed_chain(depth: usize, end: Value) -> Value {
+        let mut chain = end;
+        for i in 0..depth {
+            chain = match i % 6 {
+                0 => Value::list(vec![Value::Int(1), chain]),
+                1 => Value::tuple(vec![chain, Value::Unit]),
+                2 => Value::some(chain),
+                3 => Value::record("Holder", vec![("held", chain), ("n", Value::Int(2))]),
+                4 => {
+                    let mut map = OrderedMap::new();
+                    map.put(Value::Int(i as i64), chain);
+                    Value::map(map)
+                }
+                _ => Value::variant("Chain", "link", vec![("next", chain)]),
+            };
+        }
+        chain
+    }
+
+    /// L-17a, C-18: `==`, the equality and the hash of a key, and `Debug` walk a value without
+    /// recursion, so that the native stack does not depend on its depth. A chain of a million
+    /// levels on a thread with a stack of 2 MiB: by recursion `==` overflowed it (and the
+    /// stack of 1 GiB of `unio run` at 10 million levels of an enum, code 134).
+    #[test]
+    fn deep_values_are_compared_hashed_and_formatted_without_recursion() {
+        let walked = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let depth = 1_000_000;
+                let a = mixed_chain(depth, Value::Int(0));
+                let b = mixed_chain(depth, Value::Int(0));
+                let c = mixed_chain(depth, Value::Int(1));
+                assert!(values_equal(&a, &b));
+                assert!(!values_equal(&a, &c));
+                assert_eq!(Key(a.clone()), Key(b.clone()));
+                assert_ne!(Key(a.clone()), Key(c.clone()));
+                let hash = |v: &Value| {
+                    let mut h = Fnv::default();
+                    Key(v.clone()).hash(&mut h);
+                    h.finish()
+                };
+                assert_eq!(hash(&a), hash(&b));
+                let mut set = OrderedSet::new();
+                set.insert(a.clone());
+                assert!(set.contains(&b));
+                assert!(!set.contains(&c));
+                let text = format!("{a:?}");
+                assert!(text.starts_with("Holder { held: Option.some(([1, Chain.link({"));
+                let mut chain = Value::Unit;
+                for _ in 0..depth {
+                    chain = Value::variant("Chain", "link", vec![("next", chain)]);
+                }
+                let text = format!("{chain:?}");
+                assert_eq!(text.len(), depth * "Chain.link(,)".len() + 2);
+            })
+            .unwrap()
+            .join();
+        assert!(walked.is_ok());
+    }
+
+    /// The format of `Debug`, written by a loop, is the text of the derived formats of Rust
+    /// that it replaces.
+    #[test]
+    fn the_debug_text_is_that_of_the_derived_formats() {
+        fn reference(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            struct R<'a>(&'a Value);
+            impl fmt::Debug for R<'_> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    reference(self.0, f)
+                }
+            }
+            match v {
+                Value::List(items) => f.debug_list().entries(items.iter().map(R)).finish(),
+                Value::Tuple(items) => {
+                    let mut t = f.debug_tuple("");
+                    for item in items.iter() {
+                        t.field(&R(item));
+                    }
+                    t.finish()
+                }
+                Value::Map(m) => f
+                    .debug_map()
+                    .entries(m.entries().map(|(k, v)| (R(k), R(v))))
+                    .finish(),
+                Value::Set(s) => f.debug_set().entries(s.items().map(R)).finish(),
+                Value::Struct(s) => {
+                    let mut d = f.debug_struct(&s.type_name);
+                    for (n, v) in &s.fields {
+                        d.field(n, &R(v));
+                    }
+                    d.finish()
+                }
+                Value::Enum(e) => {
+                    write!(f, "{}.{}", e.type_name, e.variant)?;
+                    if !e.fields.is_empty() {
+                        let mut t = f.debug_tuple("");
+                        for (_, v) in &e.fields {
+                            t.field(&R(v));
+                        }
+                        t.finish()?;
+                    }
+                    Ok(())
+                }
+                other => write!(f, "{other:?}"),
+            }
+        }
+        struct Ref<'a>(&'a Value);
+        impl fmt::Debug for Ref<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                reference(self.0, f)
+            }
+        }
+        let mut set = OrderedSet::new();
+        set.insert(Value::text("a\"b"));
+        set.insert(Value::Int(-3));
+        let mut map = OrderedMap::new();
+        map.put(Value::text("k"), Value::Float(1.5));
+        map.put(Value::Int(2), Value::set(set.clone()));
+        let samples = [
+            Value::Unit,
+            Value::tuple(Vec::new()),
+            Value::tuple(vec![Value::Int(1)]),
+            Value::tuple(vec![Value::Int(1), Value::Bool(true), Value::path("/p")]),
+            Value::list(Vec::new()),
+            Value::map(OrderedMap::new()),
+            Value::set(OrderedSet::new()),
+            Value::set(set),
+            Value::map(map),
+            Value::record("Empty", Vec::new()),
+            Value::record(
+                "P",
+                vec![("x", Value::Int(1)), ("y", Value::bytes(vec![1]))],
+            ),
+            Value::none(),
+            Value::variant(
+                "E",
+                "two",
+                vec![("a", Value::Unit), ("b", Value::text("t"))],
+            ),
+            mixed_chain(40, Value::text("end")),
+        ];
+        for v in &samples {
+            assert_eq!(format!("{v:?}"), format!("{:?}", Ref(v)));
+        }
     }
 
     /// A value that is still shared is not freed with the structure that dropped it.

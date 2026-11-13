@@ -427,7 +427,7 @@ class Fail(Exception):
 class Parser:
     """Ordered choice over the EBNF rules, memoized per (rule, position)."""
 
-    def __init__(self, rules, tokens, build_tree=False):
+    def __init__(self, rules, tokens, build_tree=False, coverage=False):
         self.rules = rules
         self.toks = tokens
         self.memo = {}
@@ -435,12 +435,20 @@ class Parser:
         self.expected = set()
         self.build_tree = build_tree
         self.sub_errors = []
+        # With coverage, the rules in progress when the parser noted what it expected at the
+        # farthest token (failing_rules).
+        self.coverage = coverage
+        self.stack = []
+        self.frontier = set()
 
     def note(self, pos, what):
         if pos > self.far:
             self.far, self.expected = pos, {what}
+            self.frontier = set()
         elif pos == self.far:
             self.expected.add(what)
+        if self.coverage and pos == self.far:
+            self.frontier.update(self.stack)
 
     def parse(self, start="file"):
         result = self.rule(start, 0)
@@ -453,6 +461,15 @@ class Parser:
         return tree if self.build_tree else True
 
     def rule(self, name, pos):
+        if not self.coverage:
+            return self.attempt(name, pos)
+        self.stack.append(name)
+        try:
+            return self.attempt(name, pos)
+        finally:
+            self.stack.pop()
+
+    def attempt(self, name, pos):
         key = (name, pos)
         if key in self.memo:
             return self.memo[key]
@@ -562,6 +579,41 @@ def check_source(text, grammar, build_tree=False):
     found = tok.kind if tok.kind in TOKEN_CLASSES else repr(tok.value)
     exp = ", ".join(sorted(p.expected))
     return None, ("syntax", tok.line, tok.col, f"expected {exp}; found {found}")
+
+
+def failing_rules(text, grammar):
+    """The rules in progress where a source that does not parse fails: every rule whose
+    attempt was on the way when the parser noted what it expected at the farthest token,
+    sorted. Empty when the source parses or has a lexical error. An invalid corpus file
+    covers these rules (check_coverage.py)."""
+    rules, _order, keywords, reserved, punct = grammar
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    try:
+        tokens = Lexer(text, keywords, reserved, punct).tokens()
+    except LexError:
+        return []
+    p = Parser(rules, tokens, coverage=True)
+    if p.parse("file") is not None:
+        return []
+    return sorted(p.frontier)
+
+
+def rules_in(tree):
+    """The names of the rules of a parse tree, each once, sorted."""
+    found = set()
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, tuple) and len(node) == 2 and isinstance(node[1], list):
+            found.add(node[0])
+            stack.extend(node[1])
+    return sorted(found)
+
+
+def syntactic_rules(grammar):
+    """The syntactic rules in the order of the file, without the lexical rules."""
+    return [name for name in grammar[1] if name not in LEXICAL_RULES]
 
 
 def format_tree(node, indent=0):

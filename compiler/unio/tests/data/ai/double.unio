@@ -1,0 +1,8 @@
+function double(n as Int) returns Int:
+    return n * 2
+
+test "double of two":
+    assert double(2) == 5
+
+test "uses a missing name":
+    assert duble(2) == 4

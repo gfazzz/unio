@@ -166,6 +166,9 @@ simple_statement = let_statement
    that ends the statement, and at most one is allowed (E0024). *)
 handled_statement = handled_head inline_handler ":" block ;
 handled_head    = let_statement | assignment | return_statement | expression ;
+                  (* Corpus exemption: handled_head has no invalid file. Each of its
+                     alternatives is also a simple_statement, which a statement tries
+                     first, so an error inside a head is found there (spec/check_coverage.py). *)
 inline_handler  = "on" type [ "as" NAME ] ;
 
 let_statement   = ( "let" | "var" ) NAME [ "as" type ] "=" expression ;

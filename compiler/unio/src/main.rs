@@ -9,6 +9,8 @@
 mod lsp_server;
 
 mod api_diff;
+mod doc_tool;
+mod new_package;
 mod packages;
 mod publish;
 mod repl_tool;
@@ -26,8 +28,10 @@ const USAGE: &str = "Usage:
     unio fmt [--check] FILE...
     unio fmt --migrate [--from=VERSION] [--check] [FILE...]
     unio run [--policy FILE] [--allow-weaker-sandbox] FILE [-- ARGS...]
-    unio build [--release] [--policy FILE] [--allow-weaker-sandbox] FILE [-o OUT]
-    unio build --print-toolchain
+    unio build [--release] [--target TRIPLE] [--policy FILE] [--allow-weaker-sandbox] FILE [-o OUT]
+    unio build --print-toolchain [--target TRIPLE]
+    unio new NAME [--bin | --lib]
+    unio doc [--open] [-o DIR] [--policy FILE] [--allow-weaker-sandbox] [PACKAGE]
     unio test [--json] [--seed N] [--policy FILE] [--allow-weaker-sandbox] [FILTER] FILE...
     unio outline [--json] FILE
     unio symbol [--json] MODULE.NAME
@@ -100,6 +104,8 @@ fn main() -> ExitCode {
         Some("release") => return publish::release(&arguments[1..]),
         Some("api-diff") => return api_diff::command(&arguments, &arguments[1..]),
         Some("repl") => return repl_tool::command(&arguments[1..]),
+        Some("new") => return new_package::command(&arguments[1..]),
+        Some("doc") => return doc_tool::command(&arguments[1..]),
         _ => {}
     }
     let (sandbox, arguments) = match sandbox_cli::take(&arguments) {
@@ -637,10 +643,31 @@ fn build(arguments: &[String]) -> ExitCode {
     let mut file = None;
     let mut print_toolchain = false;
     let mut toolchain = None;
+    let mut target = None;
     let mut i = 0;
     while i < arguments.len() {
         let a = &arguments[i];
-        if a == "--release" {
+        let named = if a == "--target" {
+            i += 1;
+            match arguments.get(i) {
+                Some(t) => Some(t.as_str()),
+                None => return usage("--target needs a target"),
+            }
+        } else {
+            a.strip_prefix("--target=")
+        };
+        if let Some(name) = named {
+            // `unio build --target T` (table 6.1): one of the four targets of R-8.
+            match unio::native::Target::parse(name) {
+                Some(t) => target = Some(t),
+                None => {
+                    return usage(&format!(
+                        "unknown target '{name}'; the targets are {}",
+                        unio::native::target_names()
+                    ))
+                }
+            }
+        } else if a == "--release" {
             release = true;
         } else if a == "--print-toolchain" {
             print_toolchain = true;
@@ -668,11 +695,14 @@ fn build(arguments: &[String]) -> ExitCode {
         eprintln!("unio build: {m}");
         ExitCode::from(1)
     };
+    let Some(target) = target.or_else(unio::native::Target::host) else {
+        return fail(unio::native::unsupported());
+    };
     if print_toolchain {
         if file.is_some() || out.is_some() || release {
-            return usage("--print-toolchain takes no file and no other option");
+            return usage("--print-toolchain takes no file and no option but --target");
         }
-        return match unio::native::toolchain::identity() {
+        return match unio::native::toolchain::identity_for(target) {
             Ok(identity) => {
                 println!("{identity}");
                 ExitCode::SUCCESS
@@ -687,7 +717,11 @@ fn build(arguments: &[String]) -> ExitCode {
         let Some(toolchain) = toolchain else {
             return fail("the compile step was not given the identity of the toolchain".into());
         };
-        return build_object(&file, release, &toolchain);
+        return build_object(&file, target, release, &toolchain);
+    }
+    // A pair of machines that cannot be built for stops before anything is read or written.
+    if let Some(problem) = unio::native::cross_problem(target) {
+        return fail(problem);
     }
     // The policy and its compile limits, which hold for the compile step and the link step
     // alike, are read first: a limit that cannot be honoured stops the build here (RFC 0006).
@@ -695,11 +729,8 @@ fn build(arguments: &[String]) -> ExitCode {
         Ok(spec) => spec,
         Err(code) => return ExitCode::from(code),
     };
-    let Some(target) = unio::native::Target::host() else {
-        return fail(unio::native::unsupported());
-    };
     // The linker and the SDK of this build, recorded in its image; a missing linker stops here.
-    let toolchain = match unio::native::toolchain::identity() {
+    let toolchain = match unio::native::toolchain::identity_for(target) {
         Ok(identity) => identity,
         Err(m) => return fail(m),
     };
@@ -708,7 +739,7 @@ fn build(arguments: &[String]) -> ExitCode {
         name.push(target.executable_suffix());
         PathBuf::from(name)
     });
-    let runtime = match unio::native::runtime_library() {
+    let runtime = match unio::native::runtime_library_for(target) {
         Ok(runtime) => runtime,
         Err(m) => return fail(m),
     };
@@ -720,6 +751,7 @@ fn build(arguments: &[String]) -> ExitCode {
     if release {
         compile.push("--release".into());
     }
+    compile.push(format!("--target={}", target.rust_triple()));
     compile.push(format!("{TOOLCHAIN_ARG}{toolchain}"));
     compile.push(file.to_string_lossy().into_owned());
     match worker::start("tool", &compile, &spec, &temp, false, &[]) {
@@ -727,9 +759,12 @@ fn build(arguments: &[String]) -> ExitCode {
         Ok(finished) => return ExitCode::from(finished.code),
         Err(code) => return ExitCode::from(code),
     }
+    store_object(&file, temp.path());
     let object = temp.path().join(unio::native::object_file_name());
-    let executable = temp.path().join(unio::native::executable_file_name());
-    let linker = match unio::native::link_command(&object, &runtime, &executable) {
+    let executable = temp
+        .path()
+        .join(format!("program{}", target.executable_suffix()));
+    let linker = match unio::native::link_command_for(target, &object, &runtime, &executable) {
         Ok(linker) => linker,
         Err(m) => return fail(m),
     };
@@ -757,12 +792,86 @@ fn build(arguments: &[String]) -> ExitCode {
 /// How the tool hands the identity of the toolchain to the compile step in its worker.
 const TOOLCHAIN_ARG: &str = "--toolchain=";
 
+/// The files of the temporary directory of a build that name the cache key of its object
+/// file: one reused from the cache, or a new one for the tool to store (C-11b).
+const CACHED_OBJECT: &str = "object.cached";
+const NEW_OBJECT: &str = "object.key";
+
+/// The artifact key of the object file of `file` (C-11b, `unio::cache`): the compiler, the
+/// target and its ABI, the profile, the linker and the SDK recorded in the image, and every
+/// text the program is loaded from, its manifests and lock included. `None` outside a package
+/// or for a program that does not load, which is compiled to report its errors.
+fn artifact_key(
+    file: &Path,
+    target: unio::native::Target,
+    release: bool,
+    toolchain: &str,
+) -> Option<String> {
+    unio::cache::dir_of(file)?;
+    let path = file.to_path_buf();
+    let sources = on_stack(FRONT_END_STACK, move || {
+        unio::load_for_run(&[path], unio::effects::Profile::Application)
+            .ok()
+            .map(|program| Sources::of(&program))
+    })?;
+    let mut key = unio::cache::Key::new("artifact");
+    key.field("toolchain", &unio::cache::toolchain())
+        .field("target", &format!("{target:?}"))
+        .field("object", unio::native::object_file_name())
+        .field("profile", if release { "release" } else { "debug" })
+        .field("linker", toolchain)
+        .field("stdlib", &format!("{:?}", sources.stdlib))
+        .field("sources", &unio::cache::sources_digest(&sources.files))
+        .field("main", &file.to_string_lossy());
+    Some(key.finish())
+}
+
+/// Stores a new object file of a build in the cache of its package, or says that the build
+/// reused one (C-11b).
+fn store_object(file: &Path, temp: &Path) {
+    if temp.join(CACHED_OBJECT).is_file() {
+        eprintln!("unio build: the object file is reused from the cache of the package (target/unio-cache)");
+        return;
+    }
+    let (Ok(key), Some(cache)) = (
+        std::fs::read_to_string(temp.join(NEW_OBJECT)),
+        unio::cache::dir_of(file),
+    ) else {
+        return;
+    };
+    if let Ok(object) = std::fs::read(temp.join(unio::native::object_file_name())) {
+        let _ = unio::cache::write(&cache, unio::cache::ARTIFACTS, key.trim(), &object);
+    }
+}
+
 /// The compile step of `unio build` in the worker: the object file in its temporary directory.
-fn build_object(file: &Path, release: bool, toolchain: &str) -> ExitCode {
+fn build_object(
+    file: &Path,
+    target: unio::native::Target,
+    release: bool,
+    toolchain: &str,
+) -> ExitCode {
     let Some(dir) = worker::temp_dir() else {
         return ExitCode::from(worker::EXIT_SANDBOX);
     };
-    match unio::native::compile_object(file, release, toolchain) {
+    // The cache of the package (C-11b): an object file of the same key is reused, and the key
+    // of a new one is left for the tool, which stores it; the worker writes no cache.
+    let key = artifact_key(file, target, release, toolchain);
+    if let (Some(key), Some(cache)) = (&key, unio::cache::dir_of(file)) {
+        if let unio::cache::Lookup::Hit(object) =
+            unio::cache::read(&cache, unio::cache::ARTIFACTS, key)
+        {
+            let written = std::fs::write(dir.join(unio::native::object_file_name()), object)
+                .and_then(|()| std::fs::write(dir.join(CACHED_OBJECT), key));
+            if written.is_ok() {
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
+    if let Some(key) = &key {
+        let _ = std::fs::write(dir.join(NEW_OBJECT), key);
+    }
+    match unio::native::compile_object_for(file, target, release, toolchain) {
         Ok(object) => match std::fs::write(dir.join(unio::native::object_file_name()), object) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -926,8 +1035,76 @@ enum Compiled {
     Nothing,
     /// The file does not compile outside its tests: the diagnostics, as text.
     Broken(String),
-    /// The main module to load, and the tests that do not compile, by item, with their errors.
-    Tests(PathBuf, Vec<(usize, String)>),
+    /// The main module to load, the tests that do not compile, by item, with their errors,
+    /// and what the cache needs (C-11a, C-11b).
+    Tests(PathBuf, Vec<(usize, String)>, TestInputs),
+}
+
+/// What the compile step found for the cache of the tests of one file (C-11a, C-11b): the
+/// content hash of each test, by item, and the digest of every text the program is loaded
+/// from.
+#[derive(Default)]
+struct TestInputs {
+    hashes: Vec<(usize, String)>,
+    sources: String,
+}
+
+impl TestInputs {
+    fn hash(&self, item: usize) -> Option<&str> {
+        self.hashes
+            .iter()
+            .find(|(i, _)| *i == item)
+            .map(|(_, h)| h.as_str())
+    }
+}
+
+/// The content hashes of the tests of the reported module of a program (C-11a).
+fn test_hashes(program: &unio::program::Program) -> Vec<(usize, String)> {
+    let Some(module) = program.modules.iter().position(|m| m.report) else {
+        return Vec::new();
+    };
+    let hashes = unio::symbol::hashes(program);
+    program.modules[module]
+        .analysis
+        .file
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| match item {
+            unio::ast::Item::Test(t) => {
+                Some((i, unio::symbol::test_hash(program, &hashes, module, t)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The payload of a cached test result: its name, its output, and the time it took when it
+/// ran (C-11b).
+fn encode_cached_test(r: &unio::interp::TestResult) -> Vec<u8> {
+    let mut out = worker::Enc::default();
+    out.text("unio-test-result-v1")
+        .text(&r.name)
+        .text(&r.output)
+        .text(&r.millis.to_string());
+    out.0
+}
+
+fn decode_cached_test(payload: &[u8]) -> Option<unio::interp::TestResult> {
+    let mut d = worker::Dec::new(payload);
+    if d.text()? != "unio-test-result-v1" {
+        return None;
+    }
+    let result = unio::interp::TestResult {
+        name: d.text()?,
+        output: d.text()?,
+        millis: d.text()?.parse().ok()?,
+        passed: true,
+        message: String::new(),
+        properties: Vec::new(),
+        external_inputs: false,
+    };
+    d.end().then_some(result)
 }
 
 /// The filter and the files of `unio test [FILTER] FILE...`.
@@ -973,11 +1150,12 @@ fn test_compile(files: Vec<PathBuf>, filter: Option<String>, lang: Lang) -> Exit
         // As `unio::check_files_for_test`, with the sources of the same load for the run.
         let path = file.clone();
         let filter = filter.clone();
-        let (analyses, main, found) = on_stack(FRONT_END_STACK, move || {
+        let (analyses, main, found, hashes) = on_stack(FRONT_END_STACK, move || {
             let program = unio::load_for_test(&[path], filter.as_deref());
             let found = Sources::of(&program);
             let main = main_path(&program);
-            (unio::analyses(program), main, found)
+            let hashes = test_hashes(&program);
+            (unio::analyses(program), main, found, hashes)
         });
         let Some(analysis) = analyses.into_iter().next() else {
             out.u32(0);
@@ -1025,11 +1203,17 @@ fn test_compile(files: Vec<PathBuf>, filter: Option<String>, lang: Lang) -> Exit
             out.u32(0);
             continue;
         };
+        let digest = unio::cache::sources_digest(&found.files);
         sources.add(found);
         out.u32(2).path(&main).u32(failing.len() as u32);
         for (item, message) in &failing {
             out.u32(*item as u32).text(message);
         }
+        out.u32(hashes.len() as u32);
+        for (item, hash) in &hashes {
+            out.u32(*item as u32).text(hash);
+        }
+        out.text(&digest);
     }
     sources.encode(&mut out);
     emit(&out)
@@ -1050,7 +1234,12 @@ fn decode_compiled(data: &[u8]) -> Option<(Vec<Compiled>, Sources)> {
                 for _ in 0..k {
                     failing.push((d.u32()? as usize, d.text()?));
                 }
-                Compiled::Tests(main, failing)
+                let mut inputs = TestInputs::default();
+                for _ in 0..d.u32()? {
+                    inputs.hashes.push((d.u32()? as usize, d.text()?));
+                }
+                inputs.sources = d.text()?;
+                Compiled::Tests(main, failing, inputs)
             }
         });
     }
@@ -1076,10 +1265,12 @@ fn test(
     if worker::inside() {
         return test_compile(files, filter, lang);
     }
-    let plan = match sandbox_cli::prepare(&files, sandbox, false) {
+    let mut plan = match sandbox_cli::prepare(&files, sandbox, false) {
         Ok(plan) => plan,
         Err(code) => return ExitCode::from(code as u8),
     };
+    // The time and memory of each test (T-12): the [limits] of the policy, or the defaults.
+    let test_limits = plan.take_test_limits();
     let data = match compile_in_worker(all_arguments, &files, sandbox) {
         Ok(data) => data,
         Err(code) => return code,
@@ -1091,11 +1282,30 @@ fn test(
         return malformed();
     }
     sources.install();
+    // The cache of test results (C-11a, C-11b): the journals of earlier runs move into place,
+    // the results of this run are looked up, and the journal of this run is opened, all before
+    // any sandbox applies.
+    let mut caches: std::collections::BTreeMap<PathBuf, Option<unio::cache::Journal>> =
+        std::collections::BTreeMap::new();
+    let mut cache_of: Vec<Option<PathBuf>> = Vec::new();
+    for (file, compiled) in files.iter().zip(&compiled) {
+        let dir = match compiled {
+            Compiled::Tests(..) => unio::cache::dir_of(file),
+            _ => None,
+        };
+        if let Some(dir) = &dir {
+            caches.entry(dir.clone()).or_insert_with(|| {
+                unio::cache::promote(dir);
+                unio::cache::Journal::open(dir).ok()
+            });
+        }
+        cache_of.push(dir);
+    }
     let mut records = Vec::new();
     let (mut passed, mut failed) = (0, 0);
     for (index, (file, compiled)) in files.into_iter().zip(compiled).enumerate() {
         let display = file.display().to_string();
-        let (path, failing) = match compiled {
+        let (path, failing, inputs) = match compiled {
             Compiled::Nothing => continue,
             Compiled::Broken(text) => {
                 eprint!("{text}");
@@ -1107,8 +1317,53 @@ fn test(
                 ));
                 continue;
             }
-            Compiled::Tests(path, failing) => (path, failing),
+            Compiled::Tests(path, failing, inputs) => (path, failing, inputs),
         };
+        let limits = unio::interp::TestLimits::of(&test_limits[index]);
+        // The key of each test, and the results the cache holds for this run.
+        let keys: Vec<(usize, String)> = inputs
+            .hashes
+            .iter()
+            .map(|(item, hash)| {
+                let mut key = unio::cache::Key::new("test");
+                key.field("toolchain", &unio::cache::toolchain())
+                    .field("runner", "unio test")
+                    .field("generator", unio::interp::property::SCHEME)
+                    .field("seed", &format!("{seed:?}"))
+                    .field("sandbox", &plan.describe(index))
+                    .field("limits", &format!("{limits:?}"))
+                    .field("stdlib", &format!("{:?}", unio::program::trusted_stdlib()))
+                    .field("sources", &inputs.sources)
+                    .field("file", &display)
+                    .field("item", &item.to_string())
+                    .field("test", hash);
+                (*item, key.finish())
+            })
+            .collect();
+        let key_of = |item: usize| keys.iter().find(|(i, _)| *i == item).map(|(_, k)| k);
+        let mut cached: std::collections::HashMap<usize, unio::interp::TestResult> =
+            std::collections::HashMap::new();
+        if let Some(dir) = &cache_of[index] {
+            for (item, key) in &keys {
+                if failing.iter().any(|(j, _)| j == item) {
+                    continue;
+                }
+                match unio::cache::read(dir, unio::cache::TESTS, key) {
+                    unio::cache::Lookup::Hit(payload) => {
+                        if let Some(result) = decode_cached_test(&payload) {
+                            cached.insert(*item, result);
+                        } else {
+                            unio::cache::remove(dir, unio::cache::TESTS, key);
+                        }
+                    }
+                    // Never trusted: the test runs, and its result replaces the entry.
+                    unio::cache::Lookup::Damaged => {
+                        unio::cache::remove(dir, unio::cache::TESTS, key)
+                    }
+                    unio::cache::Lookup::Missing => {}
+                }
+            }
+        }
         // The lines of the examples of documentation comments, for the traces of their tests.
         let line_map = std::fs::read_to_string(&file)
             .ok()
@@ -1140,21 +1395,42 @@ fn test(
                     continue;
                 }
                 if let Some((_, message)) = failing.iter().find(|(j, _)| *j == i) {
-                    results.push(unio::interp::TestResult {
-                        name,
-                        passed: false,
-                        message: format!("the test does not compile:\n{message}\n"),
-                        output: String::new(),
-                        millis: 0,
-                        properties: Vec::new(),
-                    });
+                    results.push((
+                        i,
+                        unio::interp::TestResult {
+                            name,
+                            passed: false,
+                            message: format!("the test does not compile:\n{message}\n"),
+                            output: String::new(),
+                            millis: 0,
+                            properties: Vec::new(),
+                            external_inputs: false,
+                        },
+                        false,
+                    ));
                     continue;
                 }
-                results.push(unio::interp::run_test(&interp, module, i));
+                if let Some(result) = cached.remove(&i) {
+                    results.push((i, result, true));
+                    continue;
+                }
+                results.push((
+                    i,
+                    unio::interp::run_test_limited(&interp, module, i, limits),
+                    false,
+                ));
             }
             results
         });
-        for mut r in results {
+        for (item, mut r, from_cache) in results {
+            // A result that passed and read nothing from outside is kept for the next run.
+            if !from_cache && r.passed && !r.external_inputs && r.properties.is_empty() {
+                if let (Some(dir), Some(key)) = (&cache_of[index], key_of(item)) {
+                    if let Some(Some(journal)) = caches.get_mut(dir) {
+                        let _ = journal.record(unio::cache::TESTS, key, &encode_cached_test(&r));
+                    }
+                }
+            }
             if r.name.starts_with("doc: ") {
                 for (augmented, original) in &line_map {
                     r.message = r
@@ -1168,7 +1444,9 @@ fn test(
                 failed += 1;
             }
             if !json {
-                if r.passed {
+                if r.passed && from_cache {
+                    println!("ok   {display}: {} (cached)", r.name);
+                } else if r.passed {
                     println!("ok   {display}: {} ({} ms)", r.name, r.millis);
                 } else {
                     println!("FAIL {display}: {}", r.name);
@@ -1196,7 +1474,7 @@ fn test(
                 }
             }
             records.push(format!(
-                "{{\"file\": {}, \"name\": {}, \"status\": \"{}\", \"time_ms\": {}, \"output\": {}, \"message\": {}, \"properties\": [{}]}}",
+                "{{\"file\": {}, \"name\": {}, \"status\": \"{}\", \"time_ms\": {}, \"output\": {}, \"message\": {}, \"properties\": [{}], \"hash\": {}, \"cached\": {}}}",
                 json_text(&display),
                 json_text(&r.name),
                 if r.passed { "passed" } else { "failed" },
@@ -1207,9 +1485,14 @@ fn test(
                     .iter()
                     .map(|p| property_json(p, &display, &r.name))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                inputs.hash(item).map_or("null".to_string(), json_text),
+                from_cache
             ));
         }
+    }
+    for journal in caches.into_values().flatten() {
+        let _ = journal.finish();
     }
     if json {
         println!("[{}]", records.join(",\n "));

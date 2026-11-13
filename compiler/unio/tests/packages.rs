@@ -345,6 +345,85 @@ fn a_path_dependency_is_locked_installed_and_imported() {
     refused(&p.unio(&["check", "main.unio"]), "E0048");
 }
 
+/// T-14: installation validates the target and runtime requirements of every package it
+/// installs, and of the root package: `package.unio_version` must hold for this toolchain and
+/// `package.targets`, when given, must name this machine. A package that does not meet them is
+/// refused at `unio add` and `unio install` with what it asks for, and nothing is written; a
+/// malformed key is E0088, at `unio check` as at installation.
+#[test]
+fn target_and_runtime_requirements_are_validated_at_installation() {
+    let host = unio::package::manifest::host_target().expect("a supported machine");
+    let other = unio::package::manifest::TARGETS
+        .iter()
+        .find(|t| **t != host)
+        .unwrap();
+    let this = unio::package::manifest::toolchain_version();
+    let p = Project::new("requirements");
+    let manifest = p.read("app/unio.toml");
+    let with = |extra: &str| {
+        p.util("util", "1.0.0");
+        let base = p.read("util/unio.toml");
+        p.write("util/unio.toml", &format!("{base}{extra}"));
+    };
+    let nothing_written = |p: &Project| {
+        assert_eq!(p.read("app/unio.toml"), manifest);
+        assert!(!p.path("app/unio.lock").exists());
+        assert_eq!(p.cache_entries(), 0);
+    };
+    // A later toolchain than this one.
+    with(&format!("unio_version = \">={}.0\"\n", this.major + 1));
+    let out = p.unio(&["add", "util", "--path", "../util"]);
+    refused(&out, "package.unio_version");
+    refused(&out, "cannot be installed");
+    nothing_written(&p);
+    // Another machine.
+    with(&format!("targets = [\"{other}\"]\n"));
+    let out = p.unio(&["add", "util", "--path", "../util"]);
+    refused(&out, "package.targets");
+    refused(&out, host);
+    nothing_written(&p);
+    // A malformed key is a mistake of the manifest.
+    with("targets = [\"x86_64-linux\"]\n");
+    refused(&p.unio(&["add", "util", "--path", "../util"]), "E0088");
+    nothing_written(&p);
+    with("unio_version = \"soon\"\n");
+    refused(&p.unio(&["add", "util", "--path", "../util"]), "E0088");
+    nothing_written(&p);
+    // Requirements this toolchain and machine meet: installed, run, and installed again.
+    with(&format!(
+        "unio_version = \"^{}.{}\"\ntargets = [\"{host}\", \"{other}\"]\n",
+        this.major, this.minor
+    ));
+    ok(&p.unio(&["add", "util", "--path", "../util"]));
+    let run = p.unio(&["run", "main.unio"]);
+    ok(&run);
+    assert_eq!(text(&run.stdout), "HELLO!\n");
+    fs::remove_dir_all(p.path("cache/packages")).unwrap();
+    ok(&p.unio(&["install"]));
+    // The root package's own requirements hold at installation too.
+    let added = p.read("app/unio.toml");
+    p.write(
+        "app/unio.toml",
+        &added.replace(
+            "version = \"0.1.0\"\n",
+            &format!("version = \"0.1.0\"\ntargets = [\"{other}\"]\n"),
+        ),
+    );
+    let out = p.unio(&["install"]);
+    refused(&out, "package.targets");
+    // And `unio check` reports a malformed key at its line as E0088.
+    p.write(
+        "app/unio.toml",
+        &added.replace(
+            "version = \"0.1.0\"\n",
+            "version = \"0.1.0\"\ntargets = [\"vax\"]\n",
+        ),
+    );
+    let out = p.unio(&["check", "main.unio"]);
+    refused(&out, "E0088");
+    refused(&out, "'vax' in package.targets is not a target");
+}
+
 #[test]
 fn a_registry_dependency_and_its_dependency_run_end_to_end() {
     let server = Server::start();

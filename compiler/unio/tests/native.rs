@@ -1039,7 +1039,8 @@ fn a_moved_executable_runs_with_the_permissions_of_its_manifest() {
 }
 
 /// An executable whose program image is of another format, or was made by another compiler,
-/// is refused before anything runs, with code 104 and a message saying why.
+/// is refused before anything runs, with code 104 and a message saying why; the program prints
+/// nothing (C-20, docs/runtime.md 5.4).
 #[test]
 fn an_incompatible_image_is_refused() {
     if !supported() {
@@ -1112,6 +1113,7 @@ fn an_incompatible_image_is_refused() {
     other_compiler[id] ^= 0x20;
     let output = run(&other_compiler, "other-compiler");
     assert_eq!(output.status.code(), Some(104));
+    assert_eq!(text(&output.stdout), "");
     let err = text(&output.stderr);
     assert!(err.contains("another compiler"), "{err}");
     // A damaged image.
@@ -1121,6 +1123,8 @@ fn an_incompatible_image_is_refused() {
     }
     let output = run(&damaged, "damaged");
     assert_eq!(output.status.code(), Some(104));
+    // Nothing of the program ran (C-20): no output.
+    assert_eq!(text(&output.stdout), "");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1499,6 +1503,51 @@ fn the_executable_counts_small_values_against_the_heap_limit() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// L-17a, C-18: the executable compares and hashes two chains of 10 million enum values and
+/// trees of lists a million levels deep without recursion on the native stack, as `unio run`
+/// does, and ends normally; under a heap limit both end with 102. Before, `==` of the chains
+/// overflowed the stack of 1 GiB in both.
+#[test]
+fn the_executable_compares_and_hashes_deep_values_without_recursion() {
+    if !supported() {
+        return;
+    }
+    let source = common::deep_values(common::DEEP_VALUES);
+    let dir = common::reserve_package("unio-native", "deep-values", &source);
+    common::set_heap_limit(&dir, None);
+    let (_, found) = run_both(&dir, None);
+    assert_eq!(found.status.code(), Some(0), "{}", errors(&found));
+    assert_eq!(text(&found.stdout), common::DEEP_VALUES_OUTPUT);
+    assert_eq!(errors(&found), "");
+    common::set_heap_limit(&dir, Some(8_388_608));
+    let (_, found) = run_both(&dir, None);
+    assert_eq!(found.status.code(), Some(102), "{}", errors(&found));
+    assert_eq!(
+        errors(&found),
+        "fault: memory exhausted; the program ends with code 102\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// S-5, L-17a, C-18: in the executable, as in `unio run`, the conversions of `std.json` count
+/// each level of a value as a call and end a value deeper than the stack limit with 102.
+#[test]
+fn the_executable_ends_json_conversions_of_deep_values_with_102() {
+    if !supported() {
+        return;
+    }
+    let dir = common::reserve_package("unio-native", "deep-json", common::DEEP_JSON);
+    common::set_heap_limit(&dir, None);
+    let (_, found) = run_both(&dir, None);
+    assert_eq!(found.status.code(), Some(102), "{}", errors(&found));
+    assert_eq!(text(&found.stdout), common::DEEP_JSON_OUTPUT);
+    assert_eq!(
+        errors(&found),
+        "fault: stack exhausted by recursion; the program ends with code 102\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// RFC 0007, C-13: the executable frees a chain of 10 million closures and a mixed chain of
 /// closures, lists, maps, structs, and Options without recursion on the native stack, as `unio
 /// run` does: both end normally without a heap limit and with one that holds the chains, and
@@ -1527,5 +1576,73 @@ fn the_executable_frees_a_deep_chain_of_closures_without_recursion() {
         "fault: memory exhausted; the program ends with code 102\n"
     );
     assert_eq!(text(&found.stdout), "");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// C-11b: `unio build` reuses the object file of a package from its cache while the artifact
+/// key matches; a change of the source or of the profile builds again, and a damaged entry is
+/// detected, never linked, and replaced. The executable is the same either way.
+#[test]
+fn the_build_cache_reuses_an_object_only_for_its_key() {
+    if !supported() {
+        return;
+    }
+    let dir = scratch("build-cache");
+    fs::write(
+        dir.join("unio.toml"),
+        "[package]\nname = \"built\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let source = "public function main() returns Int:\n    print(\"one\")\n    return 0\n";
+    fs::write(dir.join("main.unio"), source).unwrap();
+    let out = dir.join(exe_name("main"));
+    let build = |release: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_unio"));
+        operator(&mut command).current_dir(&dir).arg("build");
+        if release {
+            command.arg("--release");
+        }
+        let output = command
+            .arg("main.unio")
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", errors(&output));
+        errors(&output).contains("reused from the cache")
+    };
+    let runs = |expected: &str| {
+        let output = Command::new(&out).output().unwrap();
+        assert_eq!(text(&output.stdout), expected);
+    };
+    let artifacts = dir.join("target/unio-cache/artifacts");
+    assert!(!build(false));
+    runs("one\n");
+    assert_eq!(fs::read_dir(&artifacts).unwrap().count(), 1);
+    assert!(build(false));
+    runs("one\n");
+    // Another profile is another key.
+    assert!(!build(true));
+    assert!(build(true));
+    assert_eq!(fs::read_dir(&artifacts).unwrap().count(), 2);
+    // A change of the source.
+    fs::write(dir.join("main.unio"), source.replace("one", "two")).unwrap();
+    assert!(!build(false));
+    runs("two\n");
+    assert!(build(false));
+    // A damaged entry is not used: the object is compiled again and the entry replaced.
+    let mut damaged = 0;
+    for entry in fs::read_dir(&artifacts).unwrap().flatten() {
+        let mut data = fs::read(entry.path()).unwrap();
+        let middle = data.len() / 2;
+        data[middle] ^= 0xff;
+        fs::write(entry.path(), data).unwrap();
+        damaged += 1;
+    }
+    assert_eq!(damaged, 3);
+    assert!(!build(false));
+    runs("two\n");
+    assert!(build(false));
+    runs("two\n");
     let _ = fs::remove_dir_all(&dir);
 }

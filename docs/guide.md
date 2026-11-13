@@ -37,7 +37,9 @@ One command does everything; each subcommand is described by `unio --help`.
 | `unio check FILE...` | every static check without running anything; `--diagnostics=json` for tools and agents |
 | `unio test FILE...` | runs the `test` blocks, each in isolation; `--json` for a machine-readable report |
 | `unio fmt FILE...` | rewrites the files in the one style; `--check` only reports |
-| `unio build FILE -o OUT` | a native executable for this machine |
+| `unio build FILE -o OUT` | a native executable for this machine; `--target TRIPLE` for another Linux machine, from Linux ([tools.md](tools.md) section 10) |
+| `unio new NAME`, `unio new --lib NAME` | a new program or library package that checks, tests and formats as written |
+| `unio doc [--open]` | the documentation of the package as HTML pages in `target/doc/`: documentation comments, signatures, errors and effects |
 | `unio outline FILE`, `unio symbol MODULE.NAME` | what a file declares; one declaration with its documentation, errors and effects, and the interfaces a type implements with the method it uses for each |
 | `unio explain CODE` | the explanation of a diagnostic code with an example and its fix |
 
@@ -213,6 +215,8 @@ unio build todo.unio -o todo        # a native executable with the same behavior
 ## 7. Packages and publishing
 
 A package is a directory with `unio.toml`; each file is a module, `import tasks.store` is the file `tasks/store.unio` of the same package. Another package is a dependency, named by an alias in `[dependencies]` and imported as `deps.<alias>.<module>`. The commands are described in full in [packages.md](packages.md).
+
+`unio new app` makes a program package: `unio.toml`, `main.unio` with `main` and a `test` block, and a `.gitignore`; `unio new --lib greetings` makes a library whose module is `greetings.unio`. Both pass `unio check`, `unio test` and `unio fmt --check` as written. `unio doc` writes the documentation of the package into `target/doc/` (`--open` opens it): every public declaration with its signature, its documentation comment, and, for a function, its errors and the effects the compiler derives.
 
 A library `greetings` with one module `words.unio`:
 

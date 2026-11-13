@@ -981,3 +981,68 @@ fn fixes_are_bound_to_the_revision_of_their_diagnostics() {
     let fresh = c.call("textDocument/codeAction", ask(&again[0]));
     assert_eq!(fresh.as_array().map(|a| a.len()), Some(1), "{fresh}");
 }
+
+/// T-13: an incomplete-code diagnostic carries the type the place expects: a syntax error where
+/// an expression is missing or a bracket is left open, found by checking a name put in the place
+/// of the missing code, and a missing argument, field, or return value.
+#[test]
+fn incomplete_code_diagnostics_carry_the_expected_type() {
+    let p = Project::new("expected");
+    let cases = [
+        ("let_without_value", "function f() returns Int:\n    let n as Int =\n    return n\n", "E0012", "Int"),
+        ("open_call", "function g(t as Text) returns Int:\n    return 1\n\nfunction f() returns Int:\n    return g(\n", "E0009", "Text"),
+        ("missing_argument", "function g(a as Int, b as Bool) returns Int:\n    return a\n\nfunction f() returns Int:\n    return g(1)\n", "E0064", "Bool"),
+        ("missing_field", "struct P:\n    x as Int\n    name as Text\n\nfunction f() returns P:\n    return P(x = 1)\n", "E0063", "Text"),
+        ("missing_return", "function f() returns Float:\n    pass\n", "E0082", "Float"),
+        ("return_without_value", "function f() returns Bool:\n    return\n", "E0061", "Bool"),
+    ];
+    let mut c = p.server(None, &[]);
+    c.initialize(&p.path("pkg"));
+    for (name, text, code, expected) in cases {
+        let main = p.write(&format!("pkg/{name}.unio"), text);
+        let uri = path_to_uri(&main);
+        c.open(&uri, text);
+        let diagnostics = c.diagnostics(&uri, Duration::from_secs(60));
+        let found = diagnostics
+            .iter()
+            .find(|d| d.get("code").and_then(Json::as_str) == Some(code))
+            .unwrap_or_else(|| panic!("{name}: no {code} in {diagnostics:?}"));
+        assert_eq!(
+            found.at(&["data", "expected"]).and_then(Json::as_str),
+            Some(expected),
+            "{name}: {found}"
+        );
+    }
+}
+
+/// C-8: the related locations of a diagnostic reach the editor as related information.
+#[test]
+fn related_locations_are_related_information() {
+    let p = Project::new("related");
+    let text =
+        "function f() returns Int:\n    return 1\n\nfunction f() returns Int:\n    return 2\n";
+    let main = p.write("pkg/main.unio", text);
+    let uri = path_to_uri(&main);
+    let mut c = p.server(None, &[]);
+    c.initialize(&p.path("pkg"));
+    c.open(&uri, text);
+    let diagnostics = c.diagnostics(&uri, Duration::from_secs(60));
+    let duplicate = diagnostics
+        .iter()
+        .find(|d| d.get("code").and_then(Json::as_str) == Some("E0051"))
+        .unwrap();
+    let related = duplicate
+        .get("relatedInformation")
+        .and_then(Json::as_array)
+        .unwrap_or_else(|| panic!("{duplicate}"));
+    assert_eq!(related.len(), 1, "{duplicate}");
+    assert_eq!(
+        related[0].at(&["location", "uri"]).and_then(Json::as_str),
+        Some(uri.as_str())
+    );
+    assert_eq!(line_of(related[0].at(&["location", "range"]).unwrap()), 0);
+    assert_eq!(
+        related[0].get("message").and_then(Json::as_str),
+        Some("'f' is first declared here")
+    );
+}

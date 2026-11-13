@@ -50,9 +50,9 @@
 
 ## Общие правила модулей
 
-- Функция, которая может завершиться ошибкой, перечисляет конкретные типы ошибок (Б-2); `fails with Error` не используется.
+- Функция, которая может завершиться ошибкой, перечисляет конкретные типы ошибок (Б-2); `fails with Error` не используется, что `tools/check_library.unio` проверяет в CI.
 - Операция, заблокированная песочницей, завершается объявленной ошибкой с `kind = PermissionDenied` (SB-6). Функция, которая сообщает об отсутствии вместо ошибки (`files.exists`, `env.get`), сообщает о заблокированном объекте как об отсутствующем.
-- У каждой аварийной операции есть безопасная форма (Я-18): `items[i]` и `items.get(i)`, `a / b` и `a.checked_divide(b)`.
+- У каждой аварийной операции есть безопасная форма (Я-18): `items[i]` и `items.get(i)`, `a / b` и `a.checked_divide(b)`; опись их всех — раздел «Аварийные операции и их безопасные формы» ниже.
 - Методы с `var self` меняют значение и доступны только на `var`-месте (Я-11).
 - Комментарий функции, которой нужно полномочие манифеста (И-6), называет его: `Permission: files.read`.
 - `a in b` вызывает `b.contains(a)`.
@@ -64,6 +64,62 @@ using file = try files.open_atomic(path):
         try file.write_line(line)
     try file.commit()
 ```
+
+## Аварийные операции и их безопасные формы (Я-18)
+
+У каждой операции библиотеки, которая может завершиться аварией, есть безопасная форма, возвращающая `Option` или ошибку, чтобы программа, которой нельзя останавливаться, могла проверить заранее. Исчерпание памяти или стека (код 102) — не авария (Я-17a), и безопасной формы у него нет. Таблица — это опись; `tools/check_library.unio` читает её в CI и не проходит, когда у аварийной операции нет строки, когда безопасная форма — не публичная функция, возвращающая `Option` или ошибку, или когда эта таблица и английская называют разные операции. Аварийные операции он находит как операторы ниже и публичные функции, в документирующем комментарии которых сказано, что они завершаются аварией, которые вызывают `assert_fail` или вызывают аварийную частную функцию своего файла; функция, комментарий которой называет её «the safe form of» другой, — безопасная форма. Авария, которую функция наследует от вызова другой публичной функции, находится, только если о ней говорит её комментарий, как и делают комментарии библиотеки. Тот же инструмент проверяет Б-2: в `stdlib/` нет `fails with Error`.
+
+| Операция | Авария, когда | Безопасная форма |
+|---|---|---|
+| `a + b` | сумма двух `Int` не помещается | `Int.checked_add` |
+| `a - b` | разность не помещается | `Int.checked_subtract` |
+| `a * b` | произведение не помещается | `Int.checked_multiply` |
+| `a / b` | `b` равно 0, или `MINIMUM_INT / -1` | `Int.checked_divide` |
+| `a % b` | `b` равно 0 | `Int.checked_remainder` |
+| `a ** b` | степень не помещается, или `b` отрицательно | `std.math.checked_power` |
+| `-a` | `a` равно `MINIMUM_INT` | `Int.checked_subtract`, как `0.checked_subtract(a)` |
+| `items[index]` | `index` вне `0..length()` | `List.get` |
+| `map[key]` | ключа нет | `Map.get` |
+| `Int.abs` | значение равно `MINIMUM_INT` | `Int.checked_abs` |
+| `List.slice` | границы вне `0..length()` или переставлены | `List.checked_slice` |
+| `Text.slice` | границы вне `0..length()` или переставлены | `Text.checked_slice` |
+| `Text.char_at` | позиция вне `0..length()` | `Text.checked_char_at` |
+| `Text.repeat` | число повторений отрицательно | `Text.checked_repeat` |
+| `std.text.split` | разделитель пуст | `std.text.checked_split` |
+| `Decimal.divide` (`a / b` для `Decimal`) | делитель равен нулю, или у частного нет конечной записи | `Decimal.checked_divide` |
+| `Decimal.round` | `places` отрицательно | `Decimal.checked_round` |
+| `Decimal.divide_rounded` | делитель равен нулю, или `places` отрицательно | `Decimal.checked_divide_rounded` |
+| `Decimal.to_fixed` | `places` отрицательно | `Decimal.checked_to_fixed` |
+| `std.math.clamp` | `low` больше `high` | `std.math.checked_clamp` |
+| `std.math.gcd` | результат равен 2^63 | `std.math.checked_gcd` |
+| `std.math.integer_sqrt` | аргумент отрицателен | `std.math.checked_integer_sqrt` |
+| `std.math.floor_divide` | делитель равен 0, или `MINIMUM_INT` делится на -1 | `std.math.checked_floor_divide` |
+| `std.math.modulo` | делитель равен 0 | `std.math.checked_modulo` |
+| `std.args.parser` | объявление не может работать (повторённое имя, обязательный позиционный после необязательного, ...) | `std.args.checked_parser` |
+| `Arguments.flag` | имя не объявлено как флаг | `Arguments.checked_flag` |
+| `Arguments.get` | имя не объявлено или это флаг | `Arguments.checked_get` |
+| `Arguments.value` | как у `get`, или у параметра нет значения | `Arguments.checked_get` |
+| `Arguments.values` | имя не объявлено | `Arguments.checked_values` |
+| `Arguments.get_int` | имя не объявлено или это флаг | `Arguments.checked_get` с `Text.to_int` |
+| `std.random.from_entropy` | у системы нет источника случайности | `std.random.checked_from_entropy` |
+| `std.random.secure_bytes` | число меньше 0 или больше 1048576 | `std.random.checked_secure_bytes` |
+| `std.random.secure_int` | `low >= high` | `std.random.checked_secure_int` |
+| `Generator.next_int` | `low >= high` | `Generator.checked_next_int` |
+| `std.time.microseconds` | длительность не помещается в `Int` наносекунд | `Duration.checked_times`, как `microseconds(1).checked_times(n)` |
+| `std.time.milliseconds` | длительность не помещается | `Duration.checked_times` |
+| `std.time.seconds` | длительность не помещается | `Duration.checked_times` |
+| `std.time.minutes` | длительность не помещается | `Duration.checked_times` |
+| `std.time.hours` | длительность не помещается | `Duration.checked_times` |
+| `std.time.from_unix_seconds` | момент вне 1677–2262 годов | `Duration.checked_times` с `std.time.from_unix_nanoseconds` |
+| `Duration.add` (`a + b` для `Duration`) | сумма не помещается | `Duration.checked_add` |
+| `Duration.subtract` (`a - b` для `Duration`) | разность не помещается | `Duration.checked_subtract` |
+| `Instant.since` | разность не помещается | `Instant.checked_since` |
+| `Instant.plus` | показание не помещается | `Instant.checked_plus` |
+| `Timestamp.since` | разность не помещается | `Timestamp.checked_since` |
+| `Timestamp.plus` | момент вне 1677–2262 годов | `Timestamp.checked_plus` |
+| `ManualClock.advance` | длительность отрицательна, или время не помещается | `ManualClock.checked_advance` |
+| `assert_fail` | всегда: авария — её назначение | нет |
+| `expect_fault` | действие не завершается аварией: тест не проходит | нет: она есть только в блоках `test` |
 
 ## Пути на каждой платформе
 

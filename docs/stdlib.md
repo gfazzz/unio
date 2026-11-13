@@ -50,9 +50,9 @@ A file may use only its own layer and the layers before it; `spec/check_api.py` 
 
 ## Rules common to all modules
 
-- A function that can fail lists concrete error types (S-2); none uses `fails with Error`.
+- A function that can fail lists concrete error types (S-2); none uses `fails with Error`, which `tools/check_library.unio` checks in CI.
 - An operation blocked by the sandbox ends with the declared error, with `kind = PermissionDenied` (SB-6). A function that reports absence instead of an error (`files.exists`, `env.get`) reports a blocked object as absent.
-- Every faulting operation has a safe form (L-18): `items[i]` and `items.get(i)`, `a / b` and `a.checked_divide(b)`.
+- Every faulting operation has a safe form (L-18): `items[i]` and `items.get(i)`, `a / b` and `a.checked_divide(b)`; the inventory of all of them is the section "Faulting operations and their safe forms" below.
 - Methods with `var self` change the value and are available only on a `var` place (L-11).
 - The comment of a function that needs a manifest permission (T-6) names it: `Permission: files.read`.
 - `a in b` calls `b.contains(a)`.
@@ -64,6 +64,62 @@ using file = try files.open_atomic(path):
         try file.write_line(line)
     try file.commit()
 ```
+
+## Faulting operations and their safe forms (L-18)
+
+Every operation of the library that can fault has a safe form that returns `Option` or fails with an error, so that a program that must not stop can check instead. Exhaustion of memory or of the stack (code 102) is not a fault (L-17a) and has no safe form. The table is the inventory; `tools/check_library.unio` reads it in CI and fails when a faulting operation has no row, when a safe form is not a public function that returns `Option` or fails with an error, or when this table and the Russian one name different operations. It finds the faulting operations as the operators below and the public functions whose documentation comment says that they fault, that call `assert_fail`, or that call a private function of their file that faults; a function whose comment calls it "the safe form of" another is a safe form. A fault that a function inherits from a call of another public function is found only when its comment says so, as the comments of the library do. The same tool checks S-2: no `fails with Error` in `stdlib/`.
+
+| Operation | Faults when | Safe form |
+|---|---|---|
+| `a + b` | the sum of two `Int` values does not fit | `Int.checked_add` |
+| `a - b` | the difference does not fit | `Int.checked_subtract` |
+| `a * b` | the product does not fit | `Int.checked_multiply` |
+| `a / b` | `b` is 0, or `MINIMUM_INT / -1` | `Int.checked_divide` |
+| `a % b` | `b` is 0 | `Int.checked_remainder` |
+| `a ** b` | the power does not fit, or `b` is negative | `std.math.checked_power` |
+| `-a` | `a` is `MINIMUM_INT` | `Int.checked_subtract`, as `0.checked_subtract(a)` |
+| `items[index]` | `index` is outside `0..length()` | `List.get` |
+| `map[key]` | the key is absent | `Map.get` |
+| `Int.abs` | the value is `MINIMUM_INT` | `Int.checked_abs` |
+| `List.slice` | the bounds are outside `0..length()` or reversed | `List.checked_slice` |
+| `Text.slice` | the bounds are outside `0..length()` or reversed | `Text.checked_slice` |
+| `Text.char_at` | the position is outside `0..length()` | `Text.checked_char_at` |
+| `Text.repeat` | the count is negative | `Text.checked_repeat` |
+| `std.text.split` | the separator is empty | `std.text.checked_split` |
+| `Decimal.divide` (`a / b` on `Decimal`) | the divisor is zero, or the quotient has no finite expansion | `Decimal.checked_divide` |
+| `Decimal.round` | `places` is negative | `Decimal.checked_round` |
+| `Decimal.divide_rounded` | the divisor is zero, or `places` is negative | `Decimal.checked_divide_rounded` |
+| `Decimal.to_fixed` | `places` is negative | `Decimal.checked_to_fixed` |
+| `std.math.clamp` | `low` is greater than `high` | `std.math.checked_clamp` |
+| `std.math.gcd` | the result is 2^63 | `std.math.checked_gcd` |
+| `std.math.integer_sqrt` | the argument is negative | `std.math.checked_integer_sqrt` |
+| `std.math.floor_divide` | the divisor is 0, or `MINIMUM_INT` is divided by -1 | `std.math.checked_floor_divide` |
+| `std.math.modulo` | the divisor is 0 | `std.math.checked_modulo` |
+| `std.args.parser` | a declaration cannot work (a repeated name, a required positional after an optional one, ...) | `std.args.checked_parser` |
+| `Arguments.flag` | the name is not a declared flag | `Arguments.checked_flag` |
+| `Arguments.get` | the name is not declared, or is a flag | `Arguments.checked_get` |
+| `Arguments.value` | as `get`, or the parameter has no value | `Arguments.checked_get` |
+| `Arguments.values` | the name is not declared | `Arguments.checked_values` |
+| `Arguments.get_int` | the name is not declared, or is a flag | `Arguments.checked_get` with `Text.to_int` |
+| `std.random.from_entropy` | the system has no random source | `std.random.checked_from_entropy` |
+| `std.random.secure_bytes` | the count is below 0 or above 1048576 | `std.random.checked_secure_bytes` |
+| `std.random.secure_int` | `low >= high` | `std.random.checked_secure_int` |
+| `Generator.next_int` | `low >= high` | `Generator.checked_next_int` |
+| `std.time.microseconds` | the duration does not fit in `Int` nanoseconds | `Duration.checked_times`, as `microseconds(1).checked_times(n)` |
+| `std.time.milliseconds` | the duration does not fit | `Duration.checked_times` |
+| `std.time.seconds` | the duration does not fit | `Duration.checked_times` |
+| `std.time.minutes` | the duration does not fit | `Duration.checked_times` |
+| `std.time.hours` | the duration does not fit | `Duration.checked_times` |
+| `std.time.from_unix_seconds` | the timestamp is outside the years 1677 to 2262 | `Duration.checked_times` with `std.time.from_unix_nanoseconds` |
+| `Duration.add` (`a + b` on `Duration`) | the sum does not fit | `Duration.checked_add` |
+| `Duration.subtract` (`a - b` on `Duration`) | the difference does not fit | `Duration.checked_subtract` |
+| `Instant.since` | the difference does not fit | `Instant.checked_since` |
+| `Instant.plus` | the reading does not fit | `Instant.checked_plus` |
+| `Timestamp.since` | the difference does not fit | `Timestamp.checked_since` |
+| `Timestamp.plus` | the timestamp is outside the years 1677 to 2262 | `Timestamp.checked_plus` |
+| `ManualClock.advance` | the duration is negative, or a time does not fit | `ManualClock.checked_advance` |
+| `assert_fail` | always: the fault is its purpose | none |
+| `expect_fault` | the action does not fault: the test fails | none: it exists only in `test` blocks |
 
 ## Paths on each platform
 

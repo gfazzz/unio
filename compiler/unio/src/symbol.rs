@@ -368,6 +368,49 @@ pub fn hashes(p: &Program) -> Hashes {
     }
 }
 
+/// The content hash of a `test` block of module `m` (C-11a), which `unio test --json` reports
+/// for every test: SHA-384 over the canonical form of the block, as for a declaration, with
+/// the hashes of every declaration it names or calls. Formatting and comments do not change
+/// it; a change of the test or of anything it references does.
+pub fn test_hash(p: &Program, hashes: &Hashes, m: ModId, test: &ast::Test) -> String {
+    let text = crate::sexpr::item(&ast::Item::Test(test.clone()));
+    let words = atoms(&text);
+    let mut referenced: BTreeSet<Node> = BTreeSet::new();
+    for word in &words {
+        if !word.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+            continue;
+        }
+        if let Some((_, s)) = p.lookup(m, word) {
+            referenced.insert(symbol_node(s));
+        }
+        if let Some(alias) = p.module_alias(m, word) {
+            for other in &words {
+                if let Some(s) = p.modules[alias].symbols.get(*other) {
+                    referenced.insert(symbol_node(*s));
+                }
+            }
+        }
+    }
+    for (f, module, span) in &p.usages {
+        if *module == m && contains(test.span, *span) {
+            referenced.insert(Node::Func(*f));
+        }
+    }
+    let external: BTreeSet<(String, String)> = referenced
+        .into_iter()
+        .filter_map(|n| Some((identity(p, n), hashes.hash.get(&n)?.clone())))
+        .collect();
+    let mut body = Vec::new();
+    field(&mut body, &p.modules[m].name);
+    field(&mut body, &text);
+    for (id, h) in external {
+        field(&mut body, "external");
+        field(&mut body, &id);
+        field(&mut body, &h);
+    }
+    digest("test", &body)
+}
+
 /// The declarations whose name is the query: a full name such as `std.files.read_text` or
 /// `examples.wc.count`, a method such as `List.map`, or a prelude name such as `assert_fail`.
 pub fn find(p: &Program, query: &str) -> Vec<Node> {

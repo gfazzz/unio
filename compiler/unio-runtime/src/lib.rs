@@ -5,6 +5,7 @@
 //! The interpreter of sprint S5 evaluates programs on top of this crate; the native code of S6
 //! links the same functions.
 
+pub mod deadline;
 pub mod externs;
 pub mod fault;
 pub mod file_trace;
