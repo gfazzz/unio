@@ -70,6 +70,14 @@ RUSTFLAGS=$flags cargo build --release --locked -p unio
 target=${CARGO_TARGET_DIR:-target}
 mkdir -p "$prefix/bin" "$prefix/lib/unio" "$prefix/share/doc/unio"
 cp "$target/release/$exe" "$prefix/bin/$exe"
+if [ "$system" = Darwin ]; then
+    # Apple's linker derives LC_UUID from inputs that include the random temporary paths of
+    # rustc's object files: the UUID becomes a hash of the content, and the file is signed again
+    # (ad hoc, as the linker signed it), so that two builds give the same bytes (plan section 12,
+    # release condition 2).
+    python3 "$root/.github/scripts/macho_uuid.py" "$prefix/bin/$exe"
+    codesign --force --sign - "$prefix/bin/$exe"
+fi
 cp "$target/release/$lib" "$prefix/lib/unio/$lib"
 cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$root/THIRD-PARTY-NOTICES" "$prefix/share/doc/unio/"
 echo "installed into $prefix"

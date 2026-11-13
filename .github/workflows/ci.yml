@@ -683,12 +683,12 @@ jobs:
               [ -f "first/$f" ] && [ -f "second/$f" ] || continue
               cmp -s "first/$f" "second/$f" && continue
               echo "== $f: $(cmp -l "first/$f" "second/$f" | wc -l) bytes differ"
-              cmp -l "first/$f" "second/$f" | head -5
+              cmp -l "first/$f" "second/$f" | head -5 || true
               if command -v otool >/dev/null; then
-                diff <(otool -l "first/$f") <(otool -l "second/$f") | head -20
+                diff <(otool -l "first/$f") <(otool -l "second/$f") | head -20 || true
               fi
               if command -v strings >/dev/null; then
-                diff <(strings -a "first/$f" | sort -u) <(strings -a "second/$f" | sort -u) | head -40
+                diff <(strings -a "first/$f" | sort -u) <(strings -a "second/$f" | sort -u) | head -40 || true
               fi
             done
             exit 1
