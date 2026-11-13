@@ -4375,8 +4375,12 @@ impl<'a> Checker<'a> {
                         let _ = v;
                         return;
                     }
+                    // `some`, `none`, `ok` and `error` cannot be declared (L-6a), so in a pattern
+                    // they are always the prelude variant, as the interpreter reads them: never
+                    // a new binding that matches anything. Against another type that is E0061.
                     if !self.short_variants(n).is_empty()
                         && (subject.is_unknown()
+                            || PRELUDE_VARIANTS.contains(&n.as_str())
                             || n.chars().next().is_some_and(char::is_uppercase))
                     {
                         if let Some((d, _)) = self.variant_named(n, path[0].span) {

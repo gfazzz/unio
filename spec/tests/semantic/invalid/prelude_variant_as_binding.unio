@@ -1,0 +1,10 @@
+# expect-error: 6 E0061
+# A prelude variant name in a pattern is the variant, not a new binding (L-6a): against an Int
+# subject it is a type mismatch, where it would otherwise have matched every value.
+function classify(count as Int) returns Text:
+    match count:
+        case none: return "none"
+        case _: return "some"
+
+public function main():
+    print(classify(2))

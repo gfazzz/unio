@@ -1,0 +1,9 @@
+# `none` and `some` in patterns name the variants of Option.
+function describe(value as Option[Int]) returns Text:
+    match value:
+        case none: return "nothing"
+        case some(n): return "{n}"
+
+public function main():
+    print(describe(none))
+    print(describe(some(3)))
