@@ -27,12 +27,18 @@ fn sources(directory: &Path, out: &mut Vec<PathBuf>) {
 /// The full name of every external function: `T.name` in `extend T`, the bare name in a
 /// prelude or builtin file, and `std.module.name` elsewhere.
 fn declared() -> BTreeSet<String> {
-    let root = stdlib();
+    declared_in(&stdlib())
+}
+
+/// The full names of the external functions declared below `root`, a directory of the library.
+fn declared_in(root: &Path) -> BTreeSet<String> {
+    let library = stdlib();
     let mut files = Vec::new();
-    sources(&root, &mut files);
+    sources(root, &mut files);
     let mut names = BTreeSet::new();
     for file in files {
-        let relative = file.strip_prefix(&root).unwrap().with_extension("");
+        let root = &library;
+        let relative = file.strip_prefix(root).unwrap().with_extension("");
         let parts: Vec<String> = relative
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -89,8 +95,8 @@ fn bindings_and_declarations_agree() {
     assert!(extra.is_empty(), "bound but not declared: {extra:?}");
     assert_eq!(
         declared.len(),
-        115,
-        "docs/runtime.md, section 7.1, counts 115 externals"
+        118,
+        "docs/runtime.md, section 7.1, counts 118 externals"
     );
 }
 
@@ -124,5 +130,72 @@ fn the_review_checklist_lists_every_external() {
             missing.is_empty() && extra.is_empty(),
             "{document}: bound but not listed: {missing:?}; listed but not bound: {extra:?}"
         );
+    }
+}
+
+/// S-12: the `core` runtime makes no call to the operating system and reaches the `alloc` and
+/// `std` runtimes only through the hooks of `layers.rs` (docs/runtime.md 11). Every external of
+/// `stdlib/core` is bound in a source of the core layer, and no source of the core layer names
+/// an interface of the system, a foreign function, or a module of another layer. The test
+/// `a_core_program_makes_no_system_call` (`compiler/unio/tests/layers.rs`) checks the same at
+/// run time on Linux.
+#[test]
+fn the_core_layer_reaches_the_system_only_through_hooks() {
+    let core_declared = declared_in(&stdlib().join("core"));
+    let core_bound: BTreeSet<String> = unio_runtime::externs::core::BINDINGS
+        .iter()
+        .chain(unio_runtime::externs::math::BINDINGS)
+        .map(|(name, _)| name.to_string())
+        .collect();
+    assert_eq!(
+        core_declared, core_bound,
+        "the externals of stdlib/core are bound in externs/core.rs and externs/math.rs, and only they"
+    );
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let forbidden = [
+        "std::fs",
+        "std::process",
+        "std::env",
+        "std::net",
+        "std::thread",
+        "std::time",
+        "std::os",
+        "stdout(",
+        "stderr(",
+        "stdin(",
+        "print!",
+        "println!",
+        "eprint!",
+        "eprintln!",
+        "libc",
+        "extern \"C\"",
+        "asm!",
+        "crate::sandbox",
+        "crate::reserve",
+        "crate::heap",
+        "crate::deadline",
+        "crate::file_trace",
+        "externs::alloc",
+        "externs::system",
+        "externs::files",
+        "externs::process",
+        "externs::clock",
+        "externs::durability",
+        "externs::unicode",
+    ];
+    for file in ["fault.rs", "externs/core.rs", "externs/math.rs"] {
+        let text = std::fs::read_to_string(source.join(file)).unwrap();
+        // The tests of a file run in the harness, not in a program.
+        let code = text.split("#[cfg(test)]").next().unwrap();
+        for (number, line) in code.lines().enumerate() {
+            let line = line.split("//").next().unwrap();
+            for name in forbidden {
+                assert!(
+                    !line.contains(name),
+                    "{file}:{}: the core runtime uses {name}; reach it through crate::layers::hooks()",
+                    number + 1
+                );
+            }
+        }
     }
 }

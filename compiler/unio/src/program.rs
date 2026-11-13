@@ -2159,12 +2159,23 @@ impl Program {
         })
     }
 
+    /// Whether two modules belong to one package (L-31): the same package directory and the
+    /// same identity of a locked dependency, since two origins with one content share a cache
+    /// entry but not their types (T-14). The standard library is one package across its layers.
+    pub fn same_package(&self, a: ModId, b: ModId) -> bool {
+        let (a, b) = (&self.modules[a], &self.modules[b]);
+        if a.stdlib || b.stdlib {
+            return a.stdlib && b.stdlib;
+        }
+        a.package == b.package
+            && a.dependency.as_ref().map(|d| &d.id) == b.dependency.as_ref().map(|d| &d.id)
+    }
+
+    /// Whether the package of `module` owns the type constructor of `ty` (L-31): a declared
+    /// type is owned by the package that declares it, a built-in one by the standard library.
     fn owns(&self, module: ModId, ty: &Ty) -> bool {
         match ty {
-            Ty::Named(d, _) => {
-                self.defs[*d].module == module
-                    || (self.modules[module].stdlib && self.modules[self.defs[*d].module].stdlib)
-            }
+            Ty::Named(d, _) => self.same_package(self.defs[*d].module, module),
             _ => self.modules[module].stdlib,
         }
     }

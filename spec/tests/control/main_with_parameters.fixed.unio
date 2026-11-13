@@ -1,0 +1,9 @@
+import std.args
+
+function greeting(names as List[Text]) returns Text:
+    if names.is_empty(): return "hello, world"
+    return "hello, {names[0]}"
+
+public function main() returns Int:
+    print(greeting(args.list()))
+    return 0

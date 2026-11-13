@@ -2,6 +2,10 @@
 ## code points, explicit Unicode normalization and grapheme clusters. Methods of a single text,
 ## such as length, slice and replace, are in builtin/text.unio.
 ##
+## Utf8Decoder turns a stream of byte chunks into text (S-16, S-18): a character whose bytes are
+## split across chunks is kept until it is complete, and invalid UTF-8 is reported with its byte
+## offset, never replaced.
+##
 ## Text never normalizes by itself: equality compares the exact scalars, so "\u{E9}" and
 ## "e\u{301}" differ until both are normalized with the same form. Normalization and grapheme
 ## clusters use the Unicode Character Database of unicode_version(), pinned in the runtime; a newer
@@ -64,6 +68,107 @@ public external function graphemes(text as Text) returns List[Text]
 ##     assert unicode_version() == "15.0.0"
 public external function unicode_version() returns Text
 
+## Why a stream of bytes is not UTF-8.
+public enum Utf8Problem:
+    ## A byte that cannot start or continue a character here: a stray continuation byte, an
+    ## overlong form, a surrogate, a value above U+10FFFF, or a sequence cut short by another start.
+    Invalid
+    ## The stream ends inside the bytes of one character.
+    Truncated
+
+## The stream is not UTF-8. offset counts bytes from the start of the stream to the first byte
+## of the sequence that is not valid.
+public error Utf8Error:
+    offset as Int
+    problem as Utf8Problem
+
+## A decoder of UTF-8 that receives the stream in chunks of any size, split anywhere. It keeps
+## at most 3 bytes between chunks (the start of a character the next chunk completes), so its
+## memory does not depend on the length of the stream. Make one with utf8_decoder().
+public struct Utf8Decoder:
+    var pending as Bytes = Bytes()
+    var offset as Int = 0
+    var failure as Option[Utf8Error] = none
+
+## The result of one step of the runtime's decoder: the text of the complete characters, the
+## start of a character at the end of the input, and where an invalid sequence starts.
+struct Utf8Step:
+    text as Text
+    rest as Bytes
+    invalid_at as Option[Int]
+
+## Decodes pending followed by chunk: the text of every complete character before the first
+## invalid sequence; rest, the bytes (at most 3) of a character that is incomplete at the end of
+## the input; invalid_at, the index in pending and chunk together of the first byte of the first
+## invalid sequence. rest is empty when invalid_at is some. Memory is the length of the input,
+## checked against the heap limit before it is allocated.
+external function decode_utf8_step(pending as Bytes, chunk as Bytes) returns Utf8Step
+
+## A decoder at the start of a stream.
+## Example:
+##     var decoder = utf8_decoder()
+##     let text = try decoder.decode(bytes_of([0x68, 0xC3]) or Bytes()) on Utf8Error as e:
+##         assert_fail("offset {e.offset}")
+##     assert text == "h" and decoder.pending_bytes() == 1
+public function utf8_decoder() returns Utf8Decoder:
+    return Utf8Decoder()
+
+extend Utf8Decoder:
+    ## The text of the characters that this chunk completes, in order. The bytes of a character
+    ## that the chunk starts but does not end are kept for the next call. The text before an
+    ## invalid sequence is returned first, and the error is reported by the next call, as the
+    ## bytes of a FileReader are returned before its error; once reported, every further call
+    ## fails with the same error. The text is at most chunk.length() + 3 bytes of UTF-8.
+    ## Example:
+    ##     var decoder = utf8_decoder()
+    ##     let first = try decoder.decode(bytes_of([0xE2, 0x82]) or Bytes()) on Utf8Error as e:
+    ##         assert_fail("offset {e.offset}")
+    ##     let second = try decoder.decode(bytes_of([0xAC]) or Bytes()) on Utf8Error as e:
+    ##         assert_fail("offset {e.offset}")
+    ##     assert first == "" and second == "\u{20AC}"
+    public function decode(var self, chunk as Bytes) returns Text fails with Utf8Error:
+        match self.failure:
+            case some(problem): fail problem
+            case none: pass
+        let step = decode_utf8_step(self.pending, chunk)
+        match step.invalid_at:
+            case some(at):
+                let problem = Utf8Error(offset = self.offset + at, problem = Utf8Problem.Invalid)
+                self.failure = some(problem)
+                self.offset = problem.offset
+                self.pending = Bytes()
+                if step.text.is_empty(): fail problem
+                return step.text
+            case none:
+                self.offset = self.offset + self.pending.length() + chunk.length() - step.rest.length()
+                self.pending = step.rest
+                return step.text
+
+    ## Ends the stream: fails with Truncated if it ended inside a character, or with the error
+    ## that decode found and has not reported yet.
+    ## Example:
+    ##     var decoder = utf8_decoder()
+    ##     try:
+    ##         let text = try decoder.decode(bytes_of([0xF0, 0x9F]) or Bytes())
+    ##         try decoder.finish()
+    ##         assert_fail("finished inside a character")
+    ##     on Utf8Error as e:
+    ##         assert e.problem == Utf8Problem.Truncated and e.offset == 0
+    public function finish(var self) fails with Utf8Error:
+        match self.failure:
+            case some(problem): fail problem
+            case none: pass
+        if not self.pending.is_empty():
+            let problem = Utf8Error(offset = self.offset, problem = Utf8Problem.Truncated)
+            self.failure = some(problem)
+            fail problem
+
+    ## How many bytes of an incomplete character the decoder holds: 0 to 3.
+    ## Example:
+    ##     assert utf8_decoder().pending_bytes() == 0
+    public function pending_bytes(self) returns Int:
+        return self.pending.length()
+
 test "join and split are inverse":
     assert split(join(["a", "b", "c"], ", "), ", ") == ["a", "b", "c"]
 
@@ -117,3 +222,139 @@ test "case conversion is locale-independent and may change length":
     assert "\u{DF}".to_upper() == "SS"
     assert "\u{130}".to_lower() == "i\u{307}"
     assert "ΣΑΣ".to_lower() == "σας"
+
+# ---------------------------------------------------------------- the UTF-8 decoder (S-18)
+
+function stream_of(values as List[Int]) returns Bytes:
+    let data = bytes_of(values)
+    assert data.is_some()
+    return data or Bytes()
+
+## Decodes data in the chunks that the cut positions give, checking that the decoder never
+## holds more than 3 bytes; the text, or the error.
+function decode_cut(data as Bytes, cuts as List[Int]) returns Text fails with Utf8Error:
+    var decoder = utf8_decoder()
+    var result = ""
+    var start = 0
+    var ends = cuts
+    ends.append(data.length())
+    for cut in ends:
+        let part = try decoder.decode(data.slice(start, cut))
+        result = result + part
+        assert decoder.pending_bytes() <= 3
+        start = cut
+    try decoder.finish()
+    return result
+
+struct Decoded:
+    text as Text
+    error as Option[Utf8Error] = none
+
+## The first error of decoding data cut once at cut, and the text decoded before it.
+function first_error(data as Bytes, cut as Int) returns Decoded:
+    var decoder = utf8_decoder()
+    var text = ""
+    for part in [data.slice(0, cut), data.slice(cut, data.length())]:
+        try:
+            text = text + (try decoder.decode(part))
+        on Utf8Error as e: return Decoded(text = text, error = some(e))
+    try:
+        try decoder.finish()
+    on Utf8Error as e: return Decoded(text = text, error = some(e))
+    return Decoded(text = text)
+
+test "a character split at every possible chunk boundary is decoded once":
+    # One character of each length: a, é (2 bytes), € (3 bytes), 😀 (4 bytes), between letters.
+    let expected = "a\u{E9}b\u{20AC}c\u{1F600}d"
+    let data = stream_of(
+        [0x61, 0xC3, 0xA9, 0x62, 0xE2, 0x82, 0xAC, 0x63, 0xF0, 0x9F, 0x98, 0x80, 0x64],
+    )
+    assert data.to_text() == some(expected)
+    for first in range(0, data.length() + 1):
+        for second in range(first, data.length() + 1):
+            let text = try decode_cut(data, [first, second]) on Utf8Error as e:
+                assert_fail("cuts {first}, {second}: offset {e.offset}")
+            assert text == expected
+    # One byte at a time: every character arrives in pieces.
+    let text = try decode_cut(data, [i for i in range(1, data.length())]) on Utf8Error as e:
+        assert_fail("bytes one by one: offset {e.offset}")
+    assert text == expected
+
+test "invalid UTF-8 is reported with its byte offset, after the text before it":
+    # A stray continuation byte, an overlong "/", a surrogate (U+D800), a value above U+10FFFF,
+    # a sequence cut short by another start, and a byte that never occurs in UTF-8.
+    let streams = [
+        [0x61, 0x80, 0x62],
+        [0x61, 0x62, 0xC0, 0xAF],
+        [0xED, 0xA0, 0x80],
+        [0x61, 0xF4, 0x90, 0x80, 0x80],
+        [0x61, 0xE2, 0x82, 0x61],
+        [0xFF],
+    ]
+    let offsets = [1, 2, 0, 1, 1, 0]
+    for index in range(0, streams.length()):
+        let data = stream_of(streams[index])
+        let offset = offsets[index]
+        assert data.to_text() == none
+        for cut in range(0, data.length() + 1):
+            let decoded = first_error(data, cut)
+            match decoded.error:
+                case some(found):
+                    assert found.problem == Utf8Problem.Invalid
+                    assert found.offset == offset
+                case none: assert_fail("no error for stream {index} cut at {cut}")
+            assert decoded.text == (data.slice(0, offset).to_text() or "")
+
+test "an error is reported again on every later call":
+    var decoder = utf8_decoder()
+    let first = try decoder.decode(stream_of([0x61, 0xFF])) on Utf8Error as e:
+        assert_fail("the text before the error comes first")
+    assert first == "a"
+    for attempt in range(0, 2):
+        try:
+            let more = try decoder.decode(stream_of([0x62]))
+            assert_fail("decoded {more} after an error")
+        on Utf8Error as e: assert e.offset == 1 and e.problem == Utf8Problem.Invalid
+    try:
+        try decoder.finish()
+        assert_fail("finished after an error")
+    on Utf8Error as e: assert e.offset == 1
+
+test "a stream that ends inside a character is truncated":
+    let endings = [[0xC3], [0xE2, 0x82], [0xF0, 0x9F, 0x98]]
+    for ending in endings:
+        var values = [0x6F, 0x6B]
+        values.append_all(ending)
+        let data = stream_of(values)
+        for cut in range(0, data.length() + 1):
+            var decoder = utf8_decoder()
+            let a = try decoder.decode(data.slice(0, cut)) on Utf8Error as e:
+                assert_fail("offset {e.offset}")
+            let b = try decoder.decode(data.slice(cut, data.length())) on Utf8Error as e:
+                assert_fail("offset {e.offset}")
+            assert a + b == "ok"
+            assert decoder.pending_bytes() == ending.length()
+            try:
+                try decoder.finish()
+                assert_fail("no error at the end")
+            on Utf8Error as e: assert e.problem == Utf8Problem.Truncated and e.offset == 2
+
+test "a large stream is decoded in bounded memory":
+    # Seven 4-byte characters cut into chunks of 7 bytes: three of every four chunks end inside a
+    # character, and the decoder never holds more than 3 bytes of it.
+    var values as List[Int] = []
+    for i in range(0, 7):
+        values.append_all([0xF0, 0x9F, 0x98, 0x80])
+    let cycle = stream_of(values)
+    let chunks = [cycle.slice(7 * i, 7 * i + 7) for i in range(0, 4)]
+    var decoder = utf8_decoder()
+    var characters = 0
+    for round in range(0, 20000):
+        let text = try decoder.decode(chunks[round % 4]) on Utf8Error as e:
+            assert_fail("offset {e.offset}")
+        characters = characters + text.length()
+        assert decoder.pending_bytes() <= 3
+    try:
+        try decoder.finish()
+    on Utf8Error as e: assert_fail("offset {e.offset}")
+    assert characters == 35000

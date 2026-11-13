@@ -1743,7 +1743,15 @@ fn start(
     let _ = interp.native.set(hooks);
     // SB-1: the sandbox applies after the program is loaded and before main runs.
     let _sandbox = crate::sandbox_cli::enter_or_exit(&plan, 0);
+    // S-12: the test hook that runs `main` where no system call of the std layer is allowed
+    // (docs/runtime.md 11); the variable is read here, before the filter.
+    let core_only =
+        std::env::var_os(unio_runtime::layers::TEST_CORE_SECCOMP).is_some_and(|v| v == "1");
     let mut rt = Runtime::new(args);
     rt.site_base(|| interp.sites());
+    if let Err(why) = unio_runtime::layers::enter_core_only(core_only) {
+        eprintln!("unio: {why}");
+        return unio_runtime::fault::EXIT_SANDBOX;
+    }
     crate::interp::run_main(&interp, &mut rt, module)
 }

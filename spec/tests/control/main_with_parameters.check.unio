@@ -1,0 +1,8 @@
+# Hidden behavioural check of main_with_parameters: test blocks that the reference fix passes.
+
+test "the greeting names the first argument, or the world":
+    assert greeting([]) == "hello, world"
+    assert greeting(["Ada", "Bob"]) == "hello, Ada"
+
+test "main takes no parameters and ends with 0":
+    assert main() == 0

@@ -10,6 +10,7 @@ pub mod externs;
 pub mod fault;
 pub mod file_trace;
 pub mod heap;
+pub mod layers;
 pub mod reserve;
 pub mod runtime;
 pub mod sandbox;

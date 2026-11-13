@@ -61,7 +61,7 @@ pub const CODES: &[&str] = &[
     "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065", "E0066", "E0067",
     "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074", "E0075", "E0076",
     "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084", "E0085", "E0045",
-    "E0046", "E0047", "E0048", "E0086", "E0087", "E0088", "E0089",
+    "E0046", "E0047", "E0048", "E0086", "E0087", "E0088", "E0089", "E0090",
 ];
 
 /// Codes of the name and type checks (sprint S3); their examples need the whole check.
@@ -70,7 +70,7 @@ pub const SEMANTIC_CODES: &[&str] = &[
     "E0056", "E0057", "E0058", "E0059", "E0060", "E0061", "E0062", "E0063", "E0064", "E0065",
     "E0066", "E0067", "E0069", "E0071", "E0072", "E0042", "E0043", "E0068", "E0073", "E0074",
     "E0075", "E0076", "E0077", "E0078", "E0079", "E0080", "E0081", "E0082", "E0083", "E0084",
-    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087", "E0088", "E0089",
+    "E0085", "E0045", "E0046", "E0047", "E0048", "E0086", "E0087", "E0088", "E0089", "E0090",
 ];
 
 /// A catalog entry: the explanation and a pair of examples.
@@ -628,6 +628,14 @@ pub fn sample_messages() -> Vec<(&'static str, Msg)> {
     ];
     samples.push(("E0089", unsafe_module_not_listed("storage.raw_buffers")));
     samples.push(("E0089", unsafe_module_not_marked("storage.raw_buffers")));
+    for mistake in [
+        MainMistake::TypeParameters,
+        MainMistake::Parameters,
+        MainMistake::Result,
+        MainMistake::Fails,
+    ] {
+        samples.push(("E0090", main_signature(mistake)));
+    }
     for mistake in sample_manifest_mistakes() {
         samples.push(("E0088", manifest_mistake(&mistake)));
     }
@@ -802,8 +810,8 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "function connect(host as Text, named port as Int) returns Text:\n    return host\n",
         ),
         "E0044" => (
-            "A type implements an interface once, in the module that declares the type or the interface. Remove the second implementation or move it there.",
-            "Тип реализует интерфейс один раз, в модуле, где объявлен тип или интерфейс. Удалите вторую реализацию или перенесите её туда.",
+            "A type implements an interface once, in the package that declares the type or the interface (L-31). Remove the second implementation or move it there.",
+            "Тип реализует интерфейс один раз, в пакете, где объявлен тип или интерфейс (Я-31). Удалите вторую реализацию или перенесите её туда.",
             "struct P:\n    x as Int\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"p\"\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"q\"\n",
             "struct P:\n    x as Int\n\nextend P with Display:\n    function to_text(self) returns Text:\n        return \"p\"\n",
         ),
@@ -1083,6 +1091,12 @@ fn semantic_entry(code: &str) -> Option<EntryText> {
             "unsafe module\n\nlet A as Int = 1\n",
             "let A as Int = 1\n",
         ),
+        "E0090" => (
+            "A program starts at `main` of the module given to `unio run` or `unio build` (C-15, runtime 6.1). `main` takes no parameters, has no type parameters and no `fails with`, and returns `Int` (the exit code, 0 to 100) or nothing. The arguments of the program are read with `std.args.list()` or declared with the parameters of `std.args`, and errors are handled inside `main`. The error is at the name of `main`: remove the parameters and read the arguments in the body, or change the result.",
+            "Программа начинается с `main` модуля, переданного `unio run` или `unio build` (К-15, runtime 6.1). У `main` нет параметров, параметров типа и `fails with`, и она возвращает `Int` (код выхода от 0 до 100) или ничего. Аргументы программы читаются через `std.args.list()` или объявляются параметрами `std.args`, а ошибки обрабатываются внутри `main`. Ошибка указана у имени `main`: уберите параметры и прочитайте аргументы в теле или измените результат.",
+            "public function main(arguments as List[Text]):\n    print(\"{arguments.length()} arguments\")\n",
+            "import std.args\n\npublic function main():\n    print(\"{args.list().length()} arguments\")\n",
+        ),
         _ => return None,
     })
 }
@@ -1358,9 +1372,9 @@ pub fn second_implementation(interface: &str, ty: &str) -> Msg {
 pub fn foreign_implementation(interface: &str, ty: &str) -> Msg {
     Msg::new(
         format!(
-            "'{ty}' can implement '{interface}' only in the module of the type or of the interface"
+            "'{ty}' can implement '{interface}' only in the package of the type or of the interface"
         ),
-        format!("'{ty}' может реализовать '{interface}' только в модуле типа или интерфейса"),
+        format!("'{ty}' может реализовать '{interface}' только в пакете типа или интерфейса"),
     )
 }
 
@@ -1820,6 +1834,38 @@ pub fn unsafe_module_not_listed(module: &str) -> Msg {
     Msg::new(
         format!("the module '{module}' carries 'unsafe module', but package.unsafe_modules does not list it; add it to the list or remove the marker"),
         format!("модуль '{module}' помечен 'unsafe module', но его нет в package.unsafe_modules; добавьте его в список или уберите пометку"),
+    )
+}
+
+/// What is wrong with the signature of `main` (E0090).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MainMistake {
+    TypeParameters,
+    Parameters,
+    Result,
+    Fails,
+}
+
+/// E0090: `main` of a given module has a signature with which no program can start.
+pub fn main_signature(mistake: MainMistake) -> Msg {
+    let (en, ru) = match mistake {
+        MainMistake::TypeParameters => ("it has type parameters", "у неё есть параметры типа"),
+        MainMistake::Parameters => (
+            "it has parameters; read the arguments with std.args.list()",
+            "у неё есть параметры; читайте аргументы через std.args.list()",
+        ),
+        MainMistake::Result => (
+            "it returns a type other than Int",
+            "она возвращает тип, отличный от Int",
+        ),
+        MainMistake::Fails => (
+            "it has 'fails with'; handle the errors inside main",
+            "у неё есть 'fails with'; обработайте ошибки внутри main",
+        ),
+    };
+    Msg::new(
+        format!("main must be 'main()' returning Int or nothing, but {en}"),
+        format!("main должна быть 'main()', возвращающей Int или ничего, но {ru}"),
     )
 }
 

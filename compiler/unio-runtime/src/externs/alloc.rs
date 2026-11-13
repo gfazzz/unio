@@ -6,6 +6,7 @@ use crate::externs::float_text::{float_to_text, text_to_float};
 use crate::fault::{FaultKind, Outcome};
 use crate::runtime::Runtime;
 use crate::value::{OrderedSet, Text, Value};
+use std::rc::Rc;
 
 pub const BINDINGS: &[(&str, ExternFn)] = &[
     ("Int.to_text", int_to_text),
@@ -37,8 +38,11 @@ pub const BINDINGS: &[(&str, ExternFn)] = &[
     ("std.text.to_nfd", text_to_nfd),
     ("std.text.graphemes", text_graphemes),
     ("std.text.unicode_version", unicode_version),
+    ("std.text.decode_utf8_step", decode_utf8_step),
     ("Bytes", bytes_new),
+    ("bytes_of", bytes_of),
     ("Bytes.length", bytes_length),
+    ("Bytes.slice", bytes_slice),
     ("Bytes.to_text", bytes_to_text),
     ("List.length", list_length),
     ("List.get", list_get),
@@ -487,6 +491,116 @@ fn bytes_length(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
 fn bytes_to_text(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
     let data = bytes(runtime, arguments, 0)?;
     Ok(Value::option(String::from_utf8(data).ok().map(Value::text)))
+}
+
+/// The bytes of the values, in order; none if a value is outside 0..255. The bytes are counted
+/// against the heap limit before they are allocated.
+fn bytes_of(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let items = match any(runtime, arguments, 0)? {
+        Value::List(items) => items,
+        other => {
+            return Err(runtime.fault(
+                FaultKind::InvalidArgument,
+                format_args!("internal: expected a List, found a {}", other.kind()),
+            ))
+        }
+    };
+    let mut data = Vec::new();
+    super::reserve(runtime, &mut data, items.len())?;
+    for item in items.iter() {
+        match item {
+            Value::Int(v) => match u8::try_from(*v) {
+                Ok(byte) => data.push(byte),
+                Err(_) => return Ok(Value::option(None)),
+            },
+            other => {
+                return Err(runtime.fault(
+                    FaultKind::InvalidArgument,
+                    format_args!("internal: expected an Int, found a {}", other.kind()),
+                ))
+            }
+        }
+    }
+    Ok(Value::option(Some(Value::bytes(data))))
+}
+
+/// The bytes from start up to, but not including, end; a fault outside 0..length() or when
+/// start is after end. The copy is counted against the heap limit before it is allocated.
+fn bytes_slice(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let start = int(runtime, arguments, 1)?;
+    let end = int(runtime, arguments, 2)?;
+    let data = match any(runtime, arguments, 0)? {
+        Value::Bytes(b) => b,
+        other => {
+            return Err(runtime.fault(
+                FaultKind::InvalidArgument,
+                format_args!("internal: expected Bytes, found a {}", other.kind()),
+            ))
+        }
+    };
+    let start = position(runtime, start, data.len(), "slice start")?;
+    let end = position(runtime, end, data.len(), "slice end")?;
+    if start > end {
+        return Err(runtime.fault(
+            FaultKind::IndexOutOfRange,
+            format_args!("slice start {start} is after its end {end}"),
+        ));
+    }
+    let mut part = Vec::new();
+    super::reserve(runtime, &mut part, end - start)?;
+    part.extend_from_slice(&data[start..end]);
+    Ok(Value::bytes(part))
+}
+
+/// One step of the UTF-8 decoder of `std.text` (S-18): decodes `pending` (the start of a
+/// sequence that the previous chunk ended with, at most 3 bytes) followed by `chunk`. The
+/// result `Utf8Step` holds the text of every complete character before the first invalid
+/// sequence, `rest`, the bytes of a sequence that is incomplete at the end of the input and
+/// may be completed by the next chunk (at most 3 bytes, empty when an invalid sequence was
+/// found), and `invalid_at`, the index in pending and chunk together of the first byte of the
+/// first invalid sequence, if there is one. Memory is the length of pending and chunk, counted
+/// against the heap limit before it is allocated.
+fn decode_utf8_step(runtime: &mut Runtime, arguments: &mut [Value]) -> Outcome {
+    let (pending, chunk) = match (
+        argument(runtime, arguments, 0)?,
+        argument(runtime, arguments, 1)?,
+    ) {
+        (Value::Bytes(p), Value::Bytes(c)) => (Rc::clone(p), Rc::clone(c)),
+        (p, c) => {
+            return Err(runtime.fault(
+                FaultKind::InvalidArgument,
+                format_args!(
+                    "internal: expected Bytes, found a {} and a {}",
+                    p.kind(),
+                    c.kind()
+                ),
+            ))
+        }
+    };
+    let length = pending.len().saturating_add(chunk.len());
+    let mut data = Vec::new();
+    super::reserve(runtime, &mut data, length)?;
+    data.extend_from_slice(&pending);
+    data.extend_from_slice(&chunk);
+    let (valid, rest, invalid_at) = match std::str::from_utf8(&data) {
+        Ok(_) => (data.len(), data.len(), None),
+        Err(e) => match e.error_len() {
+            // The input ends inside a sequence that the next chunk may complete.
+            None => (e.valid_up_to(), data.len(), None),
+            Some(_) => (e.valid_up_to(), e.valid_up_to(), Some(e.valid_up_to())),
+        },
+    };
+    let rest_bytes = data[valid..rest].to_vec();
+    data.truncate(valid);
+    let text = String::from_utf8(data).expect("the prefix was validated as UTF-8");
+    Ok(Value::record(
+        "Utf8Step",
+        vec![
+            ("text", Value::text(text)),
+            ("rest", Value::bytes(rest_bytes)),
+            ("invalid_at", Value::option(invalid_at.map(count))),
+        ],
+    ))
 }
 
 // ---------------------------------------------------------------- List

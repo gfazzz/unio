@@ -30,8 +30,8 @@
 | [alloc/builtin/list.unio](../../stdlib/alloc/builtin/list.unio) | Методы `List[T]` | `find`, `map`, `filter`, `enumerate`, `contains`, `max`, `sorted`, `sorted_by`, `fold`, `partition`, `group_by`, `zip`, `chunks`, `windows`, `try_map/filter/fold`, `iterator`, `sorted_with` (сортировка слиянием) | длина, `get`, `append`, `remove_last` |
 | [alloc/builtin/map.unio](../../stdlib/alloc/builtin/map.unio), [set.unio](../../stdlib/alloc/builtin/set.unio) | `Map[K, V]`, `Set[T]`, `List.to_set` | `contains`, `keys`, `values`, `union`, `intersection`, `difference` | хранение записей |
 | [alloc/builtin/int.unio](../../stdlib/alloc/builtin/int.unio), [float.unio](../../stdlib/alloc/builtin/float.unio) | Текстовая форма чисел | — | `to_text` |
-| [alloc/builtin/bytes.unio](../../stdlib/alloc/builtin/bytes.unio) | `Bytes` | `is_empty` | создание, `length`, `to_text` |
-| [alloc/text.unio](../../stdlib/alloc/text.unio) | `std.text`: `join`, `split`, `from_code_point`, `to_nfc`, `to_nfd`, `graphemes`, `unicode_version` | — | все, последние четыре — на таблицах базы символов Unicode 15.0.0 в среде выполнения |
+| [alloc/builtin/bytes.unio](../../stdlib/alloc/builtin/bytes.unio) | `Bytes`, `bytes_of` | `is_empty`, `checked_slice` | создание (`Bytes()`, `bytes_of` из значений 0..255), `length`, `slice`, `to_text` |
+| [alloc/text.unio](../../stdlib/alloc/text.unio) | `std.text`: `join`, `split`, `from_code_point`, `to_nfc`, `to_nfd`, `graphemes`, `unicode_version`; потоковый декодер UTF-8 `Utf8Decoder` (`utf8_decoder`, `decode`, `finish`, `pending_bytes`) с `Utf8Error` и `Utf8Problem` (Б-18) | состояние декодера, его смещения и ошибки | `join`, `split`, `from_code_point`, нормализация и графемы на таблицах базы символов Unicode 15.0.0 в среде выполнения; один шаг проверки UTF-8 (`decode_utf8_step`) |
 | [alloc/collections.unio](../../stdlib/alloc/collections.unio) | `std.collections`: `Deque`, `PriorityQueue`, `counts`, `most_common` | все | — |
 | [alloc/decimal.unio](../../stdlib/alloc/decimal.unio) | `std.decimal`: `Decimal`, `Rounding`, `parse`, `from_int`, `from_float` (Б-1a) | все: целые любого размера по основанию 10^9 | — |
 | [alloc/json.unio](../../stdlib/alloc/json.unio) | `std.json`: `Value`, `parse`, `encode`, `encode_checked`, `decode` | разбор и запись | преобразования между типом и `Value`, которые порождает компилятор |
@@ -45,7 +45,7 @@
 | [std/random.unio](../../stdlib/std/random.unio) | `std.random`: `Generator` (MRG32k3a, не для криптографии), `seeded`, `from_entropy`; `secure_bytes`, `secure_int` и `RandomError` — единственный API, пригодный для ключей и секретов | генератор, ограниченные целые, числа с плавающей точкой, `shuffled`, `choose` | энтропия системы (эффект `random`); отсутствие источника — `RandomError`, никогда не более слабый генератор |
 | [std/log.unio](../../stdlib/std/log.unio) | `std.log`: `Level`, `Logger`, `debug`, `info`, `warning`, `error`, `format_record` | все, в стандартный поток ошибок | — |
 | [std/env.unio](../../stdlib/std/env.unio) | `std.env`: переменные, домашний каталог | — | обе функции |
-| [std/files.unio](../../stdlib/std/files.unio) | `std.files`: потоки байтов, разрешение путей, каталоги, атомарная запись, копирование, переименование | `open_reader`, `FileReader.read_bytes/release`, `write_text`, `write_bytes`, `copy_file`, `create_directories`, `list_tree`, протокол фиксации `AtomicFile` | отдельные системные вызовы, `rename` без замены |
+| [std/files.unio](../../stdlib/std/files.unio) | `std.files`: ограниченные потоки байтов и текста, разрешение путей, каталоги, атомарная запись, копирование, переименование | `open_reader`, `FileReader.read_bytes/read_text/release`, `write_text`, `write_bytes`, `copy_file`, `create_directories`, `list_tree`, протокол фиксации `AtomicFile` | отдельные системные вызовы, `rename` без замены |
 | [std/process.unio](../../stdlib/std/process.unio) | `std.process`: запуск программ без оболочки, с ограничением времени | — | `run` |
 
 ## Общие правила модулей
@@ -83,6 +83,7 @@ using file = try files.open_atomic(path):
 | `Int.abs` | значение равно `MINIMUM_INT` | `Int.checked_abs` |
 | `List.slice` | границы вне `0..length()` или переставлены | `List.checked_slice` |
 | `Text.slice` | границы вне `0..length()` или переставлены | `Text.checked_slice` |
+| `Bytes.slice` | границы вне `0..length()` или переставлены | `Bytes.checked_slice` |
 | `Text.char_at` | позиция вне `0..length()` | `Text.checked_char_at` |
 | `Text.repeat` | число повторений отрицательно | `Text.checked_repeat` |
 | `std.text.split` | разделитель пуст | `std.text.checked_split` |
@@ -153,6 +154,7 @@ using file = try files.open_atomic(path):
 | Контекст ошибки | `errors.context("reading configuration", cause)` сохраняет типизированную причину; `cause.diagnostic_code()` не зависит от локализации |
 | Свойства | `try test.check_property(generate, shrink, holds, seed = 7, cases = 100, max_shrinks = 500)` возвращает `none` либо воспроизводимый контрпример |
 | Пути | `Path("link/../file").normalize()` сохраняет `..`; `try files.resolve(path)` обращается к ОС; `components()` сохраняет диск/UNC как единый якорь; `path.relative_to(file, base)` работает лексически |
+| Потоки текста | `reader.read_text(max_bytes = 65536)` возвращает some(текст) или none в конце; символ, разрезанный между чтениями, сохраняется до завершения, неверный UTF-8 даёт `IoError` вида `InvalidData` со смещением в байтах после текста перед ним, а файл, кончающийся внутри символа, даёт ту же ошибку (Б-16, Б-18); `text.utf8_decoder()` делает то же для любых порций `Bytes`, храня между ними не более 3 байт |
 | Unicode | `text.to_nfc(a) == text.to_nfc(b)` сравнивает канонически эквивалентные записи; `text.graphemes(s)` сохраняет семейный эмодзи или флаг целым; ничто не нормализуется неявно |
 | Decimal | `decimal.parse("0.1")` плюс `decimal.parse("0.2")` — ровно 0.3; `a / b` точно или авария, `a.divide_rounded(b, 2, Rounding.HalfEven)` называет округление; `decimal.from_float(x, 2, Rounding.HalfUp)` — единственный путь из Float |
 | Время | `time.monotonic().since(start)` измеряет; `time.now()` — текст RFC 3339 в UTC; функция принимает `clock as time.Clock`, а тест передаёт `time.manual_clock(...)` |

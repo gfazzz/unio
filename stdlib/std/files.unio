@@ -11,6 +11,8 @@
 ## An operation blocked by the sandbox fails with kind PermissionDenied; exists and is_directory report it as false.
 unsafe module
 
+from std.text import Utf8Decoder, Utf8Error, Utf8Problem, utf8_decoder
+
 public enum IoErrorKind:
     NotFound
     PermissionDenied
@@ -58,6 +60,7 @@ public struct FileReader:
     var state as ReaderState = ReaderState.Open
     var read_step as Function[(Int, Path, Int) -> ReadStep] = system_read_chunk
     close_step as Function[(Int) fails with IoError] = system_close
+    var decoder as Utf8Decoder = utf8_decoder()
 
 ## A native read may deliver bytes and a terminal status together; never lose those bytes.
 struct ReadStep:
@@ -107,6 +110,64 @@ extend FileReader:
         var self,
         named max_bytes as Int = 65536,
     ) returns Option[Bytes] fails with IoError:
+        if self.decoder.pending_bytes() > 0:
+            let problem = IoError(
+                path = self.path,
+                kind = IoErrorKind.InvalidData,
+                reason = "read_text holds part of a character; continue with read_text",
+            )
+            self.state = ReaderState.Failed(problem)
+            fail problem
+        return try self.read_chunk(max_bytes)
+
+    ## some(nonempty text) of the next characters of the file, or permanent none at the end
+    ## (S-16, S-18). Each read of the system takes at most max_bytes bytes, and the text is at
+    ## most max_bytes + 3 bytes of UTF-8: a character whose bytes are split between reads is kept
+    ## until the read that completes it, however the file is cut. Bytes that are not UTF-8 fail
+    ## with kind InvalidData and their byte offset in reason, after the text before them has been
+    ## returned; a file that ends inside a character fails the same way at the end. Errors are
+    ## permanent, as for read_bytes. Memory is O(max_bytes), independent of the file size.
+    ## read_bytes after a read_text that kept part of a character fails with InvalidData.
+    ## Example:
+    ##     try:
+    ##         using reader = try open_reader(Path("no-such-directory/notes.txt")):
+    ##             var characters = 0
+    ##             while true:
+    ##                 match try reader.read_text(max_bytes = 65536):
+    ##                     case some(part): characters = characters + part.length()
+    ##                     case none: break
+    ##     on IoError as e:
+    ##         assert e.kind != IoErrorKind.AlreadyExists
+    public function read_text(
+        var self,
+        named max_bytes as Int = 65536,
+    ) returns Option[Text] fails with IoError:
+        while true:
+            # An error that the previous call found after its text is reported first.
+            let _ = try self.decoder.decode(Bytes()) on Utf8Error as e:
+                fail self.not_utf8(e)
+            match try self.read_chunk(max_bytes):
+                case some(chunk):
+                    let part = try self.decoder.decode(chunk) on Utf8Error as e:
+                        fail self.not_utf8(e)
+                    if not part.is_empty(): return some(part)
+                case none:
+                    try:
+                        try self.decoder.finish()
+                    on Utf8Error as e: fail self.not_utf8(e)
+                    return none
+
+    ## The error of bytes that are not UTF-8, kept as the error of every later read.
+    function not_utf8(var self, problem as Utf8Error) returns IoError:
+        var reason = "invalid UTF-8 at byte {problem.offset}"
+        if problem.problem == Utf8Problem.Truncated:
+            reason = "the file ends inside a UTF-8 character that starts at byte {problem.offset}"
+        let failure = IoError(path = self.path, kind = IoErrorKind.InvalidData, reason = reason)
+        self.state = ReaderState.Failed(failure)
+        return failure
+
+    ## One read of at most max_bytes bytes, for read_bytes and read_text.
+    function read_chunk(var self, max_bytes as Int) returns Option[Bytes] fails with IoError:
         match self.state:
             case ReaderState.Failed(problem): fail problem
             case ReaderState.Closed:
@@ -170,6 +231,74 @@ function unexpected_read(descriptor as Int, path as Path, max_bytes as Int) retu
 
 function no_close(descriptor as Int) fails with IoError:
     pass
+
+function bytes_read(values as List[Int], path as Path) returns ReadStep:
+    let data = bytes_of(values)
+    assert data.is_some()
+    return ReadStep(data = data or Bytes(), end = false)
+
+function text_then_invalid(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
+    return bytes_read([0x61, 0xFF, 0x62], path)
+
+function text_then_partial(descriptor as Int, path as Path, max_bytes as Int) returns ReadStep:
+    return bytes_read([0x61, 0xC3], path)
+
+test "read_text returns the text before invalid UTF-8, then the error, without more reads":
+    using reader = FileReader(
+        path = Path("test"),
+        descriptor = 1,
+        read_step = text_then_invalid,
+        close_step = no_close,
+    ):
+        try:
+            assert (try reader.read_text()) == some("a")
+        on IoError as e: assert_fail(e.reason)
+        reader.read_step = unexpected_read
+        for attempt in range(0, 2):
+            try:
+                let text = try reader.read_text()
+                assert_fail("expected invalid UTF-8")
+            on IoError as e:
+                assert e.kind == IoErrorKind.InvalidData
+                assert e.reason == "invalid UTF-8 at byte 1"
+        try:
+            let data = try reader.read_bytes()
+            assert_fail("read bytes after the error")
+        on IoError as e: assert e.reason == "invalid UTF-8 at byte 1"
+
+test "read_text reports a file that ends inside a character":
+    using reader = FileReader(
+        path = Path("test"),
+        descriptor = 1,
+        read_step = text_then_partial,
+        close_step = no_close,
+    ):
+        try:
+            assert (try reader.read_text()) == some("a")
+        on IoError as e: assert_fail(e.reason)
+        reader.read_step = end_read
+        try:
+            let text = try reader.read_text()
+            assert_fail("expected a truncated character")
+        on IoError as e:
+            assert e.kind == IoErrorKind.InvalidData
+            assert e.reason == "the file ends inside a UTF-8 character that starts at byte 1"
+
+test "read_bytes does not drop the part of a character that read_text keeps":
+    using reader = FileReader(
+        path = Path("test"),
+        descriptor = 1,
+        read_step = text_then_partial,
+        close_step = no_close,
+    ):
+        try:
+            assert (try reader.read_text()) == some("a")
+        on IoError as e: assert_fail(e.reason)
+        reader.read_step = unexpected_read
+        try:
+            let data = try reader.read_bytes()
+            assert_fail("read bytes inside a character")
+        on IoError as e: assert e.kind == IoErrorKind.InvalidData
 
 test "EOF is permanent until release, without extra native reads":
     using reader = FileReader(

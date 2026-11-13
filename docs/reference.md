@@ -61,7 +61,7 @@ A source file is UTF-8 text with the extension `.unio` (L-1). Line ends are LF o
 
 **`interface_decl` and `interface_member`.** An interface is a set of method signatures (`function_sig`). A member with a `block` has a default implementation, which reaches the value only through the methods of the interface (L-6c). Inside an interface `Self` is the implementing type. An interface is a constraint (`[T with Shape]`, resolved at compile time) and a type: a value of type `Shape` holds a value of any type that implements it, and a call on it is dispatched at run time to that type's method (L-6b). An interface whose methods use `Self` outside the receiver or have type parameters cannot be a type (E0071). An interface value has no `==`. A resource cannot be an interface value.
 
-**`extend_decl` and `member`.** `extend T:` adds methods (with `self`) and functions of the type (without `self`, called as `T.f(...)`, L-23d) to a type of the same module; such a member is private unless `public` (L-23c). `extend T with I:` implements the interface `I` for `T`: it defines every method of `I` without a default, with the signature of `I` (E0069), and may replace defaults. Its methods are visible wherever `T` and `I` both are, and `public` is not written there. A type implements an interface once, in the module of the type or of the interface (E0044, L-31). Operators come from such implementations: `extend Money with Add` gives `+` (L-9a). `extend[T] List[T]:` extends a generic type with type parameters of its own.
+**`extend_decl` and `member`.** `extend T:` adds methods (with `self`) and functions of the type (without `self`, called as `T.f(...)`, L-23d) to a type of the same module; such a member is private unless `public` (L-23c). `extend T with I:` implements the interface `I` for `T`: it defines every method of `I` without a default, with the signature of `I` (E0069), and may replace defaults. Its methods are visible wherever `T` and `I` both are, and `public` is not written there. A type implements an interface once, in the package of the type or of the interface (E0044, L-31): any module of that package may hold it. Operators come from such implementations: `extend Money with Add` gives `+` (L-9a). `extend[T] List[T]:` extends a generic type with type parameters of its own.
 
 **`constant_decl`.** A top-level `let NAME as Type = expression` declares a module constant. The type may be left out only for a private constant whose initializer determines it (L-8). Constants are evaluated once, in dependency order, before `main` or before the first test that needs them; a fault in an initializer ends the program (runtime 6.3). There is no global mutable state: a top-level `var` does not exist.
 
@@ -188,7 +188,7 @@ Patterns appear after `case` and `is`. A pattern either matches a value, binding
 
 ## 7. Programs, packages, and the boundary of the language
 
-- **Programs.** A program starts at `public function main()` of the module given to `unio run` or `unio build`. Its exit code is 0, or the `Int` that `main` returns, which must be 0 to 100. A fault ends it with 101 after releasing the open resources, exhaustion of memory or time with 102, and a policy that cannot be met with 103 (C-15, runtime 6).
+- **Programs.** A program starts at `public function main()` of the module given to `unio run` or `unio build`; `main` takes no parameters (arguments come from `std.args.list()`) and has no `fails with`, and any other signature is E0090. Its exit code is 0, or the `Int` that `main` returns, which must be 0 to 100. A fault ends it with 101 after releasing the open resources, exhaustion of memory or time with 102, and a policy that cannot be met with 103 (C-15, runtime 6).
 - **Errors and faults.** An error is a value in the signature, handled by `try` and `on`; a fault is a bug or an exhausted check that ends the program in a controlled way and cannot be handled (concept section 3).
 - **Packages and permissions.** A package is a directory with `unio.toml` (T-6, [packages.md](packages.md)). The effects of each function (`files.read`, `files.write`, `env`, `process`, `network`, `allocates`) are derived from the calls it makes (L-9b) and must be permitted by the manifest (E0085); `allocates`, `clock` and `random` need no permission, and a package without a manifest or without a `[permissions]` table permits none of the others. The manifest itself is checked as a whole (E0088), and its `unsafe_modules` must name exactly the modules marked `unsafe module` (E0089). Every run happens in the sandbox those permissions describe (SB-1, runtime 9).
 - **Layers and profiles.** The standard library has the layers `core`, `alloc` and `std`; a module of a layer, and a package checked with `--profile=core`, uses nothing above what it may (E0084, E0087; semantics 8).
@@ -221,7 +221,7 @@ Every diagnostic has a code, a message in English or Russian, a span, an explana
 | `E0041` | Parameters in the wrong groups or order, or a named function shape that does not fit | RFC 0001 |
 | `E0042` | One variable reaches two `var` parameters of one call | RFC 0001, semantics 6.3 |
 | `E0043` | A `Result` or `std.process.Output` dropped or never read | RFC 0001, semantics 6.6 |
-| `E0044` | An interface implemented twice, or outside the module of the type or the interface | RFC 0001, semantics 3.6 |
+| `E0044` | An interface implemented twice, or outside the package of the type or the interface | RFC 0001, semantics 3.6 |
 | `E0045` | `Float`, or a type built from it, where `Order` or `Hash` is required | RFC 0001, semantics 2.9, 3.3 |
 | `E0046` | Automatic JSON conversion of a type with a private field | RFC 0001, semantics 3.8 |
 | `E0047` | A `Range` used as a `List` | RFC 0001, semantics 4.9 |
@@ -266,5 +266,6 @@ Every diagnostic has a code, a message in English or Russian, a span, an explana
 | `E0087` | Call through an estimated function value that may need more than `core` | semantics 8.4, RFC 0005 |
 | `E0088` | A mistake in the manifest `unio.toml` | semantics 8.6, RFC 0008 |
 | `E0089` | `unsafe_modules` does not name exactly the modules marked `unsafe module` | semantics 8.6, RFC 0004 |
+| `E0090` | `main` of a given module has parameters, type parameters, a result other than `Int`, or `fails with` | semantics 3.9, runtime 6.1 |
 
 Faults and exit codes are not diagnostics: they are the run-time outcomes of runtime.md sections 4 and 6.
