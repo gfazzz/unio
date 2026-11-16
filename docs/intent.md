@@ -1,6 +1,6 @@
 # The intent layer: people describe, AI writes Unio
 
-Version: 0.1 (draft). Russian localization: [ru/intent.md](ru/intent.md).
+Version: 0.2 (draft). Changes from 0.1: answers to open questions 1 and 5 proposed by readers in the discussion of the article. Russian localization: [ru/intent.md](ru/intent.md).
 
 Status: an idea for a track after release 0.1. This note records no decision: it changes no requirement, no section of the plan, and nothing in the language, and it adds nothing to the conditions of release 0.1. A decision drawn from it goes to the plan of a later release or, if it touches the language, to an RFC ([rfcs/README.md](rfcs/README.md)).
 
@@ -38,11 +38,14 @@ When an abstraction leaks, the person goes down into code where the signatures, 
 
 ## 5. Open questions
 
-1. **How formal is the top layer?** Free text cannot be checked, and the agent fills the gaps by guessing. A full formal specification, as in Lean or in Ada with SPARK (both raised in the same discussion), checks everything but needs specialists, which brings back a hard language for the person. The answer is likely in between: the purpose in plain words, and the properties, the interface, and the permissions in a structure that can be turned into checks mechanically.
+1. **How formal is the top layer?** Free text cannot be checked, and the agent fills the gaps by guessing. A full formal specification, as in Lean or in Ada with SPARK (both raised in the same discussion), checks everything but needs specialists, which brings back a hard language for the person. The answer is likely in between: the purpose in plain words, and the properties, the interface, and the permissions in a structure that can be turned into checks mechanically. Readers proposed three refinements:
+   - **Where the boundary lies.** Between a prompt for a model and machine code, the line is what can be checked mechanically: everything that can become a check is written in structure, and only the purpose stays in words.
+   - **An intermediate specification.** The person does not have to write the formal part. The model translates requirements written in free text into a formal specification; the person reads and reviews only that specification, which is shorter than the code and closer to what was meant; the Unio code is then checked against the specification mechanically. The weak point moves but does not vanish: the translation from free text into the specification is also made by a model and is checked only by the person who reads it.
+   - **The forms engineers already use.** The top layer need not be text. Engineers explain systems to each other with state diagrams and entity-relationship diagrams, and much of them turns into checks almost mechanically: the states become the variants of an `enum`, the allowed transitions become property tests ("an order that is paid never returns to draft"), and entities and their relations become structs.
 2. **What happens to a property that cannot become a test?** It is either rewritten until it can, in the spirit of concept section 1.2, or marked as unchecked so the reader sees it.
 3. **How do the layers stay in step?** When the lower layer is changed by hand or by an agent, the intent can drift from it. Zero keeps an explicit boundary between its graph and its text projections ([influences.md](influences.md), section 10); the intent layer needs an equivalent.
 4. **Who checks the purpose?** The part written in plain words has no mechanical check; only the person can judge whether the code does what was meant.
-5. **Does the top layer grow from what Unio already has?** Documentation comments and `test` blocks written before the code are already a small intent layer ([concept.md](concept.md), 1.2: the intention in a documentation comment, then a test, then the code). The top layer may grow from them rather than start as a new language.
+5. **Does the top layer grow from what Unio already has?** Documentation comments and `test` blocks written before the code are already a small intent layer ([concept.md](concept.md), 1.2: the intention in a documentation comment, then a test, then the code). The top layer may grow from them rather than start as a new language. A reader put it more broadly: what is missing is not another language but methods and tools for structuring specifications, which today are usually encoded in the implementation. The direction of the field supports the layering: each step from assembly to C, Rust, and Python moved away from the machine, and programming in natural language would push the intermediate layer deeper still; the layer still has to be checkable for the moment an abstraction leaks.
 
 ## 6. A possible first step
 
