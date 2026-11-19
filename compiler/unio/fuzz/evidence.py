@@ -243,10 +243,12 @@ def aggregate(args):
             total["execs"] += target["execs"]
             total["edges"] = max(total["edges"], target["edges"])
             total["stages"].append(number)
-            if target["counters"] == 0:
-                problems.append("stage {}: {} ran without coverage instrumentation".format(number, name))
+            # A worker writes its counters only once it has run inputs: a target that ran none
+            # left no counters, which says nothing about the instrumentation.
             if target["execs"] == 0:
-                problems.append("stage {}: {} ran no input".format(number, name))
+                problems.append("stage {}: {} ran no input (its coverage is unknown)".format(number, name))
+            elif target["counters"] == 0:
+                problems.append("stage {}: {} ran without coverage instrumentation".format(number, name))
     if len(toolchains) > 1:
         problems.append("the stages ran on different toolchains")
     required = args.hours * 3600.0

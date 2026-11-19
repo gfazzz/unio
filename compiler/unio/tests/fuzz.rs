@@ -4,6 +4,9 @@
 
 mod common;
 #[cfg(unix)]
+#[path = "../fuzz/corpus.rs"]
+mod corpus;
+#[cfg(unix)]
 #[path = "../fuzz/supervisor.rs"]
 mod supervisor;
 #[path = "../fuzz/targets.rs"]
@@ -313,4 +316,52 @@ fn fuzz_target_without_its_time_fails_the_run() {
     assert!(summary.contains("seconds required"), "{summary}");
     let (result, _) = supervised("few", 1, ["ok", "ok"]);
     assert!(result.unwrap_err().contains("fewer than the 2 targets"));
+}
+
+/// A worker that starts on the corpus of an earlier run keeps all of it, also when none of the
+/// seeds reaches anything new: the fuzzer kept only the seeds it had not seen, so from the
+/// second stage on the worker of `archive` (and from the third that of `manifest`), whose seeds
+/// were all in the corpus, started with no input, panicked on the empty corpus, and ended with
+/// status 101, a thousand times, with no statistics written (run 43573509102,
+/// crashes/archive-crash-786e8e025a17e9e5 and crashes/manifest-crash-908292aa143e2ce2, the
+/// last seed each ran).
+#[cfg(unix)]
+#[test]
+fn fuzz_worker_resumes_from_the_corpus_of_an_earlier_run() {
+    let dir = scratch("corpus");
+    let seeds = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+    // The first run: the corpus is empty, and two of the seeds reach something new.
+    let mut first = corpus::Corpus::new(dir.clone());
+    let mut runs = 0;
+    first.start(seeds.clone(), true, &mut |data, _| {
+        runs += 1;
+        data != b"b"
+    });
+    assert_eq!((runs, first.inputs.len()), (3, 2));
+    // The later runs, with and without instrumentation: the corpus on disk is run and kept, and
+    // the seeds it holds are not kept twice.
+    for instrumented in [true, false] {
+        let mut later = corpus::Corpus::new(dir.clone());
+        let mut runs = 0;
+        later.start(seeds.clone(), instrumented, &mut |_, _| {
+            runs += 1;
+            false
+        });
+        assert_eq!(runs, 5, "instrumented {instrumented}");
+        let mut kept = later.inputs.clone();
+        kept.sort();
+        let expected = if instrumented {
+            vec![b"a".to_vec(), b"c".to_vec()]
+        } else {
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        };
+        assert_eq!(kept, expected, "instrumented {instrumented}");
+    }
+    // An empty directory and no seeds still leave a base for the mutations.
+    let empty = scratch("corpus-empty");
+    let mut none = corpus::Corpus::new(empty.clone());
+    none.start(Vec::new(), true, &mut |_, _| false);
+    assert_eq!(none.inputs, vec![Vec::<u8>::new()]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&empty);
 }
