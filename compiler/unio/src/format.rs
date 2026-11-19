@@ -17,7 +17,12 @@ const STEP: usize = 4;
 
 /// Formats a source. A source with errors is not formatted; its diagnostics are returned.
 pub fn format_source(source: &str) -> Result<String, Vec<Diagnostic>> {
-    let source = source.to_string();
+    // The lexer skips a byte order mark at the start, so its offsets count from after it: the
+    // formatter reads the source with the same offsets, and writes no mark.
+    let source = source
+        .strip_prefix('\u{feff}')
+        .unwrap_or(source)
+        .to_string();
     crate::on_front_end_stack(move || {
         let analysis = crate::analyse("<fmt>", &source);
         if analysis.has_errors() {

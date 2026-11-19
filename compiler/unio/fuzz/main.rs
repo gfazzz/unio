@@ -36,18 +36,21 @@
 //! to `tests/data/fuzz/TARGET/` (`tests/fuzz.rs`). `UNIO_FUZZ_FAULT=KIND:TARGET` makes the
 //! worker of TARGET fail on purpose (`fault` below), to check that the supervisor catches it.
 
+#[path = "corpus.rs"]
+mod corpus;
 #[path = "supervisor.rs"]
 mod supervisor;
 #[path = "targets.rs"]
 mod targets;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use corpus::Corpus;
 use supervisor::{fnv, now_secs};
 
 // ---------------------------------------------------------------- coverage
@@ -176,9 +179,15 @@ fn quiet_panics() {
         } else {
             String::new()
         };
+        let what = format!("panicked at {location}: {message}");
+        // A panic of the fuzzer itself, on the main thread, ends the worker: it is shown, so
+        // that the supervisor keeps it in the output of the worker with the crash.
+        if std::thread::current().name() == Some("main") {
+            eprintln!("fuzz: the fuzzer {what}");
+        }
         let mut last = PANIC.lock().unwrap_or_else(|e| e.into_inner());
         if last.is_none() {
-            *last = Some(format!("panicked at {location}: {message}"));
+            *last = Some(what);
         }
     }));
 }
@@ -798,39 +807,6 @@ fn minimize(args: &Args) -> Result<(), String> {
 
 // ---------------------------------------------------------------- the worker
 
-struct Corpus {
-    dir: PathBuf,
-    names: HashSet<String>,
-    inputs: Vec<Vec<u8>>,
-}
-
-impl Corpus {
-    fn add(&mut self, data: Vec<u8>) {
-        let name = fnv(&data);
-        if self.names.insert(name.clone()) {
-            let _ = std::fs::write(self.dir.join(&name), &data);
-            self.inputs.push(data);
-        }
-    }
-
-    /// Files the other workers added since the last look.
-    fn unseen(&mut self) -> Vec<Vec<u8>> {
-        let mut found = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !self.names.contains(&name) {
-                    if let Ok(data) = std::fs::read(entry.path()) {
-                        self.names.insert(name);
-                        found.push(data);
-                    }
-                }
-            }
-        }
-        found
-    }
-}
-
 /// What a worker keeps while it runs inputs.
 struct Session {
     target: String,
@@ -968,11 +944,7 @@ fn worker(args: &Args) -> Result<(), String> {
         archive: kind == targets::Seeds::Archives,
     };
     let mut coverage = Coverage::new();
-    let mut corpus = Corpus {
-        dir: corpus_dir,
-        names: HashSet::new(),
-        inputs: Vec::new(),
-    };
+    let mut corpus = Corpus::new(corpus_dir);
     let mut session = Session {
         target: target.clone(),
         id: id.clone(),
@@ -984,25 +956,17 @@ fn worker(args: &Args) -> Result<(), String> {
         places: HashMap::new(),
         fault,
     };
-    // The corpus of earlier runs and of the other workers, then the seeds.
-    let mut start: Vec<Vec<u8>> = corpus.unseen();
-    start.extend(seeds);
+    // The corpus of earlier runs and of the other workers, then the seeds (`corpus.rs`).
     let mut last_stats = Instant::now();
-    for data in start {
+    let instrumented = coverage.total() > 0;
+    corpus.start(seeds, instrumented, &mut |data, kept| {
         if last_stats.elapsed() > Duration::from_secs(5) {
             last_stats = Instant::now();
-            write_stats(&stats, &session.stats(corpus.inputs.len(), &coverage));
+            write_stats(&stats, &session.stats(kept, &coverage));
         }
-        // Without instrumentation every seed is kept: there is no coverage to choose by.
-        if session.execute(&data, &mut coverage)
-            || coverage.total() == 0
-            || corpus.inputs.is_empty()
-        {
-            corpus.add(data);
-        } else {
-            corpus.names.insert(fnv(&data));
-        }
-    }
+        session.execute(data, &mut coverage)
+    });
+    write_stats(&stats, &session.stats(corpus.inputs.len(), &coverage));
     eprintln!(
         "fuzz[{id}]: {target}: {} inputs in the corpus, {} of {} counters reached",
         corpus.inputs.len(),

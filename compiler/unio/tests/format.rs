@@ -159,6 +159,23 @@ fn trailing_white_space_is_removed_and_one_line_end_ends_the_file() {
     assert_formats("let A = 1   \n\n\n", "let A = 1\n");
 }
 
+/// The lexer skips a byte order mark at the start of a source, and the formatter reads the
+/// source with the lexer's offsets: with the mark kept, every literal it copied was three bytes
+/// off (`print("hello")` became `print(nt("hel)`), and a test description after a comment
+/// that ends in a character of three bytes panicked (fuzz finding format-panic-1dabfd77a8ac8167,
+/// tests/data/fuzz/format/). The result has no mark.
+#[test]
+fn a_byte_order_mark_does_not_shift_the_source() {
+    assert_formats(
+        "\u{feff}function main():\n    print(\"hello\")\n",
+        "function main():\n    print(\"hello\")\n",
+    );
+    assert_formats(
+        "\u{feff}#\u{fffd}\ntest \"a\":\n    let x = 1\n",
+        "#\u{fffd}\ntest \"a\":\n    let x = 1\n",
+    );
+}
+
 #[test]
 fn a_source_with_errors_is_not_formatted() {
     assert!(format_source("function f(:\n").is_err());
